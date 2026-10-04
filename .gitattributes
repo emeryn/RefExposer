@@ -1,0 +1,5 @@
+# Line endings: LF everywhere (files are used in Linux containers)
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.svg text eol=lf

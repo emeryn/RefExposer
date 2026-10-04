@@ -1,0 +1,403 @@
+{
+  "name": "RefExposer - list, query and download referentials",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000001",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c0000001-0000-4000-8000-000000000001",
+              "name": "baseUrl",
+              "value": "http://localhost:8080",
+              "type": "string"
+            },
+            {
+              "id": "c0000001-0000-4000-8000-000000000002",
+              "name": "referential",
+              "value": "cisa-kev",
+              "type": "string"
+            },
+            {
+              "id": "c0000001-0000-4000-8000-000000000003",
+              "name": "action",
+              "value": "rows",
+              "type": "string"
+            },
+            {
+              "id": "c0000001-0000-4000-8000-000000000004",
+              "name": "search",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "c0000001-0000-4000-8000-000000000005",
+              "name": "filters",
+              "value": "knownRansomwareCampaignUse=Known&dateAdded__gte=2024-01-01",
+              "type": "string"
+            },
+            {
+              "id": "c0000001-0000-4000-8000-000000000006",
+              "name": "limit",
+              "value": 100,
+              "type": "number"
+            },
+            {
+              "id": "c0000001-0000-4000-8000-000000000007",
+              "name": "lookupValue",
+              "value": "CVE-2021-44228",
+              "type": "string"
+            },
+            {
+              "id": "c0000001-0000-4000-8000-000000000008",
+              "name": "downloadFormat",
+              "value": "csv.gz",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000002",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 300],
+      "notes": "Edit here: RefExposer URL, referential id, action (rows | lookup | download) and its parameters."
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.baseUrl }}/api/referentials",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000003",
+      "name": "List referentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "RefExposer API token"
+        }
+      },
+      "notes": "GET /api/referentials: one item per referential readable by the token (id, name, status, row_count, version...)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "f0000001-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "={{ $('Config').first().json.referential }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "f0000001-0000-4000-8000-000000000002",
+              "leftValue": "={{ $json.has_data }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000004",
+      "name": "Keep the chosen referential",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [660, 300],
+      "notes": "Stops here when the referential is unknown, not granted to the token or not published yet."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "e0000001-0000-4000-8000-000000000001",
+                    "leftValue": "={{ $('Config').first().json.action }}",
+                    "rightValue": "rows",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "rows"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "e0000001-0000-4000-8000-000000000002",
+                    "leftValue": "={{ $('Config').first().json.action }}",
+                    "rightValue": "lookup",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "lookup"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "e0000001-0000-4000-8000-000000000003",
+                    "leftValue": "={{ $('Config').first().json.action }}",
+                    "rightValue": "download",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "download"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000005",
+      "name": "Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.baseUrl }}/api/referentials/{{ encodeURIComponent($json.id) }}/rows?{{ $('Config').first().json.filters }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $('Config').first().json.search }}"
+            },
+            {
+              "name": "limit",
+              "value": "={{ $('Config').first().json.limit }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000006",
+      "name": "Query rows",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 120],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "RefExposer API token"
+        }
+      },
+      "notes": "GET /api/referentials/{id}/rows with column filters (column=value, column__gte=..., column__contains=...), text search and limit."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "rows",
+        "options": {}
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000007",
+      "name": "One item per row",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1340, 120]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.baseUrl }}/api/referentials/{{ encodeURIComponent($json.id) }}/lookup/{{ encodeURIComponent($('Config').first().json.lookupValue) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000008",
+      "name": "Lookup by key",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "RefExposer API token"
+        }
+      },
+      "notes": "GET /api/referentials/{id}/lookup/{value}: the row whose key is the value. A missing value answers 404 (kept as an item thanks to 'Never error')."
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.baseUrl }}/api/referentials/{{ encodeURIComponent($json.id) }}/download/{{ $('Config').first().json.downloadFormat }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "6f1d2c3a-0001-4a5b-9c01-000000000009",
+      "name": "Download the referential",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 480],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "RefExposer API token"
+        }
+      },
+      "notes": "GET /api/referentials/{id}/download/{format}: csv, csv.gz, xlsx, json, jsonl, parquet or source. The file is in the binary property 'data'; the X-Checksum-SHA256 header gives its fingerprint."
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "List referentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List referentials": {
+      "main": [
+        [
+          {
+            "node": "Keep the chosen referential",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep the chosen referential": {
+      "main": [
+        [
+          {
+            "node": "Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action": {
+      "main": [
+        [
+          {
+            "node": "Query rows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lookup by key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download the referential",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query rows": {
+      "main": [
+        [
+          {
+            "node": "One item per row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

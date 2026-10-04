@@ -1,0 +1,32 @@
+{
+  "name": "refexposer-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@codemirror/lang-sql": "^6.9.0",
+    "@mantine/core": "^8.3.0",
+    "@mantine/dropzone": "^8.3.0",
+    "@mantine/hooks": "^8.3.0",
+    "@mantine/notifications": "^8.3.0",
+    "@tabler/icons-react": "^3.34.0",
+    "@tanstack/react-query": "^5.85.0",
+    "@uiw/react-codemirror": "^4.25.0",
+    "dayjs": "^1.11.13",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.8.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.0"
+  }
+}

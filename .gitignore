@@ -1,0 +1,68 @@
+# --- Runtime data (created by the application) ---------------------------------------------------------
+data/*
+!data/.gitkeep
+import/*
+!import/.gitkeep
+sync/*
+!sync/.gitkeep
+
+# Referential definitions: only the samples are versioned (your own definitions may hold internal URLs).
+# Remove these two lines to version your config/*.yml files.
+config/*
+!config/*.sample
+
+# --- Secrets ------------------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.secret_key
+secrets/
+certs/
+
+# Local Docker overrides (ports, volumes, SELinux labels…)
+docker-compose.override.yml
+compose.override.yml
+
+# Backups and dumps
+*.sql
+*.sql.gz
+*.dump
+refexposer-config-*.json.gz*
+refexposer-recovery-codes*.txt
+
+# --- Python -------------------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Node / frontend ----------------------------------------------------------------------------------
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+npm-debug.log*
+
+# --- Editors, OS, tools -------------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+*.log
+.claude/

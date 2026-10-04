@@ -1,0 +1,147 @@
+name: refexposer
+
+x-proxy-env: &proxy-env
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,backend,frontend}
+
+# Containers run as unprivileged accounts, without Linux capabilities, on a read-only root filesystem:
+# only the volumes and /tmp (in memory) are writable
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp"]
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: refexposer
+      POSTGRES_USER: refexposer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-refexposer}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U refexposer -d refexposer"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Runs once before the backend: gives ./data and ./import to the account of the backend (files left by an
+  # older image running as root, or copied on the host). Only the capabilities needed to change owners.
+  init-permissions:
+    build: &backend-build
+      context: ./backend
+      target: runtime
+      args:
+        <<: *proxy-env
+        # Account running the backend: owner of ./data and ./import on the host (see README, "Containers")
+        REFEX_UID: ${REFEX_UID:-10001}
+        REFEX_GID: ${REFEX_GID:-10001}
+    image: emeryn/refexposer-backend:latest
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        find /data /import ! -user refex -exec chown refex:refex {} + &&
+        find /data /import ! -group refex -exec chgrp refex {} + &&
+        echo "data and import folders belong to refex"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    healthcheck:
+      disable: true
+    restart: "no"
+    volumes:
+      - ./data:/data
+      - ./import:/import
+
+  backend:
+    build: *backend-build
+    image: emeryn/refexposer-backend:latest
+    restart: unless-stopped
+    <<: *hardening
+    depends_on:
+      db:
+        condition: service_healthy
+      init-permissions:
+        condition: service_completed_successfully
+    # Every REFEX_* variable defined in .env is passed on (see README)
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *proxy-env
+      # URL used to reach RefExposer (browsers, API clients, OpenID Connect callback, generated API docs)
+      REFEX_PUBLIC_URL: ${REFEX_PUBLIC_URL:-http://localhost:8080}
+      REFEX_DATABASE_URL: postgresql+psycopg://refexposer:${POSTGRES_PASSWORD:-refexposer}@db:5432/refexposer
+      # Initial administrator: created at startup when no active administrator exists.
+      # The password must be changed at first sign-in.
+      REFEX_ADMIN_USERNAME: ${REFEX_ADMIN_USERNAME:-admin}
+      REFEX_ADMIN_PASSWORD: ${REFEX_ADMIN_PASSWORD:-ChangeMe-Now-2026!}
+      REFEX_ADMIN_EMAIL: ${REFEX_ADMIN_EMAIL:-}
+      REFEX_ADMIN_MUST_CHANGE_PASSWORD: ${REFEX_ADMIN_MUST_CHANGE_PASSWORD:-true}
+      # Set to true (once) to reset the password of this administrator
+      REFEX_ADMIN_RESET_PASSWORD: ${REFEX_ADMIN_RESET_PASSWORD:-false}
+      # false: no username / password sign-in for local accounts (single sign-on only, see README)
+      REFEX_LOCAL_LOGIN: ${REFEX_LOCAL_LOGIN:-true}
+      REFEX_SESSION_TTL_HOURS: ${REFEX_SESSION_TTL_HOURS:-12}
+      REFEX_COOKIE_SECURE: ${REFEX_COOKIE_SECURE:-false}
+      REFEX_PASSWORD_MIN_LENGTH: ${REFEX_PASSWORD_MIN_LENGTH:-12}
+      # Encryption key of the secrets stored in the database (generated in data/.secret_key when empty)
+      REFEX_SECRET_KEY: ${REFEX_SECRET_KEY:-}
+      # Level of the container logs: trace, debug, info, warning, error, critical
+      REFEX_LOG_LEVEL: ${REFEX_LOG_LEVEL:-info}
+      REFEX_REFRESH_ON_STARTUP: ${REFEX_REFRESH_ON_STARTUP:-missing}
+      REFEX_SCHEDULER_ENABLED: ${REFEX_SCHEDULER_ENABLED:-true}
+      REFEX_TIMEZONE: ${REFEX_TIMEZONE:-Europe/Paris}
+      REFEX_MAX_CONCURRENT_JOBS: ${REFEX_MAX_CONCURRENT_JOBS:-2}
+      REFEX_HTTP_VERIFY: ${REFEX_HTTP_VERIFY:-true}
+      REFEX_DUCKDB_MEMORY_LIMIT: ${REFEX_DUCKDB_MEMORY_LIMIT:-}
+      REFEX_SQL_TIMEOUT: ${REFEX_SQL_TIMEOUT:-30}
+      REFEX_SQL_MAX_ROWS: ${REFEX_SQL_MAX_ROWS:-10000}
+      REFEX_API_MAX_LIMIT: ${REFEX_API_MAX_LIMIT:-1000}
+      REFEX_EXPORT_MAX_ROWS: ${REFEX_EXPORT_MAX_ROWS:-5000000}
+      REFEX_KEEP_RUNS: ${REFEX_KEEP_RUNS:-200}
+      REFEX_LARGE_ROWS: ${REFEX_LARGE_ROWS:-50000000}
+      REFEX_QUERY_TIMEOUT: ${REFEX_QUERY_TIMEOUT:-60}
+      # Import folder: files copied into import/<referential id>/ become a new version
+      REFEX_IMPORT_DIR: ${REFEX_IMPORT_DIR:-/import}
+      REFEX_IMPORT_POLL_SECONDS: ${REFEX_IMPORT_POLL_SECONDS:-20}
+      # Sync folder: each file or folder pushed into sync/ is a referential, re-imported when its files change
+      REFEX_SYNC_DIR: ${REFEX_SYNC_DIR:-/sync}
+      REFEX_SYNC_POLL_SECONDS: ${REFEX_SYNC_POLL_SECONDS:-60}
+      REFEX_SYNC_SETTLE_SECONDS: ${REFEX_SYNC_SETTLE_SECONDS:-30}
+      TZ: ${REFEX_TIMEZONE:-Europe/Paris}
+    volumes:
+      - ./data:/data
+      - ./config:/app/config:ro
+      - ./import:/import
+      - ./sync:/sync:ro
+    # The API is served through the frontend under /api. To expose it directly,
+    # uncomment (or use a docker-compose.override.yml):
+    # ports:
+    #   - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args: *proxy-env
+    image: emeryn/refexposer-frontend:latest
+    restart: unless-stopped
+    <<: *hardening
+    # nginx writes its temporary files (request bodies, proxy buffers) to /var/cache/nginx
+    tmpfs: ["/tmp", "/var/cache/nginx"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+
+volumes:
+  db-data:

@@ -1,0 +1,767 @@
+# Referentials of github.com/emeryn/cybref (output/ folder), generated from a RefExposer test campaign.
+# Rename this file to cybref.yml (or copy the entries you need) and reload the configuration (System page).
+#
+# Every file of the repository is read; two files are left out because they currently contain an HTTP error page
+# (protonvpn_all.json, standards_oui_ieee_opid.csv): RefExposer refuses them as corrupted sources.
+referentials:
+- id: iana-service-names-port-numbers
+  name: Iana service names port numbers
+  description: From github.com/emeryn/cybref (output/IANA_service_names_port_numbers.csv).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/IANA_service_names_port_numbers.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: aws-ip-ranges
+  name: Aws ip ranges
+  description: From github.com/emeryn/cybref (output/aws_ip_ranges.json).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/aws_ip_ranges.json
+  format: json
+  options:
+    records_path: prefixes
+  key: ip_prefix
+  schedule: 0 5 * * *
+- id: azure-ip-ranges
+  name: Azure ip ranges
+  description: From github.com/emeryn/cybref (output/azure_ip_ranges.json).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/azure_ip_ranges.json
+  format: json
+  options:
+    records_path: values
+  schedule: 0 5 * * *
+- id: bootloaders-io
+  name: Bootloaders io
+  description: From github.com/emeryn/cybref (output/bootloaders_io.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/bootloaders_io.json
+  format: json
+  schedule: 0 5 * * *
+- id: cisa-kev
+  name: Cisa kev
+  description: From github.com/emeryn/cybref (output/cisa_kev.json).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/cisa_kev.json
+  format: json
+  options:
+    records_path: vulnerabilities
+  key: cveID
+  schedule: 0 5 * * *
+- id: cwec-latest
+  name: Cwec latest
+  description: From github.com/emeryn/cybref (output/cwec_latest.xml).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/cwec_latest.xml
+  format: xml
+  options:
+    records_path: Weakness
+  transform: SELECT 'CWE-' || ID AS cwe_id, * FROM {source}
+  key: ID
+  schedule: 0 5 * * *
+- id: disposable-email-blocklist
+  name: Disposable email blocklist
+  description: From github.com/emeryn/cybref (output/disposable_email_blocklist.list).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/disposable_email_blocklist.list
+  format: txt
+  schedule: 0 5 * * *
+- id: enesilhaydin-hardwares
+  name: Enesilhaydin hardwares
+  description: From github.com/emeryn/cybref (output/enesilhaydin_hardwares.json).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/enesilhaydin_hardwares.json
+  format: json
+  options:
+    records_path: products
+  schedule: 0 5 * * *
+- id: epss-scores
+  name: Epss scores
+  description: From github.com/emeryn/cybref (output/epss_scores.csv).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/epss_scores.csv
+  format: csv
+  key: cve
+  schedule: 0 5 * * *
+- id: exploitdb
+  name: Exploitdb
+  description: From github.com/emeryn/cybref (output/exploitdb.csv).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/exploitdb.csv
+  format: csv
+  key: id
+  schedule: 0 5 * * *
+- id: feodotracker-ipblocklist
+  name: Feodotracker ipblocklist
+  description: From github.com/emeryn/cybref (output/feodotracker_ipblocklist.json).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/feodotracker_ipblocklist.json
+  format: json
+  schedule: 0 5 * * *
+- id: filesec-project
+  name: Filesec project
+  description: From github.com/emeryn/cybref (output/filesec_project.csv).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/filesec_project.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: gcp-ip-ranges
+  name: Gcp ip ranges
+  description: From github.com/emeryn/cybref (output/gcp_ip_ranges.json).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/gcp_ip_ranges.json
+  format: json
+  options:
+    records_path: prefixes
+  schedule: 0 5 * * *
+- id: gftobins-org
+  name: Gftobins org
+  description: From github.com/emeryn/cybref (output/gftobins_org.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/gftobins_org.json
+  format: json
+  options:
+    records_path: executables.*
+    records_key: binary
+  key: binary
+  schedule: 0 5 * * *
+- id: github-advisories
+  name: Github advisories
+  description: From github.com/emeryn/cybref (output/github_advisories.json).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/github_advisories.json
+  format: json
+  key: id
+  schedule: 0 5 * * *
+- id: hijacklibs
+  name: Hijacklibs
+  description: From github.com/emeryn/cybref (output/hijacklibs.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/hijacklibs.json
+  format: json
+  key: Name
+  schedule: 0 5 * * *
+- id: ip2asn-v4
+  name: Ip2asn v4
+  description: From github.com/emeryn/cybref (output/ip2asn-v4.tsv).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/ip2asn-v4.tsv
+  format: tsv
+  options:
+    header: false
+    names:
+    - range_start
+    - range_end
+    - as_number
+    - country_code
+    - as_description
+  schedule: 0 5 * * *
+- id: loflcab
+  name: Loflcab
+  description: From github.com/emeryn/cybref (output/loflcab.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/loflcab.json
+  format: json
+  schedule: 0 5 * * *
+- id: lolbas
+  name: Lolbas
+  description: From github.com/emeryn/cybref (output/lolbas.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/lolbas.json
+  format: json
+  key: Name
+  schedule: 0 5 * * *
+- id: lolc2-c2-data
+  name: Lolc2 c2 data
+  description: From github.com/emeryn/cybref (output/lolc2_C2_data.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/lolc2_C2_data.json
+  format: json
+  options:
+    records_path: '*'
+    records_key: channel
+  key: channel
+  schedule: 0 5 * * *
+- id: loldrivers-io
+  name: Loldrivers io
+  description: From github.com/emeryn/cybref (output/loldrivers_io.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/loldrivers_io.json
+  format: json
+  key: Id
+  schedule: 0 5 * * *
+- id: lolesxi
+  name: Lolesxi
+  description: From github.com/emeryn/cybref (output/lolesxi.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/lolesxi.json
+  format: json
+  schedule: 0 5 * * *
+- id: lolrmm
+  name: Lolrmm
+  description: From github.com/emeryn/cybref (output/lolrmm.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/lolrmm.json
+  format: json
+  options:
+    maximum_depth: 3
+  schedule: 0 5 * * *
+- id: loobins-io
+  name: Loobins io
+  description: From github.com/emeryn/cybref (output/loobins_io.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/loobins_io.json
+  format: json
+  schedule: 0 5 * * *
+- id: lots-project
+  name: Lots project
+  description: From github.com/emeryn/cybref (output/lots_project.csv).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/lots_project.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: lottunnels-binaries
+  name: Lottunnels binaries
+  description: From github.com/emeryn/cybref (output/lottunnels_binaries.json).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/lottunnels_binaries.json
+  format: json
+  schedule: 0 5 * * *
+- id: lottunnels-domains
+  name: Lottunnels domains
+  description: From github.com/emeryn/cybref (output/lottunnels_domains.csv).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/lottunnels_domains.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: malapi-windows-apis
+  name: Malapi windows apis
+  description: From github.com/emeryn/cybref (output/malapi_windows_apis.csv).
+  category: Living off the land
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/malapi_windows_apis.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: mitchell-krog-bad-referers
+  name: Mitchell krog bad referers
+  description: From github.com/emeryn/cybref (output/mitchell_krog_bad_referers.list).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/mitchell_krog_bad_referers.list
+  format: txt
+  schedule: 0 5 * * *
+- id: mitchell-krog-bad-user-agents
+  name: Mitchell krog bad user agents
+  description: From github.com/emeryn/cybref (output/mitchell_krog_bad_user_agents.list).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/mitchell_krog_bad_user_agents.list
+  format: txt
+  schedule: 0 5 * * *
+- id: mitchell-krog-fake-google-bots
+  name: Mitchell krog fake google bots
+  description: From github.com/emeryn/cybref (output/mitchell_krog_fake_google_bots.list).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/mitchell_krog_fake_google_bots.list
+  format: txt
+  schedule: 0 5 * * *
+- id: mitre-attack-enterprise
+  name: Mitre attack enterprise
+  description: From github.com/emeryn/cybref (output/mitre_attack_enterprise.json).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/mitre_attack_enterprise.json
+  format: json
+  options:
+    records_path: objects
+  key: id
+  schedule: 0 5 * * *
+- id: nvd-cpe-master-2-0
+  name: Nvd cpe master 2 0
+  description: From github.com/emeryn/cybref (output/nvd_cpe_master_2.0.json.gz).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvd_cpe_master_2.0.json.gz
+  format: json
+  options:
+    records_path: products
+  key: cpeNameId
+  schedule: 0 5 * * *
+- id: nvdcve-2-0-modified
+  name: Nvdcve 2 0 modified
+  description: From github.com/emeryn/cybref (output/nvdcve-2.0-modified.json).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-modified.json
+  format: json
+  options:
+    records_path: vulnerabilities
+  schedule: 0 5 * * *
+- id: nvdcve-2-0-recent
+  name: Nvdcve 2 0 recent
+  description: From github.com/emeryn/cybref (output/nvdcve-2.0-recent.json).
+  category: Vulnerabilities
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-recent.json
+  format: json
+  options:
+    records_path: vulnerabilities
+  schedule: 0 5 * * *
+- id: openphish-community
+  name: Openphish community
+  description: From github.com/emeryn/cybref (output/openphish_community.list).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/openphish_community.list
+  format: txt
+  schedule: 0 5 * * *
+- id: public-suffix
+  name: Public suffix
+  description: From github.com/emeryn/cybref (output/public_suffix.list).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/public_suffix.list
+  format: txt
+  schedule: 0 5 * * *
+- id: seclists-backdoor-list
+  name: Seclists backdoor list
+  description: From github.com/emeryn/cybref (output/seclists_backdoor_list.list).
+  category: Detection lists
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/seclists_backdoor_list.list
+  format: txt
+  schedule: 0 5 * * *
+- id: seclists-default-passwords
+  name: Seclists default passwords
+  description: From github.com/emeryn/cybref (output/seclists_default_passwords.csv).
+  category: Detection lists
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/seclists_default_passwords.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: seclists-secret-keywords
+  name: Seclists secret keywords
+  description: From github.com/emeryn/cybref (output/seclists_secret_keywords.list).
+  category: Detection lists
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/seclists_secret_keywords.list
+  format: txt
+  schedule: 0 5 * * *
+- id: seclists-tlds
+  name: Seclists tlds
+  description: From github.com/emeryn/cybref (output/seclists_tlds.list).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/seclists_tlds.list
+  format: txt
+  schedule: 0 5 * * *
+- id: standards-oui-ieee-cid
+  name: Standards oui ieee cid
+  description: From github.com/emeryn/cybref (output/standards_oui_ieee_cid.csv).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/standards_oui_ieee_cid.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: standards-oui-ieee-iab
+  name: Standards oui ieee iab
+  description: From github.com/emeryn/cybref (output/standards_oui_ieee_iab.csv).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/standards_oui_ieee_iab.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: standards-oui-ieee-manid
+  name: Standards oui ieee manid
+  description: From github.com/emeryn/cybref (output/standards_oui_ieee_manid.csv).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/standards_oui_ieee_manid.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: standards-oui-ieee-oui
+  name: Standards oui ieee oui
+  description: From github.com/emeryn/cybref (output/standards_oui_ieee_oui.csv).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/standards_oui_ieee_oui.csv
+  format: csv
+  key: Assignment
+  schedule: 0 5 * * *
+- id: standards-oui-ieee-oui36
+  name: Standards oui ieee oui36
+  description: From github.com/emeryn/cybref (output/standards_oui_ieee_oui36.csv).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/standards_oui_ieee_oui36.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: suspicious-http-user-agents-lists
+  name: Suspicious http user agents lists
+  description: From github.com/emeryn/cybref (output/suspicious_http_user_agents_lists.csv).
+  category: Detection lists
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/suspicious_http_user_agents_lists.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: suspicious-mac-address-list
+  name: Suspicious mac address list
+  description: From github.com/emeryn/cybref (output/suspicious_mac_address_list.csv).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/suspicious_mac_address_list.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: suspicious-usb-ids-list
+  name: Suspicious usb ids list
+  description: From github.com/emeryn/cybref (output/suspicious_usb_ids_list.csv).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/suspicious_usb_ids_list.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: suspicious-windows-services-names-list
+  name: Suspicious windows services names list
+  description: From github.com/emeryn/cybref (output/suspicious_windows_services_names_list.csv).
+  category: Detection lists
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/suspicious_windows_services_names_list.csv
+  format: csv
+  schedule: 0 5 * * *
+- id: threatfox-all-recent
+  name: Threatfox all recent
+  description: From github.com/emeryn/cybref (output/threatfox_all_recent.json).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/threatfox_all_recent.json
+  format: json
+  options:
+    records_path: '*'
+    records_key: ioc_id
+  key: ioc_id
+  schedule: 0 5 * * *
+- id: tor-nodes-all
+  name: Tor nodes all
+  description: From github.com/emeryn/cybref (output/tor_nodes_all.json).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/tor_nodes_all.json
+  format: json
+  options:
+    records_path: relays
+  key: fingerprint
+  schedule: 0 5 * * *
+- id: tor-nodes-exit
+  name: Tor nodes exit
+  description: From github.com/emeryn/cybref (output/tor_nodes_exit.json).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/tor_nodes_exit.json
+  format: json
+  options:
+    records_path: relays
+  key: fingerprint
+  schedule: 0 5 * * *
+- id: tranco-top-1m-domains
+  name: Tranco top 1m domains
+  description: From github.com/emeryn/cybref (output/tranco_top_1m_domains.csv).
+  category: Network
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/tranco_top_1m_domains.csv
+  format: csv
+  options:
+    header: false
+    names:
+    - rank
+    - domain
+  storage:
+    sort_by:
+    - domain
+  key: domain
+  schedule: 0 5 * * *
+- id: urlhaus-online
+  name: Urlhaus online
+  description: From github.com/emeryn/cybref (output/urlhaus_online.csv).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/urlhaus_online.csv
+  format: csv
+  transform: SELECT "# id" AS id, * EXCLUDE ("# id") FROM {source}
+  key: id
+  schedule: 0 5 * * *
+- id: usb-ids
+  name: Usb ids
+  description: From github.com/emeryn/cybref (output/usb_ids.json).
+  category: Hardware
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/usb_ids.json
+  format: json
+  options:
+    records_path: '*'
+    records_key: vendor_id
+  key: vendor_id
+  schedule: 0 5 * * *
+- id: x4bnet-vpn-datacenter-ipv4
+  name: X4bnet vpn datacenter ipv4
+  description: From github.com/emeryn/cybref (output/x4bnet_vpn_datacenter_ipv4.list).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/x4bnet_vpn_datacenter_ipv4.list
+  format: txt
+  schedule: 0 5 * * *
+- id: x4bnet-vpn-ipv4-list
+  name: X4bnet vpn ipv4 list
+  description: From github.com/emeryn/cybref (output/x4bnet_vpn_ipv4_list.list).
+  category: Threat intelligence
+  tags:
+  - cybref
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/x4bnet_vpn_ipv4_list.list
+  format: txt
+  schedule: 0 5 * * *
+- id: cybref-nvd-cve
+  name: NVD CVE (all years)
+  category: Vulnerabilities
+  tags:
+  - cybref
+  - cve
+  - nvd
+  description: Yearly NVD JSON 2.0 feeds 2002 to today, from github.com/emeryn/cybref.
+  source:
+    urls:
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2002.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2003.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2004.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2005.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2006.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2007.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2008.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2009.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2010.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2011.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2012.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2013.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2014.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2015.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2016.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2017.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2018.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2019.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2020.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2021.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2022.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2023.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2024.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2025.json.gz
+    - https://raw.githubusercontent.com/emeryn/cybref/main/output/nvdcve-2.0-2026.json.gz
+  format: json
+  options:
+    records_path: vulnerabilities
+  transform: "SELECT id AS cve_id, published::TIMESTAMP AS published, lastModified::TIMESTAMP AS last_modified,\n       vulnStatus AS status,\
+    \ descriptions[1].value AS description FROM {source}"
+  key: cve_id
+  search_columns:
+  - cve_id
+  - description
+  schedule: 0 5 * * *
+  storage:
+    keep_raw: false

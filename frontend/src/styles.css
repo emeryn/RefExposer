@@ -1,0 +1,190 @@
+:root {
+  --app-subtle-bg: var(--mantine-color-gray-0);
+}
+[data-mantine-color-scheme='dark'] {
+  --app-subtle-bg: var(--mantine-color-dark-8);
+  color-scheme: dark; /* native controls (date pickers, scrollbars) follow the theme */
+}
+
+/* Dark theme refinements */
+[data-mantine-color-scheme='dark'] .grid tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.015);
+}
+[data-mantine-color-scheme='dark'] .grid tbody tr:hover td {
+  background: var(--mantine-color-dark-5);
+}
+[data-mantine-color-scheme='dark'] .grid th,
+[data-mantine-color-scheme='dark'] .grid td.rownum {
+  background: var(--mantine-color-dark-6);
+}
+[data-mantine-color-scheme='dark'] .ref-card:hover {
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  border-color: var(--mantine-color-dark-3);
+}
+[data-mantine-color-scheme='dark'] mark {
+  background: rgba(250, 204, 21, 0.35);
+  color: inherit;
+}
+[data-mantine-color-scheme='dark'] .cm-editor {
+  background: var(--mantine-color-dark-7);
+}
+[data-mantine-color-scheme='dark'] .cm-gutters {
+  background: var(--mantine-color-dark-6) !important;
+  border-right: 1px solid var(--mantine-color-dark-4) !important;
+}
+
+body {
+  background: var(--app-subtle-bg);
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Data grid */
+.grid-wrap {
+  overflow: auto;
+  max-height: calc(100vh - 320px);
+  min-height: 240px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+}
+.grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+  font-size: 13px;
+}
+.grid th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--mantine-color-body);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  text-align: left;
+  font-weight: 600;
+  padding: 8px 10px;
+  white-space: nowrap;
+  user-select: none;
+}
+.grid th.sortable {
+  cursor: pointer;
+}
+.grid th.sortable:hover {
+  background: var(--mantine-color-default-hover);
+}
+.grid td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.grid tbody tr {
+  cursor: pointer;
+}
+.grid tbody tr:hover td {
+  background: var(--mantine-color-default-hover);
+}
+.grid td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.grid th.rownum,
+.grid td.rownum {
+  color: var(--mantine-color-dimmed);
+  text-align: right;
+  width: 1%;
+  position: sticky;
+  left: 0;
+  background: var(--mantine-color-body);
+  z-index: 1;
+  font-variant-numeric: tabular-nums;
+}
+.grid th.rownum {
+  z-index: 3;
+}
+
+.null {
+  color: var(--mantine-color-dimmed);
+  font-style: italic;
+}
+
+/* Simple bar charts */
+.hist {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 140px;
+  padding-top: 4px;
+}
+.hist-bar {
+  flex: 1 1 0;
+  min-width: 2px;
+  background: var(--mantine-color-indigo-5);
+  border-radius: 3px 3px 0 0;
+  min-height: 1px;
+  transition: background 120ms;
+}
+.hist-bar:hover {
+  background: var(--mantine-color-indigo-7);
+}
+[data-mantine-color-scheme='dark'] .hist-bar {
+  background: var(--mantine-color-indigo-4);
+}
+[data-mantine-color-scheme='dark'] .hist-bar:hover {
+  background: var(--mantine-color-indigo-2);
+}
+
+.topbar-row {
+  position: relative;
+  border-radius: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.topbar-row:hover {
+  background: var(--mantine-color-default-hover);
+}
+.topbar-fill {
+  position: absolute;
+  inset: 2px auto 2px 0;
+  background: var(--mantine-color-indigo-light);
+  border-radius: 0 4px 4px 0;
+}
+
+.logs {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ref-card {
+  transition: box-shadow 150ms, transform 150ms;
+}
+.ref-card:hover {
+  box-shadow: var(--mantine-shadow-md);
+}
+
+.cm-editor {
+  font-size: 13.5px;
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin {
+  animation: spin 1.2s linear infinite;
+}
