@@ -38,6 +38,7 @@ RefExposer starts empty: add referentials from the interface, with YAML files in
 ### 1. Requirements
 
 - **Docker Engine 24+** with **Docker Compose v2.24+** (`docker compose version`), or **Docker Desktop** on Windows or macOS.
+  On a Linux server, **Podman 5+** without root works too, with systemd units: see [Run with Podman (Quadlet, rootless)](#run-with-podman-quadlet-rootless).
 - About 2 GB of RAM and a few GB of disk. The space depends on the referentials: each one is stored as compressed Parquet.
 - Outgoing HTTPS access to the sources (directly or through a proxy, see [Configuration](#configuration-environment-variables)).
 
@@ -264,6 +265,220 @@ openssl s_client -connect refexposer.example.com:443 -groups X25519MLKEM768 </de
 
 - **nginx in a container** (e.g. on a shared Docker host): attach it to the `refexposer_default` network and use `server frontend:8080;` as upstream. Remove the published port of `frontend` in a `docker-compose.override.yml`.
 - **Another proxy** (Traefik, HAProxy, Apache, a load balancer): the same rules apply. Forward to the `frontend` port, pass `Host` and `X-Forwarded-Proto: https`, and *replace* `X-Forwarded-For` with the client address. Allow 2 GB uploads and 10-minute reads, and do not buffer `/api/`.
+- **Podman**: the port is set by `PublishPort=` in `refexposer-frontend.container` (see the next section), not by `FRONTEND_PORT`.
+
+---
+
+## Run with Podman (Quadlet, rootless)
+
+On a Linux server, RefExposer can run with **Podman without root**: the containers are started by your own account, as **systemd user services** written as [Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html) files. This replaces `docker compose`, and uses the published images (`docker.io/emeryn/refexposer-backend`, `docker.io/emeryn/refexposer-frontend`): there is nothing to build.
+
+**Requirements**: Podman **5.0+** (`podman --version`: RHEL / Rocky / Alma 9.5+, Fedora 40+, Debian 13, Ubuntu 25.04+), and a dedicated account (here `refex`) with sub-UIDs (`grep refex /etc/subuid`; created by `useradd` on recent distributions).
+
+### 1. Account and folders
+
+As root, once, to keep the services running without an open session:
+
+```bash
+useradd -m refex                       # or an existing account
+loginctl enable-linger refex
+```
+
+Then **as this account** (sign in with `ssh refex@server` or `machinectl shell refex@`, not `su`, so that `systemctl --user` works):
+
+```bash
+mkdir -p ~/refexposer/{config,data,import,sync} ~/.config/containers/systemd
+```
+
+These folders belong to your account and need nothing more: the backend runs with `UserNS=keep-id`, which maps your account to the `refex` account of the image (uid 10001). The files written by RefExposer belong to you on the host, and you can drop files into `import/` and `sync/` directly. The `init-permissions` service of `docker-compose.yml` is not needed.
+
+*Coming from Docker on the same server?* Copy `data/` and `config/`, then give them to the account: `sudo chown -R refex: ~/refexposer`. Move the database with a `pg_dump` (see [Stop, update, back up](#stop-update-back-up)).
+
+### 2. Configuration
+
+Two environment files, readable by your account only. Podman reads them **literally**: no quotes, no comment at the end of a line (`.env.example` cannot be copied as is).
+
+`~/refexposer/db.env`:
+
+```bash
+POSTGRES_DB=refexposer
+POSTGRES_USER=refexposer
+POSTGRES_PASSWORD=<openssl rand -hex 24>
+```
+
+`~/refexposer/refexposer.env`:
+
+```bash
+REFEX_PUBLIC_URL=https://refexposer.example.com
+REFEX_DATABASE_URL=postgresql+psycopg://refexposer:<same password>@db:5432/refexposer
+REFEX_SECRET_KEY=<openssl rand -base64 48>
+REFEX_ADMIN_USERNAME=admin
+REFEX_ADMIN_PASSWORD=<initial password, changed at first sign-in>
+REFEX_COOKIE_SECURE=true
+REFEX_IMPORT_DIR=/import
+REFEX_SYNC_DIR=/sync
+REFEX_TIMEZONE=Europe/Paris
+TZ=Europe/Paris
+# Outgoing proxy, if any
+# HTTP_PROXY=http://proxy.example.com:3128
+# HTTPS_PROXY=http://proxy.example.com:3128
+# NO_PROXY=localhost,127.0.0.1,backend,frontend,db
+```
+
+```bash
+chmod 600 ~/refexposer/*.env
+```
+
+Every other variable of [Configuration](#configuration-environment-variables) can be added to `refexposer.env`. Keep a copy of `REFEX_SECRET_KEY` outside the server.
+
+### 3. Quadlet files
+
+In `~/.config/containers/systemd/`:
+
+`refexposer.network`:
+
+```ini
+[Network]
+NetworkName=refexposer
+```
+
+`refexposer-db.volume`:
+
+```ini
+[Volume]
+VolumeName=refexposer-db
+```
+
+`refexposer-db.container`:
+
+```ini
+[Unit]
+Description=RefExposer - PostgreSQL
+
+[Container]
+Image=docker.io/library/postgres:17-alpine
+ContainerName=refexposer-db
+Network=refexposer.network
+NetworkAlias=db
+EnvironmentFile=%h/refexposer/db.env
+Volume=refexposer-db.volume:/var/lib/postgresql/data
+HealthCmd=pg_isready -U refexposer -d refexposer
+HealthInterval=5s
+HealthTimeout=5s
+HealthRetries=20
+Notify=healthy
+
+[Service]
+Restart=always
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target
+```
+
+`refexposer-backend.container`:
+
+```ini
+[Unit]
+Description=RefExposer - backend
+Requires=refexposer-db.service
+After=refexposer-db.service
+
+[Container]
+Image=docker.io/emeryn/refexposer-backend:latest
+ContainerName=refexposer-backend
+Network=refexposer.network
+NetworkAlias=backend
+EnvironmentFile=%h/refexposer/refexposer.env
+# Your account = the refex account (uid 10001) of the image: data/ and import/ need no chown
+UserNS=keep-id:uid=10001,gid=10001
+Volume=%h/refexposer/data:/data:Z
+Volume=%h/refexposer/import:/import:Z
+Volume=%h/refexposer/config:/app/config:ro,z
+Volume=%h/refexposer/sync:/sync:ro,z
+ReadOnly=true
+Tmpfs=/tmp
+DropCapability=ALL
+NoNewPrivileges=true
+HealthCmd=python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=20s
+HealthRetries=3
+Notify=healthy
+AutoUpdate=registry
+
+[Service]
+Restart=always
+# First start: image download and database creation
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target
+```
+
+`refexposer-frontend.container`:
+
+```ini
+[Unit]
+Description=RefExposer - web interface
+Requires=refexposer-backend.service
+After=refexposer-backend.service
+
+[Container]
+Image=docker.io/emeryn/refexposer-frontend:latest
+ContainerName=refexposer-frontend
+Network=refexposer.network
+# Loopback only: the nginx of the host is in front (see "Expose behind an nginx reverse proxy")
+PublishPort=127.0.0.1:8080:8080
+ReadOnly=true
+Tmpfs=/tmp
+Tmpfs=/var/cache/nginx
+DropCapability=ALL
+NoNewPrivileges=true
+HealthCmd=wget -qO- http://127.0.0.1:8080/healthz || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+Notify=healthy
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target
+```
+
+- `%h` is the home folder of the account. Adapt the paths if the folders are elsewhere.
+- `:Z` / `:z` label the folders for **SELinux** (RHEL, Rocky, Fedora). They are ignored elsewhere.
+- Without a reverse proxy on the host, publish `PublishPort=8080:8080` instead. Without root, a port below 1024 cannot be used directly.
+
+### 4. Start
+
+```bash
+systemctl --user daemon-reload                       # generates the services from the Quadlet files
+systemctl --user start refexposer-frontend            # also starts the network, db and backend
+systemctl --user status refexposer-db refexposer-backend refexposer-frontend
+```
+
+The first start downloads the images and can take a few minutes: `start` returns once the containers are **healthy**. The services restart at boot (thanks to `enable-linger` and `WantedBy=default.target`); `systemctl --user enable` is neither needed nor possible for Quadlet services.
+
+If nothing is generated, check the files with `/usr/libexec/podman/quadlet -dryrun -user`.
+
+### 5. Operate
+
+| Action | Command |
+|---|---|
+| Logs | `journalctl --user -u refexposer-backend -f` (or `podman logs -f refexposer-backend`) |
+| Stop / start | `systemctl --user stop refexposer-frontend refexposer-backend refexposer-db` / `systemctl --user start refexposer-frontend` |
+| Update | `podman auto-update` (pulls the new `latest` images and restarts the changed services; `--dry-run` to only list them) |
+| Automatic updates | `systemctl --user enable --now podman-auto-update.timer` (daily) |
+| Pin a version | replace `:latest` with a tag (e.g. `:0.2`) in the `.container` files, then `systemctl --user daemon-reload` and restart |
+| Back up the database | `podman exec refexposer-db pg_dump -U refexposer refexposer > refexposer.sql` |
+| Change a setting | edit `refexposer.env`, then `systemctl --user restart refexposer-backend` |
+
+Back up as with Docker: the database dump, `~/refexposer/data/`, and `REFEX_SECRET_KEY` kept apart. `podman volume rm refexposer-db` **deletes the database**.
 
 ---
 
