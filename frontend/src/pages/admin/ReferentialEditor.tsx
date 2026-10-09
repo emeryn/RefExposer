@@ -16,7 +16,6 @@ import {
   MultiSelect,
   NumberInput,
   SegmentedControl,
-  PasswordInput,
   Select,
   SimpleGrid,
   Stack,
@@ -52,6 +51,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
 import type { DefinitionConfig, PreviewResult, Row, UploadResult } from '../../api/types';
 import { DataGrid } from '../../components/DataGrid';
+import { SecretInput } from '../../components/SecretInput';
 import { describeCron, fmtBytes, fmtNumber } from '../../lib/format';
 
 type Mode = 'http' | 'upload' | 'local' | 'git';
@@ -99,6 +99,7 @@ const FORMATS = [
   { value: 'xml', label: 'XML (repeated record elements)' },
   { value: 'bloom', label: 'Bloom filter (DCSO format, e.g. CIRCL hashlookup)' },
   { value: 'mmdb', label: 'MaxMind DB (.mmdb: GeoIP2 / GeoLite2, DB-IP, IPinfo…)' },
+  { value: 'sqlite', label: 'SQLite database (e.g. NIST NSRL)' },
 ];
 
 const SCHEDULES = [
@@ -169,6 +170,11 @@ function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig>
     max_age: c.max_age || null,
     category: c.category || 'General',
     source,
+    // Deltas: Bloom filters and SQLite databases downloaded from a URL only
+    incremental:
+      c.incremental && mode === 'http' && (c.format === 'bloom' || c.format === 'sqlite')
+        ? { ...c.incremental, urls: c.incremental.urls.map((u) => u.trim()).filter(Boolean) }
+        : null,
   };
 }
 
@@ -272,7 +278,8 @@ export default function ReferentialEditor() {
         format: opts.format === undefined ? draft.format || null : opts.format,
         options: draft.options,
         transform: draft.transform?.trim() ? draft.transform : null,
-        referential_id: mode === 'local' ? id : null,
+        // Editing: masked credentials (never shown again) are replaced by the stored values
+        referential_id: id ?? null,
         refresh: !!opts.refresh,
       });
       setPreview(res);
@@ -283,7 +290,7 @@ export default function ReferentialEditor() {
         setOptionsText(JSON.stringify({ ...draft.options, ...applied }, null, 2));
       }
       setDraft((d) => {
-        const next = { ...d, format: res.format };
+        const next = { ...d, format: res.format ?? d.format };
         if (!editing && !d.name && res.files[0]) next.name = humanize(res.files[0].name);
         if (!editing && !idTouched && next.name) next.id = slugify(next.name);
         return next;
@@ -435,27 +442,29 @@ export default function ReferentialEditor() {
                       </Accordion.Control>
                       <Accordion.Panel>
                         <Stack gap="xs">
-                          <TextInput
+                          <SecretInput
                             size="xs"
                             label="HTTP Basic authentication (user:password)"
                             description={
                               <>
-                                E.g. MaxMind <Code>account_id:license_key</Code>. Keep secrets out of the definition with a{' '}
-                                <Code>{'${REFEX_SOURCE_…}'}</Code> environment variable (defined in <Code>.env</Code>).
+                                E.g. MaxMind <Code>account_id:{'${secret:maxmind-key}'}</Code>: pick the password in the secret manager
+                                (key button), it never appears in the definition.
                               </>
                             }
-                            placeholder={'123456:${REFEX_SOURCE_MAXMIND_KEY}'}
+                            placeholder={'123456:${secret:maxmind-key}'}
+                            keepPrefix
                             value={draft.source.basic_auth ?? ''}
-                            onChange={(e) => set('source', { ...draft.source, basic_auth: e.currentTarget.value || null })}
+                            onChange={(v) => set('source', { ...draft.source, basic_auth: v || null })}
                           />
                           <Text size="xs" c="dimmed">
-                            Headers sent with the request (e.g. <Code>Authorization</Code> for a protected API). Their values are never
-                            shown again by the API; <Code>{'${REFEX_SOURCE_…}'}</Code> variables are expanded.
+                            Headers sent with the request (e.g. <Code>Authorization</Code> for a protected API). Use a secret of the
+                            secret manager (key button): the definition only holds its <Code>{'${secret:…}'}</Code> reference. Literal
+                            values are masked by the API.
                           </Text>
                           {headers.map((h, i) => (
-                            <Group key={i} gap="xs">
+                            <Group key={i} gap="xs" align="flex-start">
                               <TextInput size="xs" placeholder="Header" value={h.k} onChange={(e) => { const v = e.currentTarget.value; setHeaders((s) => s.map((x, j) => (j === i ? { ...x, k: v } : x))); }} w={200} />
-                              <TextInput size="xs" placeholder="Value" value={h.v} onChange={(e) => { const v = e.currentTarget.value; setHeaders((s) => s.map((x, j) => (j === i ? { ...x, v } : x))); }} style={{ flex: 1 }} />
+                              <SecretInput size="xs" placeholder={'Value, e.g. Bearer ${secret:vendor-api}'} value={h.v} onChange={(v) => setHeaders((s) => s.map((x, j) => (j === i ? { ...x, v } : x)))} style={{ flex: 1 }} />
                               <ActionIcon size="sm" variant="subtle" color="red" onClick={() => setHeaders((s) => s.filter((_, j) => j !== i))}>
                                 <IconTrash size={14} />
                               </ActionIcon>
@@ -545,18 +554,12 @@ export default function ReferentialEditor() {
                     />
                   </SimpleGrid>
                   <SimpleGrid cols={{ base: 1, sm: 2 }}>
-                    <PasswordInput
+                    <SecretInput
                       label="Access token (private repository)"
-                      description={
-                        <>
-                          Read access is enough. Prefer <Code>{'${REFEX_SOURCE_…}'}</Code> (variable of <Code>.env</Code>) to keep it out of the
-                          definition.
-                        </>
-                      }
-                      placeholder={'${REFEX_SOURCE_GIT_TOKEN}'}
+                      description="Read access is enough. Pick it in the secret manager (key button): only its reference is stored."
+                      placeholder={'${secret:git-token}'}
                       value={draft.source.token ?? ''}
-                      onChange={(e) => set('source', { ...draft.source, token: e.currentTarget.value })}
-                      autoComplete="new-password"
+                      onChange={(v) => set('source', { ...draft.source, token: v })}
                     />
                     <TextInput
                       label="User name of the token"
@@ -723,6 +726,48 @@ export default function ReferentialEditor() {
                       the published one (unless forced).
                     </Text>
                   )}
+                  {fmt === 'sqlite' && (
+                    <OptionField
+                      label="Table or view"
+                      description="Table or view of the database to publish (e.g. FILE for the NIST NSRL). Use the SQL transformation to filter or rename columns."
+                    >
+                      <Autocomplete
+                        size="xs"
+                        data={preview?.records_path_candidates ?? []}
+                        value={String(draft.options.table ?? '')}
+                        onChange={(v) => setOption('table', v)}
+                        placeholder={preview?.records_path_candidates.length ? `e.g. ${preview.records_path_candidates[0]}` : 'FILE'}
+                      />
+                    </OptionField>
+                  )}
+                  {(fmt === 'sqlite' || fmt === 'bloom') && mode === 'http' && (
+                    <OptionField
+                      label="Deltas (optional, one URL per line)"
+                      description={
+                        fmt === 'sqlite'
+                          ? 'SQL files (or archives holding one) applied once, in this order, to the full database of the source URL, which is kept. Add each new delta at the end of the list; deltas can also be imported by hand.'
+                          : 'Files of values (one per line) added to the published filter when they change; the full filter is only downloaded again when it changes.'
+                      }
+                    >
+                      <Textarea
+                        size="xs"
+                        autosize
+                        minRows={2}
+                        placeholder={fmt === 'sqlite' ? 'https://…/RDS_2026.06.1_modern_minimal_delta.zip' : 'https://…/delta.txt.gz'}
+                        value={(draft.incremental?.urls ?? []).join('\n')}
+                        onChange={(e) => {
+                          const urls = e.currentTarget.value.split('\n').map((u) => u.trim());
+                          const kept = urls.filter(Boolean);
+                          // Keep an empty last line while typing; a SQLite database keeps the block even without URL
+                          set('incremental', kept.length || fmt === 'sqlite' ? { ...(draft.incremental ?? {}), urls: urls.length > kept.length && urls[urls.length - 1] === '' ? [...kept, ''] : kept } : null);
+                        }}
+                        onBlur={() => {
+                          const kept = (draft.incremental?.urls ?? []).filter(Boolean);
+                          set('incremental', kept.length || (fmt === 'sqlite' && draft.incremental) ? { ...(draft.incremental ?? {}), urls: kept } : null);
+                        }}
+                      />
+                    </OptionField>
+                  )}
                   {fmt === 'xlsx' && (
                     <SimpleGrid cols={2} spacing="xs">
                       <TextInput size="xs" label="Sheet" placeholder="first" value={String(draft.options.sheet ?? '')} onChange={(e) => setOption('sheet', e.currentTarget.value)} />
@@ -789,6 +834,14 @@ export default function ReferentialEditor() {
                       <Alert color="red" icon={<IconAlertTriangle size={16} />} title="Cannot read with these settings">
                         <Text size="sm" ff="monospace" style={{ whiteSpace: 'pre-wrap' }}>
                           {preview.error}
+                        </Text>
+                      </Alert>
+                    ) : preview.unanalysed ? (
+                      <Alert color="orange" icon={<IconAlertTriangle size={16} />} title="Source not analysed">
+                        <Text size="sm">{preview.unanalysed}</Text>
+                        <Text size="xs" c="dimmed" mt={4}>
+                          Choose the format (and, for a SQLite database, the table) on the left, then continue: the settings are checked
+                          by the import, which runs in the background and can be followed in the History tab.
                         </Text>
                       </Alert>
                     ) : (

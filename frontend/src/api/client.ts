@@ -12,7 +12,13 @@ import type {
   ChangesResponse,
   ColumnStats,
   Definition,
+  ConfigImportResult,
   DefinitionConfig,
+  DiscoveryApplyResult,
+  DiscoveryScan,
+  DiscoverySource,
+  NotificationChannel,
+  NotificationDelivery,
   DownloadsInfo,
   FacetsResponse,
   GrantInfo,
@@ -31,6 +37,7 @@ import type {
   RowsResponse,
   Run,
   SearchResult,
+  SourceSecret,
   SqlResult,
   SqlTable,
   SystemInfo,
@@ -203,6 +210,48 @@ export const api = {
   definitionMeta: () =>
     request<{ formats: string[]; categories: string[]; groups: { id: number; name: string }[] }>('/api/admin/referentials/_meta'),
   previewSource: (body: Record<string, unknown>) => request<PreviewResult>('/api/admin/referentials/preview', json('POST', body)),
+
+  // Secret manager (values are write-only)
+  secrets: () => request<SourceSecret[]>('/api/admin/secrets'),
+  createSecret: (body: { name: string; value: string; description?: string | null; hosts?: string[] }) =>
+    request<SourceSecret>('/api/admin/secrets', json('POST', body)),
+  updateSecret: (name: string, body: { value?: string | null; description?: string | null; hosts?: string[] }) =>
+    request<SourceSecret>(`/api/admin/secrets/${enc(name)}`, json('PATCH', body)),
+  deleteSecret: (name: string, force = false) => request<{ ok: boolean }>(`/api/admin/secrets/${enc(name)}?force=${force}`, json('DELETE')),
+
+  // Notifications (e-mail, webhooks)
+  notifications: () =>
+    request<{ channels: NotificationChannel[]; smtp_configured: boolean; events: string[]; categories: string[] }>('/api/admin/notifications'),
+  createNotification: (body: Partial<NotificationChannel>) => request<NotificationChannel>('/api/admin/notifications', json('POST', body)),
+  updateNotification: (id: string, body: Partial<NotificationChannel>) =>
+    request<NotificationChannel>(`/api/admin/notifications/${enc(id)}`, json('PUT', body)),
+  deleteNotification: (id: string) => request<{ ok: boolean }>(`/api/admin/notifications/${enc(id)}`, json('DELETE')),
+  testNotification: (id: string) => request<NotificationDelivery>(`/api/admin/notifications/${enc(id)}/test`, json('POST')),
+  notificationDeliveries: (limit = 100) => request<NotificationDelivery[]>(`/api/admin/notifications/deliveries?limit=${limit}`),
+  testSmtp: (config: object, to: string) =>
+    request<{ ok: boolean; elapsed_ms: number; error: string | null }>('/api/admin/settings/smtp/test', json('POST', { config, to })),
+
+  // Configuration export / import (another environment)
+  exportConfig: async (o: { ids: string[]; grants: boolean; credentials: 'masked' | 'included'; format: 'yaml' | 'json' }) => {
+    const q = new URLSearchParams({ grants: String(o.grants), credentials: o.credentials, format: o.format });
+    if (o.ids.length) q.set('ids', o.ids.join(','));
+    const res = await fetch(`/api/admin/config/export?${q}`, { credentials: 'same-origin' });
+    if (!res.ok) throw new ApiError(res.status, res.statusText);
+    const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? `refexposer-config.${o.format}`;
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+  importConfig: (body: object) => request<ConfigImportResult>('/api/admin/config/import', json('POST', body)),
+
+  // Bulk discovery
+  discoveryScan: (body: { source: DiscoverySource; analyse: boolean; category?: string | null; tags?: string[]; schedule?: string | null }) =>
+    request<DiscoveryScan>('/api/admin/discovery/scan', json('POST', body)),
+  discoveryApply: (body: { configs: object[]; pull: boolean; grant_group_ids: number[] }) =>
+    request<DiscoveryApplyResult>('/api/admin/discovery/apply', json('POST', body)),
   createDefinition: (body: { config: Partial<DefinitionConfig>; upload_id?: string | null; pull: boolean; grant_group_ids: number[] }) =>
     request<Definition>('/api/admin/referentials', json('POST', body)),
   updateDefinition: (id: string, body: { config: Partial<DefinitionConfig>; upload_id?: string | null; pull: boolean }) =>

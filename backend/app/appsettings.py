@@ -234,13 +234,138 @@ class TasksSettings(BaseModel):
     tasks: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
+class McpSettings(BaseModel):
+    """Administration MCP server (/api/mcp): an AI agent drives RefExposer with the API token of a service account."""
+
+    enabled: bool = False
+    # Service accounts allowed: through the MCP server only, they act as administrators
+    account_ids: list[int] = Field(default_factory=list)
+    # Only the tools that read (no creation, change, deletion, update)
+    read_only: bool = False
+
+
+EMAIL_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
+
+
+class SmtpSettings(BaseModel):
+    """Outgoing e-mail server, used by the notification channels of type e-mail."""
+
+    host: str = ""
+    port: int = Field(587, ge=1, le=65535)
+    # starttls: plain connection upgraded (587) · tls: TLS from the start (465) · none: no encryption (relay of the LAN)
+    security: Literal["starttls", "tls", "none"] = "starttls"
+    username: str = ""
+    password: str = ""
+    from_address: str = ""
+    verify_tls: bool = True
+    timeout: int = Field(20, ge=1, le=120)
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^[A-Za-z0-9._:-]+$", v.strip("[]")):
+            raise ValueError("host name or IP address expected")
+        return v.strip("[]")
+
+    @field_validator("from_address")
+    @classmethod
+    def _from(cls, v: str) -> str:
+        v = v.strip()
+        address = v.rsplit("<", 1)[-1].rstrip(">").strip() if "<" in v else v
+        if v and not EMAIL_RE.match(address):
+            raise ValueError("e-mail address expected (alerts@example.com or RefExposer <alerts@example.com>)")
+        return v
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.host and self.from_address)
+
+
+NotificationEvent = Literal["failure", "recovered", "published"]
+
+
+class NotificationChannel(BaseModel):
+    """Where to send the events of the referentials: e-mail recipients or a generic webhook."""
+
+    id: str = ""
+    name: str = Field(..., min_length=1, max_length=80)
+    type: Literal["email", "webhook"]
+    enabled: bool = True
+    # failure: update in error, corrupted or rejected source · recovered: first success after a failure · published: new version
+    events: list[NotificationEvent] = Field(default_factory=lambda: ["failure", "recovered"])
+    # A referential failing again and again: notified once (when it starts failing), unless repeat_failures
+    repeat_failures: bool = False
+    # Referentials concerned (ids), and / or their categories; every referential when both are empty
+    referentials: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    # e-mail
+    recipients: list[str] = Field(default_factory=list)
+    notify_owner: bool = Field(False, description="Also the owner of the referential, when it is an e-mail address")
+    # webhook
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    # ${secret:<name>}: HMAC-SHA256 of the body, sent in X-RefExposer-Signature (sha256=<hex>)
+    signing_secret: str = ""
+    # JSON body with {{placeholders}} (Teams, Discord, PagerDuty...); the generic JSON payload when empty
+    template: str = ""
+
+    @field_validator("recipients")
+    @classmethod
+    def _recipients(cls, v: list[str]) -> list[str]:
+        out = []
+        for r in v:
+            r = r.strip()
+            if r and not EMAIL_RE.match(r):
+                raise ValueError(f"invalid e-mail address: {r}")
+            if r and r not in out:
+                out.append(r)
+        return out
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^https?://\S+$", v):
+            raise ValueError("URL expected (https://...)")
+        return v
+
+    @field_validator("signing_secret")
+    @classmethod
+    def _signing(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.fullmatch(r"\$\{secret:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\}", v):
+            raise ValueError("signing secret: a ${secret:<name>} reference of the secret manager")
+        return v
+
+    @field_validator("events")
+    @classmethod
+    def _events(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("choose at least one event")
+        return list(dict.fromkeys(v))
+
+    def check(self) -> "NotificationChannel":
+        if self.type == "email" and not (self.recipients or self.notify_owner):
+            raise ValueError("an e-mail channel needs recipients (or the owner of the referential)")
+        if self.type == "webhook" and not self.url:
+            raise ValueError("a webhook needs a URL")
+        return self
+
+
+class NotificationsSettings(BaseModel):
+    channels: list[NotificationChannel] = Field(default_factory=list)
+
+
 M = TypeVar("M", bound=BaseModel)
 
 SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSettings, "oidc": OidcSettings, "branding": BrandingSettings,
                                          "syslog": SyslogSettings, "tasks": TasksSettings,
-                                         "mfa": MfaSettings}
+                                         "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
+                                         "notifications": NotificationsSettings}
 SECRETS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
-                                       "syslog": ("client_key",), "tasks": (), "mfa": ()}
+                                       "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
+                                       "notifications": ()}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()

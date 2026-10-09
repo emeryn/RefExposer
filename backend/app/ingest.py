@@ -24,11 +24,12 @@ import httpx
 import orjson
 
 from .bloom import BloomError, BloomFilter
-from .config import ReferentialConfig
+from .bloom import normalize as bloom_normalize
+from .config import ReferentialConfig, parse_duration
 from .crypto import encrypt_data, parquet_key
 from .settings import Settings
-from .sqlbuild import build_source_sql, lit, parquet_reader, qi
-from .storage import RefPaths, dir_size, iso, read_meta, utcnow, write_meta
+from .sqlbuild import SQLITE_MAGIC, attach_sqlite, build_source_sql, is_sqlite_file, lit, parquet_reader, qi
+from .storage import RefPaths, dir_size, iso, parse_iso, read_meta, utcnow, write_meta
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ _ERROR_PAGE = re.compile(
     re.IGNORECASE,
 )
 _MAGIC = {"parquet": (b"PAR1",), "xlsx": (b"PK\x03\x04",), "bloom": None, "mmdb": None}
+SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 
 
 def check_source_file(path: Path, fmt: str, label: str | None = None) -> None:
@@ -75,6 +77,11 @@ def check_source_file(path: Path, fmt: str, label: str | None = None) -> None:
     if head.startswith(b"version https://git-lfs.github.com/spec/"):
         raise SourceCorrupted(f"corrupted source: '{label}' is a Git LFS pointer, not the data (Git LFS files are not supported: "
                               "publish the file as a release asset and use its URL)")
+    if fmt == "sqlite":
+        # Archives also hold readme / schema / signature files (e.g. NIST NSRL): only the databases are read
+        if path.suffix.lower() in SQLITE_SUFFIXES and not head.startswith(SQLITE_MAGIC):
+            raise SourceCorrupted(f"corrupted source: '{label}' does not have the signature of a SQLite database")
+        return
     if fmt in ("parquet", "xlsx", "bloom", "mmdb"):  # binary formats: checked when published
         return
     if _ERROR_PAGE.match(stripped[:400]):
@@ -224,6 +231,38 @@ def _unpack(path: Path, dest: Path, pattern: str | None, run: Run) -> list[Path]
     return [path]
 
 
+DOWNLOAD_ATTEMPTS = 5
+
+
+class _Interrupted(Exception):
+    """The connection ended before the announced size."""
+
+
+def _partial(dest: Path, url: str) -> tuple[Path, Path]:
+    """Interrupted download of `url` and the validators of its response (resumed later)."""
+    key = hashlib.sha256(url.encode()).hexdigest()[:16]
+    return dest / ".partial" / f"{key}.part", dest / ".partial" / f"{key}.json"
+
+
+def _validator(state: dict[str, Any]) -> str | None:
+    """Value of If-Range: a strong ETag (a weak one is not allowed), else the date of the response."""
+    etag = state.get("etag")
+    return etag if etag and not etag.startswith("W/") else state.get("last_modified")
+
+
+def _partial_state(part: Path, state_file: Path, url: str) -> dict[str, Any]:
+    """State of a download interrupted by a previous run, {} when there is nothing to resume."""
+    try:
+        state = orjson.loads(state_file.read_bytes()) if part.exists() else {}
+    except (OSError, orjson.JSONDecodeError):
+        state = {}
+    if state.get("url") != url or not _validator(state):
+        part.unlink(missing_ok=True)
+        state_file.unlink(missing_ok=True)
+        return {}
+    return state
+
+
 def download(
     client: httpx.Client,
     url: str,
@@ -252,32 +291,91 @@ def download(
     staging = dest / ".incoming"
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
-    with client.stream("GET", url, headers=headers) as resp:
-        if resp.status_code == 304 and can_revalidate:
-            run.log("Source unchanged (HTTP 304), local files kept")
-            return {**previous, "checked_at": iso(utcnow()), "not_modified": True}
-        resp.raise_for_status()
-        name = _filename(resp, url)
-        total = int(resp.headers.get("content-length") or 0)
-        run.bytes_total += total
-        part = staging / (name + ".part")
-        size = 0
-        started = time.monotonic()
-        with part.open("wb") as f:
-            for chunk in resp.iter_bytes(1 << 20):
-                if cancelled():
-                    raise RunCancelled()
-                f.write(chunk)
-                size += len(chunk)
-                run.bytes_done += len(chunk)
-        if size == 0:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise SourceCorrupted(f"corrupted remote source: {url} returned an empty file (0 bytes)")
-        if total and size != total and "content-encoding" not in resp.headers:
-            raise IOError(f"incomplete download ({size} / {total} bytes)")
-        elapsed = max(time.monotonic() - started, 1e-6)
-        run.log(f"Received {name}: {size:,} bytes in {elapsed:.1f}s ({size / elapsed / 1e6:.1f} MB/s)")
-        etag, last_modified = resp.headers.get("etag"), resp.headers.get("last-modified")
+    # An interrupted transfer is kept (with the validators of its response) and resumed with an HTTP Range request,
+    # by the next attempt of this run or by the next run: a source of tens of GB is not downloaded again from zero
+    part, state_file = _partial(dest, url)
+    state = _partial_state(part, state_file, url)
+    digest = None  # SHA-256 of the received bytes: fingerprint of the source, without reading the files again
+    done0, total0 = run.bytes_done, run.bytes_total
+    started = time.monotonic()
+    attempt = 0
+    try:
+        while True:
+            offset = part.stat().st_size if state and part.exists() else 0
+            req = dict(headers)
+            if offset:  # a newer version may have started: If-Range sends the whole file when it changed
+                req = {k: v for k, v in headers.items() if k not in ("If-None-Match", "If-Modified-Since")}
+                req["Range"] = f"bytes={offset}-"
+                req["If-Range"] = _validator(state)
+            try:
+                with client.stream("GET", url, headers=req) as resp:
+                    if resp.status_code == 304 and can_revalidate and not offset:
+                        run.log("Source unchanged (HTTP 304), local files kept")
+                        return {**previous, "checked_at": iso(utcnow()), "not_modified": True}
+                    if offset and resp.status_code == 416 and offset == state.get("total"):
+                        run.log(f"Download already complete ({offset:,} bytes)")
+                        total, mode = offset, None
+                    elif offset and resp.status_code == 206:
+                        total, mode = offset + int(resp.headers.get("content-length") or 0), "ab"
+                        run.log(f"Download resumed at {offset:,} / {total:,} bytes")
+                    else:
+                        resp.raise_for_status()
+                        if offset:
+                            run.log("The server sent the whole file (source changed, or resuming not supported): downloading it again", "warn")
+                        offset, mode = 0, "wb"
+                        total = int(resp.headers.get("content-length") or 0)
+                        digest = hashlib.sha256()
+                        state = {"url": url, "name": _filename(resp, url), "etag": resp.headers.get("etag"),
+                                 "last_modified": resp.headers.get("last-modified"), "total": total}
+                        # Resumable only with a strong validator, and when the bytes are stored as sent
+                        if "content-encoding" in resp.headers or not _validator(state):
+                            state = {}
+                        part.parent.mkdir(parents=True, exist_ok=True)
+                        if state:
+                            state_file.write_bytes(orjson.dumps(state))
+                        else:
+                            state_file.unlink(missing_ok=True)
+                    if digest is None:  # resumed by another run: hash of the bytes already received
+                        with part.open("rb") as fh:
+                            digest = hashlib.file_digest(fh, "sha256")
+                    run.bytes_total, run.bytes_done = total0 + total, done0 + offset
+                    if mode:
+                        with part.open(mode) as f:
+                            # Written as received (no 1 MB buffer): an interruption loses none of the received bytes
+                            for chunk in resp.iter_bytes():
+                                if cancelled():
+                                    raise RunCancelled()
+                                f.write(chunk)
+                                digest.update(chunk)
+                                run.bytes_done += len(chunk)
+                    size = part.stat().st_size
+                    if total and size < total and "content-encoding" not in resp.headers:
+                        raise _Interrupted(f"incomplete download ({size:,} / {total:,} bytes)")
+                    etag = resp.headers.get("etag") or state.get("etag")
+                    last_modified = resp.headers.get("last-modified") or state.get("last_modified")
+                    final_url = str(resp.url)
+                    name = state.get("name") or _filename(resp, url)
+                break
+            except (httpx.TransportError, _Interrupted) as e:
+                attempt += 1
+                if not state or attempt >= DOWNLOAD_ATTEMPTS:
+                    if isinstance(e, _Interrupted):
+                        raise IOError(str(e)) from e
+                    raise
+                received = part.stat().st_size if part.exists() else 0
+                run.log(f"Download interrupted after {received:,} bytes ({e}): resuming, attempt {attempt + 1}/{DOWNLOAD_ATTEMPTS}", "warn")
+                time.sleep(min(2 ** attempt, 30))
+    except BaseException:
+        if not state:  # cannot be resumed: nothing to keep
+            part.unlink(missing_ok=True)
+        raise
+    state_file.unlink(missing_ok=True)
+    if size == 0:
+        part.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise SourceCorrupted(f"corrupted remote source: {url} returned an empty file (0 bytes)")
+    elapsed = max(time.monotonic() - started, 1e-6)
+    run.log(f"Received {name}: {size:,} bytes in {elapsed:.1f}s ({(run.bytes_done - done0) / elapsed / 1e6:.1f} MB/s)")
 
     final = staging / name
     os.replace(part, final)
@@ -305,12 +403,13 @@ def download(
             pass
     return {
         "url": url,
-        "final_url": str(resp.url),
+        "final_url": final_url,
         "files": [str(p.relative_to(dest)).replace("\\", "/") for p in produced],
         "etag": etag,
         "last_modified": last_modified,
         "remote_date": remote_date,
         "downloaded_bytes": size,
+        "sha256": digest.hexdigest(),
         "fetched_at": iso(utcnow()),
         "checked_at": iso(utcnow()),
         "not_modified": False,
@@ -335,13 +434,36 @@ def _cleanup_raw(paths: RefPaths, keep: set[str]) -> None:
             p.rmdir()
 
 
+def _fingerprint_stat(files: list[Path], config_hash: str, extra: str = "") -> str:
+    """Fingerprint from the name, size and modification time of the files (databases of hundreds of GB)."""
+    h = hashlib.sha256((config_hash + extra).encode())
+    for f in files:
+        st = f.stat()
+        h.update(f"{f.name}|{st.st_size}|{st.st_mtime_ns}".encode())
+    return h.hexdigest()
+
+
+FULL_HASH_MAX = 1 << 30  # larger files are fingerprinted from their size and modification time (not read again)
+
+
 def _fingerprint(files: list[Path], config_hash: str) -> str:
     h = hashlib.sha256(config_hash.encode())
     for f in files:
         h.update(f.name.encode())
+        st = f.stat()
+        if st.st_size > FULL_HASH_MAX:
+            h.update(f"|{st.st_size}|{st.st_mtime_ns}".encode())
+            continue
         with f.open("rb") as fh:
             h.update(hashlib.file_digest(fh, "sha256").digest())
     return h.hexdigest()
+
+
+def _fingerprint_downloads(sources: list[dict[str, Any]], config_hash: str) -> str | None:
+    """Fingerprint from the hashes computed while downloading (no file read again), None without them."""
+    if not sources or not all(s.get("sha256") for s in sources):
+        return None
+    return hashlib.sha256((config_hash + "".join(s["sha256"] for s in sources)).encode()).hexdigest()
 
 
 # --------------------------------------------------------------------------- pipeline
@@ -386,6 +508,50 @@ def _profile(con: duckdb.DuckDBPyConnection, rel: str) -> list[dict[str, Any]]:
             "null_percentage": float(d["null_percentage"]) if d.get("null_percentage") is not None else None,
         })
     return out
+
+
+PROFILE_SAMPLE_ROWS = 1_000_000
+
+
+def _passthrough_source(ref: ReferentialConfig, groups: list[list[Path]]) -> Path | None:
+    """The source when it can be published without being rewritten: a single Parquet file, without transform,
+    reading options or encryption (published files are written with the layout and compression of the source)."""
+    files = [f for g in groups for f in g]
+    if ref.format != "parquet" or len(files) != 1 or ref.transform or ref.options or ref.confidential:
+        return None
+    return files[0]
+
+
+def _sorted_row_groups(con: duckdb.DuckDBPyConnection, path: str, column: str) -> bool:
+    """True when the row groups of the file follow each other without overlapping on `column` (min / max statistics
+    of the footer, no scan): lookups on it then read only the matching row groups, as after a sort."""
+    try:
+        col_type = {r[0]: r[1] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({lit(path)})").fetchall()}.get(column)
+        if col_type is None:
+            return False
+        bounds = (f"try_cast(coalesce(stats_min_value, stats_min) AS {col_type}) AS lo, "
+                  f"try_cast(coalesce(stats_max_value, stats_max) AS {col_type}) AS hi")
+        groups, missing, overlaps = con.execute(
+            f"SELECT count(*), count(*) FILTER (WHERE lo IS NULL OR hi IS NULL), count(*) FILTER (WHERE lo < prev_hi) "
+            f"FROM (SELECT lo, hi, lag(hi) OVER (ORDER BY row_group_id) AS prev_hi FROM "
+            f"(SELECT row_group_id, {bounds} FROM parquet_metadata({lit(path)}) WHERE path_in_schema = {lit(column)}))"
+        ).fetchone()
+    except duckdb.Error:
+        return False
+    # A single row group says nothing about the order of its rows (and costs little to rewrite)
+    return groups > 1 and not missing and not overlaps
+
+
+def _link_or_copy(source: Path, target: Path, link: bool) -> str:
+    """Hard link (no copy, same volume), else copy. The published file is never modified in place."""
+    if link:
+        try:
+            os.link(source, target)
+            return "hard link"
+        except OSError:
+            pass
+    shutil.copyfile(source, target)
+    return "copy"
 
 
 def compute_changes(con: duckdb.DuckDBPyConnection, current: str, previous: str, key: str,
@@ -479,6 +645,8 @@ def execute_run(
         for f in files:
             check_source_file(f, ref.format, f.name)
         groups = manual_groups(ref, sorted(files))
+        if ref.is_sqlite and ref.incremental:  # a full database and / or deltas, applied to the kept database
+            groups, _ = _acquire_sqlite_base(ref, settings, run, paths, meta, cancelled, manual_files=sorted(files))
         names = [f.name for f in files]
         how = "file upload" if manual["origin"] == "upload" else "import folder"
         who = f" by {manual['by']}" if manual.get("by") else ""
@@ -492,6 +660,10 @@ def execute_run(
             "imported_at": iso(utcnow()),
             "checked_at": iso(utcnow()),
         })
+    elif ref.source.type == "http" and ref.incremental and ref.is_bloom:
+        return _run_bloom_incremental(ref, settings, run, paths, meta, cancelled)
+    elif ref.source.type == "http" and ref.incremental and ref.is_sqlite:
+        groups, sources = _acquire_sqlite_base(ref, settings, run, paths, meta, cancelled)
     elif ref.source.type == "http":
         # A changed configuration (transform, confidentiality...) needs the files again: no conditional request
         # (HTTP 304) when the downloaded files were not kept
@@ -499,7 +671,7 @@ def execute_run(
         previous_sources = {} if config_changed else {s.get("url"): s for s in meta.get("sources", [])}
         with http_client(settings) as client:
             for url in ref.source.urls:
-                entry = download(client, url, paths.raw, ref.source.request_headers(), ref.source.extract, previous_sources.get(url), run, cancelled, ref.format)
+                entry = download(client, url, paths.raw, ref.source.request_headers(url), ref.source.extract, previous_sources.get(url), run, cancelled, ref.format)
                 sources.append(entry)
                 groups.append([paths.raw / f for f in entry["files"]])
         _cleanup_raw(paths, {f for s in sources for f in s["files"]})
@@ -582,8 +754,18 @@ def execute_run(
     if ref.source.type not in ("http", "internal") and manual is None:  # downloaded / imported files are already checked
         for f in all_files:
             check_source_file(f, ref.format)
+    if ref.is_sqlite:
+        groups = [kept for kept in ([f for f in g if is_sqlite_file(f)] for g in groups) if kept]
+        all_files = [f for g in groups for f in g]
+        if not all_files:
+            raise SourceCorrupted("corrupted source: no SQLite database in the source files")
     run.stats["downloaded_bytes"] = run.bytes_done
-    fingerprint = _fingerprint(all_files, ref.config_hash)
+    if ref.is_sqlite:
+        state = meta.get("incremental") or {}
+        fingerprint = _fingerprint_stat(all_files, ref.config_hash, orjson.dumps(state.get("applied") or []).decode())
+    else:
+        downloaded = ref.source.type == "http" and manual is None and not ref.is_internal
+        fingerprint = (downloaded and _fingerprint_downloads(sources, ref.config_hash)) or _fingerprint(all_files, ref.config_hash)
     meta["sources"] = sources
     meta["raw_size"] = sum(f.stat().st_size for f in all_files)
     meta["last_checked_at"] = iso(utcnow())
@@ -625,11 +807,23 @@ def execute_run(
     if st.sort_by:
         sql = f"SELECT * FROM ({sql}) ORDER BY {', '.join(qi(c) for c in st.sort_by)}"
     con = _connect(settings, paths, ref.format, pkey)
+    if ref.is_sqlite:
+        attach_sqlite(con, [str(f) for f in all_files])
     index_tmp: dict[str, Path] = {}
     try:
         t0 = time.monotonic()
-        run.log("Transforming and writing parquet" + (f" (sorted on {', '.join(st.sort_by)})" if st.sort_by else ""))
-        con.execute(f"COPY ({sql}) TO {lit(str(tmp))} ({copy_opts})")
+        source = _passthrough_source(ref, groups)
+        if source is not None and st.sort_by and not _sorted_row_groups(con, str(source), st.sort_by[0]):
+            run.log(f"The Parquet source is not sorted on '{st.sort_by[0]}': it is rewritten sorted (long for billions of rows)")
+            source = None
+        if source is not None:
+            # A single Parquet file, nothing to change: published as is (hard link, else copy), not rewritten row by row
+            # Files of RefExposer (downloads, imports) are linked; files of the user are copied, as they may be rewritten in place
+            how = _link_or_copy(source, tmp, link=manual is not None or ref.source.type in ("http", "git"))
+            run.log(f"Parquet source published as is ({how}" + (f", already sorted on '{st.sort_by[0]}'" if st.sort_by else "") + ")")
+        else:
+            run.log("Transforming and writing parquet" + (f" (sorted on {', '.join(st.sort_by)})" if st.sort_by else ""))
+            con.execute(f"COPY ({sql}) TO {lit(str(tmp))} ({copy_opts})")
         rel = parquet_reader(str(tmp), new_key)
         if new_key:  # the footer of an encrypted file is not readable by parquet_file_metadata()
             rows = con.execute(f"SELECT count(*) FROM {rel}").fetchone()[0]
@@ -699,9 +893,14 @@ def execute_run(
         if mode != "none":
             try:
                 t1 = time.monotonic()
-                source = rel if mode == "full" else f"(SELECT * FROM {rel} USING SAMPLE 1000000 ROWS)"
+                if mode == "full" or rows <= PROFILE_SAMPLE_ROWS:
+                    source, sampled = rel, ""
+                else:
+                    # Blocks of rows picked at random: only they are read (a sample of single rows reads the whole file)
+                    source = f"(SELECT * FROM {rel} USING SAMPLE {PROFILE_SAMPLE_ROWS / rows * 100:.8f}% (system))"
+                    sampled = f" on a sample of about {PROFILE_SAMPLE_ROWS:,} rows"
                 profile = _profile(con, source)
-                run.log(f"Column profile computed{' on a sample of 1,000,000 rows' if mode == 'sample' else ''} in {time.monotonic() - t1:.1f}s")
+                run.log(f"Column profile computed{sampled} in {time.monotonic() - t1:.1f}s")
             except duckdb.Error as e:
                 run.log(f"Cannot compute the column profile: {e}", "warn")
     finally:
@@ -814,6 +1013,327 @@ def _publish_bloom(ref: ReferentialConfig, run: Run, paths: RefPaths, meta: dict
     run.stats.update({"rows": rows, "previous_rows": prev_rows, "version": meta["version"]})
     run.log(f"Version {meta['version']} published")
     return meta
+
+
+def _run_bloom_incremental(ref: ReferentialConfig, settings: Settings, run: Run, paths: RefPaths, meta: dict[str, Any],
+                           cancelled: Callable[[], bool]) -> dict[str, Any]:
+    """Bloom filter updated by deltas: the full filter when it changed (checked at most every `full_every`),
+    then the changed deltas added to a copy of the published filter. Inserting a value twice changes nothing,
+    so a delta already contained in a new full filter is simply applied again."""
+    inc = ref.incremental
+    assert inc is not None
+    state = dict(meta.get("incremental") or {})
+    same_config = meta.get("config_hash") == ref.config_hash
+    previous = {s.get("url"): s for s in meta.get("sources", [])} if paths.bloom.exists() and same_config else {}
+    last_check = parse_iso(state.get("full_checked_at"))
+    url = ref.source.urls[0]
+    full_due = (run.force or not previous or not inc.full_every or last_check is None
+                or utcnow() - last_check >= parse_duration(inc.full_every))
+    work = paths.work / "incremental"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    headers = ref.source.request_headers  # per URL: a secret may be restricted to some hosts
+    delta_fmt = "bloom" if inc.format == "bloom" else "txt"
+
+    new_full: Path | None = None
+    full_entry = previous.get(url) or {"url": url}
+    deltas: list[tuple[dict[str, Any], Path]] = []
+    try:
+        with http_client(settings) as client:
+            if full_due:
+                full_entry = download(client, url, paths.raw, headers(url), ref.source.extract, previous.get(url), run, cancelled, "bloom")
+                state["full_checked_at"] = iso(utcnow())
+                if not full_entry.get("not_modified"):
+                    files = [paths.raw / f for f in full_entry["files"]]
+                    if len(files) != 1:
+                        raise RunRejected(f"a single Bloom filter file is expected ({len(files)} found)")
+                    new_full = files[0]
+            else:
+                run.log(f"Full filter not checked (at most every {inc.full_every}): deltas only")
+            for i, durl in enumerate(inc.urls):
+                # After a new full filter, every delta is applied again: no conditional request
+                prev = previous.get(durl) if new_full is None else None
+                dest = work / f"delta{i}"
+                entry = download(client, durl, dest, headers(durl), None, prev, run, cancelled, delta_fmt)
+                deltas.append(({**entry, "delta": True}, dest))
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+
+    changed = [(e, d) for e, d in deltas if not e.get("not_modified")]
+    sources = [full_entry, *(e for e, _ in deltas)]
+    meta["last_checked_at"] = iso(utcnow())
+    if new_full is None and not changed:
+        shutil.rmtree(work, ignore_errors=True)
+        run.log("Full filter and deltas unchanged: the published version is kept")
+        run.status = "unchanged"
+        run.stats.update({"rows": meta.get("row_count")})
+        meta["sources"] = sources
+        meta["incremental"] = state
+        return meta
+
+    # Work on a copy: the published filter keeps answering lookups until the new one replaces it
+    run.phase = "build"
+    target = work / "current.bloom"
+    added = 0
+    try:
+        if new_full is not None:
+            os.replace(new_full, target)
+        else:
+            run.log(f"Copying the published filter ({paths.bloom.stat().st_size:,} bytes) to apply {len(changed)} delta(s)")
+            shutil.copyfile(paths.bloom, target)
+        try:
+            bf = BloomFilter(target, writable=True)
+        except (BloomError, OSError) as e:
+            raise RunRejected(f"unreadable Bloom filter: {e}") from e
+        mode = ref.options.get("normalize", "upper")
+        pattern = re.compile(ref.options["pattern"]) if ref.options.get("pattern") else None
+        try:
+            for entry, dest in changed:
+                before = bf.count
+                for f in (dest / name for name in entry["files"]):
+                    if inc.format == "bloom":
+                        try:
+                            delta = BloomFilter(f)
+                        except (BloomError, OSError) as e:
+                            raise SourceCorrupted(f"corrupted delta: {entry['url']} is not a Bloom filter ({e})") from e
+                        try:
+                            bf.merge(delta)
+                        except BloomError as e:
+                            raise RunRejected(f"delta {entry['url']}: {e}") from e
+                        finally:
+                            delta.close()
+                    else:
+                        skipped = _add_values(bf, f, mode, pattern, cancelled)
+                        if skipped:
+                            run.log(f"{f.name}: {skipped:,} line(s) ignored (do not match the expected values)", "warn")
+                entry["added"] = bf.count - before
+                entry["discarded"] = True  # revalidated with its ETag next time
+                added += entry["added"]
+                run.log(f"Delta {entry['url']}: {entry['added']:,} new element(s)")
+            bf.flush()
+            info = bf.info()
+        finally:
+            bf.close()
+        max_fp = inc.max_fp_rate or (info["target_fp_rate"] or 0.0) * 10
+        if max_fp and info["estimated_fp_rate"] > max_fp:
+            raise RunRejected(f"filter saturated: estimated false positive rate {info['estimated_fp_rate']:.1e} "
+                              f"> {max_fp:.1e} ({info['elements']:,} elements for a capacity of {info['capacity']:,}); "
+                              "a new full filter, sized for more elements, is needed")
+        fingerprint = _fingerprint([target], ref.config_hash)
+        meta = _publish_bloom(ref, run, paths, meta, [target], sources, fingerprint)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    _cleanup_raw(paths, set())
+
+    now = iso(utcnow())
+    if new_full is not None:
+        state.update({"full_fetched_at": now, "added_since_full": added, "deltas_since_full": len(changed)})
+        run.log(f"New full filter, {len(changed)} delta(s) applied on top ({added:,} new element(s))")
+    else:
+        state["added_since_full"] = int(state.get("added_since_full") or 0) + added
+        state["deltas_since_full"] = int(state.get("deltas_since_full") or 0) + len(changed)
+    if changed:
+        state["last_delta_at"] = now
+    meta["incremental"] = state
+    run.stats.update({"added": added, "full": new_full is not None})
+    return meta
+
+
+def _add_values(bf: BloomFilter, path: Path, mode: str, pattern: re.Pattern | None, cancelled: Callable[[], bool]) -> int:
+    """Insert the values of a delta file (one per line, # comments). Returns the number of ignored lines."""
+    skipped = 0
+    opener = gzip.open if path.name.lower().endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f):
+            if i % 100_000 == 0 and cancelled():
+                raise RunCancelled()
+            value = line.strip()
+            if not value or value.startswith("#"):
+                continue
+            value = bloom_normalize(value, mode)
+            if pattern and not pattern.fullmatch(value):
+                skipped += 1
+                continue
+            bf.add(value)
+    return skipped
+
+
+_TX_CONTROL = re.compile(r"^\s*(BEGIN|COMMIT|END|ROLLBACK)\b", re.I)
+
+
+def _sql_statements(path: Path):
+    """Statements of a SQL file, read as a stream (a delta can hold GB of INSERT statements).
+    Yields (line number, statement). sqlite3 shell commands (.read, .bail...) are skipped."""
+    import sqlite3
+
+    buf = ""
+    with path.open(encoding="utf-8-sig") as f:
+        for lineno, line in enumerate(f, 1):
+            if not buf and (not line.strip() or line.lstrip().startswith((".", "--"))):
+                continue
+            buf += line
+            if ";" not in line:
+                continue
+            # Usually one statement per line; a line may also hold several, or end a multi-line statement
+            start = 0
+            for i, ch in enumerate(buf):
+                if ch == ";" and sqlite3.complete_statement(buf[start:i + 1]):
+                    stmt = buf[start:i + 1].strip()
+                    if stmt != ";":
+                        yield lineno, stmt
+                    start = i + 1
+            buf = buf[start:] if buf[start:].strip() else ""
+    if buf.strip():
+        raise RunRejected(f"delta {path.name}: the last statement is incomplete (truncated file?)")
+
+
+def apply_sql_delta(db: Path, sql_file: Path, run: Run, cancelled: Callable[[], bool] = lambda: False) -> int:
+    """Run the statements of a SQL delta (INSERT / UPDATE / DELETE, e.g. NIST NSRL RDSv3) in the database, in a
+    single transaction: on any error or cancellation nothing is applied. Returns the number of statements."""
+    import sqlite3
+
+    con = sqlite3.connect(db, isolation_level=None)
+    count = 0
+    started = time.monotonic()
+    try:
+        con.execute("PRAGMA cache_size = -262144")  # 256 MB
+        con.execute("BEGIN IMMEDIATE")
+        for lineno, stmt in _sql_statements(sql_file):
+            if _TX_CONTROL.match(stmt):  # the transaction of the delta file is replaced by ours
+                continue
+            try:
+                con.execute(stmt)
+            except sqlite3.Error as e:
+                raise RunRejected(f"delta {sql_file.name}, line {lineno}: {e} (nothing applied)") from e
+            count += 1
+            if count % 200_000 == 0:
+                if cancelled():
+                    raise RunCancelled()
+                run.log(f"{sql_file.name}: {count:,} statements applied ({count / (time.monotonic() - started):,.0f}/s)")
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+    run.log(f"Delta {sql_file.name}: {count:,} statements applied in {time.monotonic() - started:.1f}s")
+    return count
+
+
+def _delta_sql_files(files: list[Path]) -> list[Path]:
+    """SQL files of a delta, in name order; the schema shipped with the NSRL deltas is not a delta."""
+    return sorted(f for f in files if f.suffix.lower() == ".sql" and "schema" not in f.name.lower())
+
+
+def _acquire_sqlite_base(ref: ReferentialConfig, settings: Settings, run: Run, paths: RefPaths, meta: dict[str, Any],
+                         cancelled: Callable[[], bool], manual_files: list[Path] | None = None) -> tuple[list[list[Path]], list[dict[str, Any]]]:
+    """SQLite database updated by SQL deltas (e.g. NIST NSRL RDSv3).
+
+    The full database is kept in base/ and each delta is applied once, in order: `incremental.urls` lists the deltas
+    to apply on top of the full database of `source.urls`. Adding a URL at the end applies only that delta; removing or
+    reordering an applied delta (or forcing the update) loads the full database again, then applies the whole list.
+    A manual import brings a full database (it replaces the kept one, the listed deltas are then applied on top) and /
+    or deltas (.sql, or an archive holding one), applied once to the kept database.
+    Returns the file groups to read (the kept database) and the source entries."""
+    assert ref.incremental is not None
+    state = dict(meta.get("incremental") or {})
+    applied: list[dict[str, Any]] = list(state.get("applied") or [])
+    base_info = state.get("base") or {}
+    base = paths.base / base_info["file"] if base_info.get("file") else None
+    url = ref.source.urls[0]
+    applied_urls = [a["url"] for a in applied if a.get("url")]
+    wanted = ref.incremental.urls
+
+    def save_state() -> None:
+        # Written at once: the kept database already holds the change, even if the rest of the run fails
+        state["applied"] = applied
+        meta["incremental"] = state
+        on_disk = read_meta(paths)
+        on_disk["incremental"] = state
+        write_meta(paths, on_disk)
+
+    def new_base(db: Path, origin: dict[str, Any]) -> Path:
+        nonlocal base, applied
+        paths.base.mkdir(parents=True, exist_ok=True)
+        target = paths.base / db.name
+        for old in paths.base.iterdir():
+            if old != target:
+                old.unlink(missing_ok=True)
+        shutil.move(db, target)  # the import folder may be another volume: copied then deleted
+        base, applied = target, []
+        state["base"] = {**origin, "file": target.name, "size": target.stat().st_size, "loaded_at": iso(utcnow())}
+        save_state()
+        run.log(f"Full database kept: {target.name} ({target.stat().st_size:,} bytes)")
+        return target
+
+    sources: list[dict[str, Any]] = []
+    manual_db = [f for f in manual_files or [] if is_sqlite_file(f)]
+    manual_deltas = _delta_sql_files(manual_files or [])
+    if manual_files is not None and not manual_db and not manual_deltas:
+        raise RunRejected("nothing to import: give a SQLite database (.db) or a SQL delta (.sql, or an archive holding one)")
+    if len(manual_db) > 1:
+        raise RunRejected(f"a single full database is expected ({len(manual_db)} found)")
+
+    if manual_db:
+        new_base(manual_db[0], {"url": None, "manual": True})
+    else:
+        reload = (run.force and manual_files is None) or base is None or not base.exists() \
+            or (base_info.get("url") not in (None, url)) or applied_urls != wanted[:len(applied_urls)]
+        if reload and manual_files is not None:
+            raise RunRejected("no full database to apply the delta to: import the full database first, or update the referential")
+        if reload:
+            why = ("forced update" if run.force else "no database kept yet" if base is None or not base.exists()
+                   else "the source changed" if base_info.get("url") not in (None, url) else "the list of deltas changed")
+            run.log(f"Full database needed ({why}): downloading {url}")
+            dest = paths.raw / "full"
+            for old in dest.iterdir() if dest.exists() else ():
+                if old.name != ".partial":  # interrupted download of the database: resumed
+                    shutil.rmtree(old, ignore_errors=True) if old.is_dir() else old.unlink(missing_ok=True)
+            with http_client(settings) as client:
+                entry = download(client, url, dest, ref.source.request_headers(url), ref.source.extract, None, run, cancelled, "sqlite")
+            dbs = [dest / f for f in entry["files"] if is_sqlite_file(dest / f)]
+            if len(dbs) != 1:
+                raise SourceCorrupted(f"corrupted source: a single SQLite database is expected in {url} ({len(dbs)} found)")
+            new_base(dbs[0], {"url": url, "etag": entry.get("etag"), "last_modified": entry.get("last_modified")})
+            shutil.rmtree(dest, ignore_errors=True)
+            sources.append({**entry, "files": [], "discarded": True})
+    if not sources:
+        sources.append({"url": url if not base_info.get("manual") else None, "files": [], "discarded": True,
+                        "base": (state.get("base") or {}).get("file"), "checked_at": iso(utcnow())})
+    assert base is not None
+
+    # Deltas imported by hand: applied once
+    for f in manual_deltas:
+        size = f.stat().st_size
+        if any(a.get("file") == f.name and a.get("size") == size for a in applied):
+            raise RunRejected(f"the delta {f.name} has already been applied to this database")
+        n = apply_sql_delta(base, f, run, cancelled)
+        applied.append({"url": None, "file": f.name, "size": size, "statements": n, "manual": True, "at": iso(utcnow())})
+        save_state()
+
+    # Listed deltas not applied yet (after a new full database: all of them). Not with a manual delta only.
+    if manual_files is None or manual_db:
+        pending = wanted[len([a for a in applied if a.get("url")]):]
+        if pending:
+            run.log(f"{len(pending)} delta(s) to apply")
+        work = paths.work / "deltas"
+        try:
+            with http_client(settings) as client:
+                for durl in pending:
+                    shutil.rmtree(work, ignore_errors=True)
+                    entry = download(client, durl, work, ref.source.request_headers(durl), None, None, run, cancelled, "sql")
+                    files = _delta_sql_files([work / f for f in entry["files"]])
+                    if not files:
+                        raise SourceCorrupted(f"corrupted delta: no SQL file in {durl}")
+                    n = sum(apply_sql_delta(base, f, run, cancelled) for f in files)
+                    applied.append({"url": durl, "file": ", ".join(f.name for f in files), "statements": n, "at": iso(utcnow())})
+                    save_state()
+                    sources.append({**entry, "files": [], "discarded": True, "delta": True})
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    return [[base]], sources
 
 
 def _publish_mmdb(ref: ReferentialConfig, run: Run, paths: RefPaths, meta: dict[str, Any],

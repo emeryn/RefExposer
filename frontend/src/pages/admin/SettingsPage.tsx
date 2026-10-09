@@ -27,15 +27,15 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconBrush, IconCheck, IconFileText, IconKey, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconX } from '@tabler/icons-react';
+import { IconBrush, IconCheck, IconFileText, IconKey, IconMail, IconRobot, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconX } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState, type ReactNode } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useBranding } from '../../api/hooks';
-import type { BrandingSettings, LdapSettings, LogLevel, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
+import type { BrandingSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
 import { BrandHeader } from '../../components/Brand';
-import { CopyIcon } from '../../components/Common';
+import { CodeSnippet, CopyIcon } from '../../components/Common';
 
 const MONO = { input: { fontFamily: 'var(--mantine-font-family-monospace)' } };
 
@@ -269,6 +269,182 @@ function MfaTab({ initial, ssoOnly }: { initial: MfaSettings; ssoOnly: boolean }
             </Group>
           </Section>
         </Stack>
+      </Grid.Col>
+    </Grid>
+  );
+}
+
+// ------------------------------------------------------------------ e-mail (SMTP)
+
+function SmtpTab({ initial }: { initial: SmtpSettings }) {
+  const [cfg, setCfg] = useState(initial);
+  useEffect(() => setCfg(initial), [initial]);
+  const set = <K extends keyof SmtpSettings>(k: K, v: SmtpSettings[K]) => setCfg((c) => ({ ...c, [k]: v }));
+  const save = useSave('smtp');
+  const [to, setTo] = useState('');
+  const test = useMutation({ mutationFn: () => api.testSmtp(cfg, to) });
+  return (
+    <Grid gutter="md">
+      <Grid.Col span={{ base: 12, lg: 7 }}>
+        <Stack>
+          <Section title="Outgoing e-mail server (SMTP)" icon={<IconMail size={18} />}>
+            <Text size="sm" c="dimmed">
+              Used by the e-mail channels of <Link to="/admin/notifications">Administration › Notifications</Link> (failure of a referential,
+              recovery, new version).
+            </Text>
+            <SimpleGrid cols={{ base: 1, sm: 3 }}>
+              <TextInput label="Server" placeholder="smtp.example.com" value={cfg.host} onChange={(e) => set('host', e.currentTarget.value)} />
+              <NumberInput label="Port" min={1} max={65535} value={cfg.port} onChange={(v) => set('port', Number(v) || 587)} />
+              <Select
+                label="Security"
+                data={[
+                  { value: 'starttls', label: 'STARTTLS (587)' },
+                  { value: 'tls', label: 'TLS (465)' },
+                  { value: 'none', label: 'None (internal relay)' },
+                ]}
+                value={cfg.security}
+                onChange={(v) => {
+                  const security = (v ?? 'starttls') as SmtpSettings['security'];
+                  setCfg((c) => ({ ...c, security, port: security === 'tls' ? 465 : security === 'starttls' ? 587 : 25 }));
+                }}
+              />
+            </SimpleGrid>
+            <TextInput
+              label="Sender"
+              placeholder="RefExposer <refexposer@example.com>"
+              value={cfg.from_address}
+              onChange={(e) => set('from_address', e.currentTarget.value)}
+            />
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput label="User name" description="Empty: no authentication" value={cfg.username} onChange={(e) => set('username', e.currentTarget.value)} autoComplete="off" />
+              <SecretInput
+                label="Password"
+                value={cfg.password}
+                isSet={cfg.password_set}
+                clear={cfg.password_clear}
+                onChange={(v) => set('password', v)}
+                onClear={(v) => set('password_clear', v)}
+              />
+            </SimpleGrid>
+            <Switch
+              label="Verify the certificate of the server"
+              description="The company certificate authorities of Network & proxy are trusted too"
+              checked={cfg.verify_tls}
+              onChange={(e) => set('verify_tls', e.currentTarget.checked)}
+            />
+            <Group>
+              <Button onClick={() => save.mutate(cfg)} loading={save.isPending}>
+                Save
+              </Button>
+            </Group>
+          </Section>
+        </Stack>
+      </Grid.Col>
+      <Grid.Col span={{ base: 12, lg: 5 }}>
+        <Section title="Test" icon={<IconPlugConnected size={18} />}>
+          <Text size="sm" c="dimmed">
+            Sends a test e-mail with the settings of the form (saved or not).
+          </Text>
+          <Group align="flex-end">
+            <TextInput label="Recipient" placeholder="me@example.com" value={to} onChange={(e) => setTo(e.currentTarget.value)} style={{ flex: 1 }} />
+            <Button variant="light" onClick={() => test.mutate()} loading={test.isPending} disabled={!to.trim() || !cfg.host}>
+              Send
+            </Button>
+          </Group>
+          {test.data && (
+            <Alert color={test.data.ok ? 'teal' : 'red'} p="xs">
+              <Text size="sm">{test.data.ok ? `Sent in ${test.data.elapsed_ms} ms` : test.data.error}</Text>
+            </Alert>
+          )}
+          {test.error && (
+            <Alert color="red" p="xs">
+              <Text size="sm">{(test.error as Error).message}</Text>
+            </Alert>
+          )}
+        </Section>
+      </Grid.Col>
+    </Grid>
+  );
+}
+
+// ------------------------------------------------------------------ MCP server
+
+function McpTab({ initial, url }: { initial: McpSettings; url: string }) {
+  const [cfg, setCfg] = useState(initial);
+  useEffect(() => setCfg(initial), [initial]);
+  const save = useSave('mcp');
+  const { data: users } = useQuery({ queryKey: ['admin-users'], queryFn: api.users });
+  const services = (users ?? []).filter((u) => u.is_service);
+  const claude = `claude mcp add --transport http refexposer ${url} --header "Authorization: Bearer $REFEX_MCP_TOKEN"`;
+  const json = JSON.stringify(
+    { mcpServers: { refexposer: { type: 'http', url, headers: { Authorization: 'Bearer ${REFEX_MCP_TOKEN}' } } } },
+    null,
+    2,
+  );
+  return (
+    <Grid gutter="md">
+      <Grid.Col span={{ base: 12, lg: 7 }}>
+        <Section title="Administration MCP server" icon={<IconRobot size={18} />}>
+          <Text size="sm" c="dimmed">
+            An AI agent (Claude Code, Claude Desktop, any MCP client) drives RefExposer through the Model Context Protocol: analyse
+            sources, create and update referentials, follow imports, manage secrets, bulk discovery, users, rights… It authenticates
+            with an API token of a <b>service account</b> chosen below. Through this server only, the account acts as an
+            administrator: its token alone keeps its usual rights, and disabling the server withdraws them at once. Every action is
+            recorded in the audit log with <Code>via: mcp</Code>.
+          </Text>
+          <Switch label="Enable the MCP server" checked={cfg.enabled} onChange={(e) => setCfg((c) => ({ ...c, enabled: e.currentTarget.checked }))} />
+          <MultiSelect
+            label="Service accounts allowed"
+            description={
+              <>
+                Create a service account and its API token in <Link to="/admin/users">Users</Link> (service accounts never sign in to the
+                interface).
+              </>
+            }
+            data={services.map((u) => ({ value: String(u.id), label: u.display_name ? `${u.username} — ${u.display_name}` : u.username }))}
+            value={cfg.account_ids.map(String)}
+            onChange={(v) => setCfg((c) => ({ ...c, account_ids: v.map(Number) }))}
+            placeholder={services.length ? 'Choose…' : 'No service account yet'}
+            searchable
+          />
+          <Switch
+            label="Read-only"
+            description="Only the tools that read (state, data, SQL, preview, scan): no creation, change, deletion or update."
+            checked={cfg.read_only}
+            onChange={(e) => setCfg((c) => ({ ...c, read_only: e.currentTarget.checked }))}
+          />
+          {cfg.enabled && !cfg.account_ids.length && (
+            <Alert color="orange" p="xs">
+              <Text size="xs">No service account allowed: nobody can use the server.</Text>
+            </Alert>
+          )}
+          <Group>
+            <Button onClick={() => save.mutate(cfg)} loading={save.isPending}>
+              Save
+            </Button>
+          </Group>
+        </Section>
+      </Grid.Col>
+      <Grid.Col span={{ base: 12, lg: 5 }}>
+        <Section title="Connect a client" icon={<IconPlugConnected size={18} />}>
+          <Group gap={4}>
+            <Text size="sm">Server URL (Streamable HTTP):</Text>
+            <Code>{url}</Code>
+            <CopyIcon value={url} />
+          </Group>
+          <Text size="xs" c="dimmed">
+            Claude Code (the token in the REFEX_MCP_TOKEN variable):
+          </Text>
+          <CodeSnippet code={claude} />
+          <Text size="xs" c="dimmed">
+            Clients configured with JSON (.mcp.json, Claude Desktop…):
+          </Text>
+          <CodeSnippet code={json} />
+          <Text size="xs" c="dimmed">
+            Secrets stay write-only: the agent can create or replace a secret, never read one back. Restrict each secret to its hosts so
+            that no source pointed elsewhere can receive it.
+          </Text>
+        </Section>
       </Grid.Col>
     </Grid>
   );
@@ -855,6 +1031,12 @@ export default function SettingsPage() {
           <Tabs.Tab value="logging" leftSection={<IconFileText size={16} />} rightSection={data.syslog.enabled ? <Badge size="xs" color="teal">syslog</Badge> : null}>
             Logging
           </Tabs.Tab>
+          <Tabs.Tab value="smtp" leftSection={<IconMail size={16} />} rightSection={data.smtp.host ? <Badge size="xs" color="teal">on</Badge> : null}>
+            E-mail
+          </Tabs.Tab>
+          <Tabs.Tab value="mcp" leftSection={<IconRobot size={16} />} rightSection={data.mcp.enabled ? <Badge size="xs" color="teal">on</Badge> : null}>
+            MCP server
+          </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="network">
           <ProxyTab initial={data.proxy} envProxy={data.environment_proxy} />
@@ -873,6 +1055,12 @@ export default function SettingsPage() {
         </Tabs.Panel>
         <Tabs.Panel value="appearance">
           <BrandingTab initial={data.branding} />
+        </Tabs.Panel>
+        <Tabs.Panel value="smtp">
+          <SmtpTab initial={data.smtp} />
+        </Tabs.Panel>
+        <Tabs.Panel value="mcp">
+          <McpTab initial={data.mcp} url={data.mcp_url} />
         </Tabs.Panel>
       </Tabs>
     </Stack>

@@ -25,7 +25,7 @@ from .engine import rows_to_lists
 from .ingest import Run, _filename, check_source_file, download, http_client, unpack
 from .settings import Settings
 from .convert import ConvertError, json_candidates, xml_candidates
-from .sqlbuild import build_source_sql, lit
+from .sqlbuild import attach_sqlite, build_source_sql, is_sqlite_file, lit
 
 PREVIEW_TTL = 30 * 60
 PREVIEW_ROWS = 50
@@ -35,6 +35,8 @@ COUNT_MAX_BYTES = 300 * 1024 * 1024
 SAMPLE_BYTES = 32 * 1024 * 1024
 SAMPLE_EXTENSIONS = {".csv", ".tsv", ".tab", ".txt", ".list", ".lst", ".dat", ".jsonl", ".ndjson"}
 FULL_MAX_BYTES = 1024 * 1024 * 1024
+# Bloom filters (often several GB, e.g. CIRCL hashlookup) are described by their header: only the beginning is read
+BLOOM_HEAD_BYTES = 4096
 UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 _EXT_FORMATS = {
@@ -50,6 +52,9 @@ _EXT_FORMATS = {
     ".bloom": "bloom",
     ".mmdb": "mmdb",
     ".xml": "xml",
+    ".db": "sqlite",
+    ".sqlite": "sqlite",
+    ".sqlite3": "sqlite",
 }
 
 _locks: dict[str, threading.Lock] = {}
@@ -122,12 +127,12 @@ def cleanup(settings: Settings) -> None:
 
 # --------------------------------------------------------------------------- acquisition
 
-def _request_headers(source: dict[str, Any]) -> dict[str, str]:
+def _request_headers(source: dict[str, Any], url: str) -> dict[str, str]:
     from .config import SourceConfig
 
     try:
         return SourceConfig.model_validate({"type": "http", "urls": ["x"], "headers": source.get("headers") or {},
-                                            "basic_auth": source.get("basic_auth") or None}).request_headers()
+                                            "basic_auth": source.get("basic_auth") or None}).request_headers(url)
     except ValueError as e:  # e.g. undefined ${REFEX_SOURCE_...} variable
         raise PreviewError(str(e)) from e
 
@@ -152,6 +157,15 @@ def fetch_url(settings: Settings, url: str, headers: dict[str, str], extract: st
         return [dest / f for f in entry["files"]], [log["msg"] for log in run.logs], dest, bool(entry.get("sampled"))
 
 
+class TooLargeToAnalyse(PreviewError):
+    """A source read as a whole (archive, SQLite database...) larger than FULL_MAX_BYTES: not downloaded for the preview."""
+
+    def __init__(self, url: str, name: str, size: int):
+        self.url, self.name, self.size = url, name, size
+        super().__init__(f"{name} ({_human(size)}) is too large to be analysed before the import: this format is read as a "
+                         "whole. Choose the format and its options by hand; the import downloads the whole file.")
+
+
 def _human(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
@@ -171,10 +185,22 @@ def _sample(client, url: str, dest: Path, headers: dict[str, str], run: Run) -> 
         lower = name.lower()
         gz = lower.endswith(".gz") and not lower.endswith(".tar.gz")
         base = name[:-3] if gz else name
+        if not gz and Path(base).suffix.lower() == ".bloom":
+            dest.mkdir(parents=True, exist_ok=True)
+            head = b""
+            for chunk in resp.iter_bytes(BLOOM_HEAD_BYTES):
+                head += chunk
+                if len(head) >= BLOOM_HEAD_BYTES:
+                    break
+            if not head:
+                raise PreviewError(f"corrupted source: {url} returned an empty file")
+            (dest / base).write_bytes(head[:BLOOM_HEAD_BYTES])
+            size = f" of {_human(total)}" if total else ""
+            run.log(f"Bloom filter{size}: only its header is read for the preview. The whole file is downloaded by the import.")
+            return {"url": url, "files": [base], "sampled": True, "header_only": True, "remote_size": total}
         if Path(base).suffix.lower() not in SAMPLE_EXTENSIONS or lower.endswith((".zip", ".tgz", ".tar.gz", ".tar")):
             if total > FULL_MAX_BYTES:
-                raise PreviewError(f"{name} ({_human(total)}) is too large to be analysed: this format is read as a whole. "
-                                   "Set the format and options by hand, or analyse a smaller extract of the file.")
+                raise TooLargeToAnalyse(url, name, total)
             return None
         dest.mkdir(parents=True, exist_ok=True)
         target = dest / base
@@ -258,7 +284,7 @@ def acquire(settings: Settings, source: dict[str, Any], ref_root: Path | None, r
         for url in urls:
             if not re.match(r"^https?://", url.strip()):
                 raise PreviewError(f"invalid URL (http/https expected): {url}")
-            files, log, base, sampled = fetch_url(settings, url.strip(), _request_headers(source), source.get("extract"), refresh)
+            files, log, base, sampled = fetch_url(settings, url.strip(), _request_headers(source, url.strip()), source.get("extract"), refresh)
             logs.extend(log)
             groups.append(files)
             described.extend({**d, "url": url, "sampled": sampled} for d in _describe(files, base))
@@ -272,6 +298,10 @@ def acquire(settings: Settings, source: dict[str, Any], ref_root: Path | None, r
         logs.extend(log)
         groups.append(files)
         described.extend(_describe(files, base))
+    elif stype == "_files":  # files already fetched (bulk discovery): internal only, not offered by the API
+        files = [Path(p) for p in source.get("paths") or []]
+        groups.append(files)
+        described.extend(_describe(files, Path(source.get("base") or files[0].parent)))
     elif stype == "local":
         if ref_root is None:
             raise PreviewError("local source: unknown referential")
@@ -315,6 +345,8 @@ def detect_format(files: list[Path]) -> tuple[str, dict[str, Any]]:
     # Archives of a MaxMind DB also hold COPYRIGHT.txt / LICENSE.txt: the database decides
     if any(p.suffix.lower() == ".mmdb" for p in files):
         return "mmdb", {}
+    if any(is_sqlite_file(p) for p in files):  # e.g. NIST NSRL: database + readme + schema
+        return "sqlite", {}
     f = files[0]
     ext = Path(re.sub(r"\.gz$", "", f.name, flags=re.I)).suffix.lower()  # .csv.gz is read as .csv
     fmt = _EXT_FORMATS.get(ext)
@@ -373,7 +405,17 @@ def preview(
     timeout: float = 120,
 ) -> dict[str, Any]:
     cleanup(settings)
-    groups, logs, described = acquire(settings, source, ref_root, refresh)
+    try:
+        groups, logs, described = acquire(settings, source, ref_root, refresh)
+    except TooLargeToAnalyse as e:
+        guess = _EXT_FORMATS.get(Path(re.sub(r"\.(gz|zip)$", "", e.name, flags=re.I)).suffix.lower())
+        return {
+            "files": [{"name": e.name, "size": e.size, "url": e.url, "sampled": False}],
+            "logs": [str(e)], "detected_format": guess, "format": fmt or guess, "sniff": None,
+            "records_path_candidates": [], "applied_options": {}, "sampled": False,
+            "columns": [], "rows": [], "total_rows": None, "error": None, "sql": None,
+            "unanalysed": str(e),
+        }
     all_files = [f for g in groups for f in g]
     detected, details = detect_format(all_files)
     fmt = fmt or detected
@@ -413,12 +455,16 @@ def preview(
         result["total_rows"] = info["node_count"]
         return result
     if fmt == "bloom":
-        from .bloom import BloomError, BloomFilter
+        from .bloom import BloomError, BloomFilter, header_info
 
         try:
-            bf = BloomFilter(all_files[0])
-            info = bf.info()
-            bf.close()
+            if result["sampled"] and all_files[0].stat().st_size <= BLOOM_HEAD_BYTES:
+                # Remote filter: described from its header, without downloading it
+                info = header_info(all_files[0].read_bytes())
+            else:
+                bf = BloomFilter(all_files[0])
+                info = bf.info()
+                bf.close()
         except (BloomError, OSError) as e:
             result["error"] = f"unreadable Bloom filter: {e}"
             return result
@@ -426,6 +472,20 @@ def preview(
         result["rows"] = [[k, str(v)] for k, v in info.items()]
         result["total_rows"] = info["elements"]
         return result
+    if fmt == "sqlite":
+        groups = [kept for kept in ([f for f in g if is_sqlite_file(f)] for g in groups) if kept]
+        if not groups:
+            result["error"] = "no SQLite database in the source"
+            return result
+        tables = sqlite_tables(groups[0][0])
+        result["records_path_candidates"] = tables
+        if not options.get("table"):
+            if len(tables) != 1:
+                result["error"] = (f"choose the table or view to read (option 'table'): {', '.join(tables[:20])}"
+                                   if tables else "the SQLite database has no table")
+                return result
+            options = {**options, "table": tables[0]}
+            result["applied_options"] = {"table": tables[0]}
     try:
         sql = build_source_sql(fmt, [[str(f) for f in g] for g in groups], options, transform)
     except Exception as e:  # noqa: BLE001
@@ -440,6 +500,8 @@ def preview(
             con.execute("LOAD excel")
         except duckdb.Error:
             con.execute("INSTALL excel; LOAD excel")
+    if fmt == "sqlite":
+        attach_sqlite(con, [str(f) for g in groups for f in g])
     timer = threading.Timer(timeout, con.interrupt)
     timer.start()
     try:
@@ -471,6 +533,19 @@ def preview(
         timer.cancel()
         con.close()
     return result
+
+
+def sqlite_tables(path: Path) -> list[str]:
+    """Tables and views of a SQLite database (views first: e.g. FILE, PKG of the NIST NSRL)."""
+    import sqlite3
+
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT name FROM sqlite_master WHERE type IN ('view', 'table') AND name NOT LIKE 'sqlite_%' "
+                           "ORDER BY type DESC, name").fetchall()
+    finally:
+        con.close()
+    return [r[0] for r in rows]
 
 
 def adopt_upload(settings: Settings, upload_id: str, raw_dir: Path) -> list[str]:

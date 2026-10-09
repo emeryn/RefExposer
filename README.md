@@ -17,12 +17,16 @@ Beyond downloaded sources:
 - **Sync folder**: files pushed into a folder (scp / rsync over ssh, every week for instance) become referentials by themselves, imported again when they change.
 - **Manual imports**: a version can be uploaded from the referential page or dropped in an import folder, for example when the source is unreachable or only sent by e-mail.
 - **Corrupted sources are refused**: an empty file, an HTML error page or a broken archive never replaces the current version; the error is shown on the referential.
+- **Notifications**: e-mails and generic webhooks (Slack, Teams, Discord, incident tools…) when a referential fails, recovers or publishes a new version.
 
 Access is protected:
 
 - **Identity sources**: local accounts, an **LDAP directory / Active Directory** or **OpenID Connect** (Keycloak…), with group synchronization.
 - **Approval**: an administrator approves every new access.
 - **Roles** (administrator, advanced user, user), **rights per referential**, API tokens, **service accounts** for tools (API only) and an audit log.
+- **Secret manager**: API keys, tokens and passwords of the sources are stored encrypted and referenced as `${secret:<name>}`, never returned by the API, optionally restricted to their hosts.
+- **Bulk discovery**: every data file of a Git repository (e.g. [cybref](https://github.com/emeryn/cybref)) or of an HTTP folder becomes a referential in a few clicks.
+- **Administration MCP server** (optional): an AI agent drives RefExposer through the Model Context Protocol, with the API token of a service account.
 - **Storage**: accounts, settings, definitions and internal rows in PostgreSQL. **Confidential referentials** are encrypted at rest (data files, internal rows and their keys).
 
 The security mechanisms are summarized in [Enterprise security](#enterprise-security).
@@ -590,6 +594,32 @@ These definitions are stored in the database. They can be changed later with **C
 
 > Administrators are trusted users. A source or an SQL transformation makes the server access the network and files, like a configuration file would. Only give the admin role to people who need it.
 
+### Bulk discovery (Git repository, HTTP folder)
+
+**Administration › Bulk discovery** creates one referential per data file of a source, for example the 100 files of `output/` in [github.com/emeryn/cybref](https://github.com/emeryn/cybref):
+
+1. **Scan** a Git repository (HTTPS URL, glob of the files such as `output/*`, branch, token) or an HTTP folder (page listing the files: Apache, nginx, Caddy autoindex…; glob, sub-folder levels, authentication). For Git, only the tree of the commit is fetched, not the content: listing a repository takes about a second.
+2. Each data file (known extension, possibly `.gz` / `.zip`) becomes a **proposal**: identifier and name from the file name (`-2` when the identifier is taken), Git or HTTP source, format, and the category, tags and schedule given once for all. Files already used by a referential are flagged and left unselected.
+3. **Analyse** (optional): the files are fetched (Git: only them, in one sparse fetch; HTTP: sampled) and read like the preview of the editor. The format, the record path of a JSON document (`records_path: prefixes` for `aws_ip_ranges.json`), the columns and the row count are filled in, and unreadable files are shown with their error.
+4. Review the list (identifier, name and format can be changed), choose the groups with read access, then **create** the selected referentials and start their imports.
+
+Credentials of a private repository or folder must be `${secret:…}` references (see [Secret manager](#secret-manager)), because they are copied into every definition. API: `POST /api/admin/discovery/scan`, then `POST /api/admin/discovery/apply`.
+
+### Export and import (from one environment to another)
+
+**Administration › Referentials › Export** downloads the configuration of the referentials to set up another instance (test, then production; a new server):
+
+- **Content**: the definitions (created in the interface, internal referentials without their rows, YAML files of `config/`; the referentials of the sync folder are left out), the **rights** given to groups (by name) and users (by user name), the groups they use, and the **secrets they need: names, descriptions and allowed hosts, never the values**.
+- **Literal credentials** still written in definitions are masked by default. *Included in clear* puts them in the file: keep such a file like a password, or better, move them to the secret manager.
+- **Format**: YAML (or JSON) in the format of the files of `config/`. The file can also be dropped into `config/` as is: the extra keys are ignored.
+
+**Import** (same page) works in two steps:
+
+1. **Analyse**: nothing changes yet. For each referential, the plan says *create*, *update* (with the changed fields), *unchanged*, *skip* (already defined, when keeping the existing ones), *conflict* (defined in a YAML file or the sync folder of this instance) or *error* (invalid definition, unknown secret, masked credential with nothing to keep). The secrets to create first and the missing groups are listed.
+2. **Import** the selected referentials, with their rights. Missing groups are created on request (add their members afterwards, or let LDAP / OpenID Connect synchronize them), and the imports can be started at once. A masked credential keeps the value already stored on the target.
+
+API: `GET /api/admin/config/export?ids=&grants=&credentials=masked|included&format=yaml|json`, `POST /api/admin/config/import` (`apply: false` for the plan). MCP tools: `export_configuration`, `import_configuration`.
+
 ### With a YAML file
 
 Add a `config/<name>.yml` file (or complete an existing one), then click **System › Reload the configuration**, or call `POST /api/system/reload`. No restart is needed.
@@ -644,6 +674,7 @@ referentials:
 | `xml` | converted to JSON Lines, then `read_json` | `records_path`: name of the repeated record element (default: the likeliest one, frequent and rich) |
 | `bloom` | DCSO Bloom filter (published as is) | `normalize`, `pattern`, `enrich_bulk_url`, `enrich_key` |
 | `mmdb` | MaxMind DB (published as is, IP lookups) | |
+| `sqlite` | SQLite database, attached read-only (sqlite extension) | `table`: table or view to read (see [SQLite databases](#sqlite-databases-nist-nsrl-and-sql-deltas)) |
 
 ### SQL transformations
 
@@ -699,6 +730,38 @@ options:
   enrich_key: SHA-1
 ```
 
+#### Incremental updates (deltas)
+
+When the provider also publishes **deltas**, the full filter (often around 1 GB) does not have to be downloaded at every update. The `incremental` block lists the delta files. They are added to the published filter, and the full filter is only downloaded again when the provider publishes a new one.
+
+```yaml
+format: bloom
+source:
+  urls: [https://example.org/hashlookup-full.bloom]   # full filter
+schedule: "0 6 * * *"                               # deltas checked every day
+incremental:
+  urls: [https://example.org/hashlookup-delta.txt.gz]
+  format: values        # values: one value per line (# comments, .gz accepted)
+                        # bloom: Bloom filter with the same size and hash functions as the full one
+  full_every: 30d       # full filter checked at most every 30 days (every update when omitted)
+  max_fp_rate: 0.001    # optional, default: 10 times the rate the full filter was built for
+```
+
+At each update:
+
+1. **Full filter**: it is checked when `full_every` has elapsed, with a conditional request (`If-None-Match` / `If-Modified-Since`): nothing is downloaded when it did not change. A new full filter replaces the published one, and the deltas are applied again on top of it.
+2. **Deltas**: each URL is checked the same way, and only a changed file is downloaded. It is added to a copy of the published filter, so lookups keep working during the update. Its values are normalized like the lookups (`normalize`), and the lines that do not match `pattern` are ignored and counted in the log.
+3. **Publication**: the result becomes a new version (the previous one is kept, see `storage.keep_previous`). The run history shows the new elements of each delta, and whether the full filter was downloaded.
+
+Good to know:
+
+- **Applying a delta twice changes nothing**: adding a value that is already in a Bloom filter does not modify it. A delta already contained in a new full filter, or applied again after a failure, is therefore harmless.
+- **Deletions**: a Bloom filter cannot remove a value. Values withdrawn by the provider remain present until the next full filter.
+- **Saturation**: each delta adds elements to a filter sized for a fixed capacity, so the false positive rate rises. A delta that would push the estimated rate above `max_fp_rate` is **rejected**, and the published version is kept. Wait for a new full filter, or force an update (`POST /api/referentials/<id>/refresh?force=true`) when the provider has published one.
+- **Delta as a Bloom filter**: it must have the same size (bits) and number of hash functions as the full filter (the two are combined bit by bit). Otherwise it is rejected with an explanation.
+- Deltas use the same headers and credentials as the full filter (`source.headers`, `basic_auth`). `incremental` only applies to a Bloom filter downloaded from a single URL.
+- **Forced update**: it downloads everything again, the full filter and the deltas.
+
 ### Git repositories (GitHub, GitLab, Gitea…)
 
 A referential can come from **files of a Git repository**. It works with GitHub, GitLab, Gitea / Forgejo, Bitbucket or any Git server over HTTPS. In the editor, choose **Git repository** as the source. Give:
@@ -710,7 +773,7 @@ A referential can come from **files of a Git repository**. It works with GitHub,
 
 - **Only what is needed is downloaded**: one commit (`--depth 1`), the matching files only (sparse, partial fetch). A large repository costs little.
 - **No useless update**: `git ls-remote` runs first. While the branch or tag still points to the published commit, nothing is fetched and the run ends as *unchanged*. The published commit is shown in the sources of the referential.
-- **Private repositories**: the token is sent as HTTP Basic credentials, with the user name `oauth2` by default (accepted by GitHub, GitLab and Gitea; it can be changed). The token never goes in the URL nor on a command line, is masked in every message, and is not returned by the API. Keep it out of the definition with a `${REFEX_SOURCE_…}` variable of `.env`.
+- **Private repositories**: the token is sent as HTTP Basic credentials, with the user name `oauth2` by default (accepted by GitHub, GitLab and Gitea; it can be changed). The token never goes in the URL nor on a command line, is masked in every message, and is not returned by the API. Keep it out of the definition with a secret of the [secret manager](#secret-manager) (`token: "${secret:gitlab-token}"`) or a `${REFEX_SOURCE_…}` variable of `.env`.
 
 | Server | Token | Read permission |
 |---|---|---|
@@ -776,6 +839,45 @@ curl -fsS -u "x:$REFEX_TOKEN" -z GeoLite2-City.mmdb -o GeoLite2-City.mmdb \
 wget -N --user=x --password="$REFEX_TOKEN" https://refexposer.example.com/api/referentials/geolite2-city/raw -O GeoLite2-City.mmdb
 ```
 
+### SQLite databases (NIST NSRL) and SQL deltas
+
+The `sqlite` format reads one **table or view** of a SQLite database (`options.table`), possibly inside an archive with other files (readme, schema…), which are ignored. The database is attached read-only, so views keep their column types. The usual SQL transformation applies on top (`{source}` is the chosen table).
+
+When the publisher provides **SQL deltas**, as the [NIST NSRL](https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl) does with its RDSv3 publications (a full database once a year, then a SQL file of `INSERT`, `UPDATE` and `DELETE` statements each quarter), declare them in `incremental`. The full database is then **kept** in `data/<id>/base/`, and each delta is applied **once, in the order of the list**:
+
+```yaml
+id: nsrl-modern
+name: NIST NSRL (modern, minimal)
+format: sqlite
+source:
+  urls: [https://s3.amazonaws.com/rds.nsrl.nist.gov/RDS/rds_2026.03.1/RDS_2026.03.1_modern_minimal.zip]
+options:
+  table: FILE                  # FILE (sha256, sha1, md5, crc32, file_name, file_size, package_id)
+key: sha1
+search_columns: [sha1, sha256, md5, file_name]
+incremental:
+  urls:                        # deltas published after the full database, oldest first
+    - https://s3.amazonaws.com/rds.nsrl.nist.gov/RDS/rds_2026.06.1/RDS_2026.06.1_modern_minimal_delta.zip
+    - https://s3.amazonaws.com/rds.nsrl.nist.gov/RDS/rds_2026.09.1/RDS_2026.09.1_modern_minimal_delta.zip
+storage:
+  sort_by: [sha1]              # hundreds of millions of rows: fast lookups by hash
+  indexes: [sha256, md5]
+  keep_raw: false
+schedule: "0 6 * * *"
+```
+
+In the interface: **New referential**, source URL, format **SQLite database**, table, and the deltas in the *Deltas* field. A source too large to be analysed (the full NSRL archives weigh tens of GB) is not downloaded by the preview: choose the format and the table by hand, and the import does the rest in the background.
+
+How it works:
+
+- **First import**: the full database is downloaded and unpacked (the archive is then deleted), kept, and the listed deltas are applied on top. The referential is then built from the database (sort, indexes, profile…).
+- **New delta**: add its URL **at the end** of the list. At the next update, only this delta is downloaded and applied; the others are not downloaded again. Nothing new: no download, no new version.
+- **Each delta runs in a transaction**: a broken or truncated delta is rejected without changing anything (the database and the published version stay as they were), and can be applied again once fixed. The transaction statements of the file (`BEGIN TRANSACTION` / `COMMIT`) are replaced by RefExposer's own.
+- **Deltas imported by hand**: drop the delta (`.sql`, or the NIST zip) with the **Import** button of the referential or in `import/<id>/`. It is applied once to the kept database; the same file is refused the second time. A full database (`.db`) imported by hand replaces the kept one, and the listed deltas are applied on top.
+- **Full database loaded again** when the source URL changes, when an already applied delta is removed from the list or moved, or on a forced update. The whole list is then applied again: when NIST publishes a new full database, change `source.urls` and empty the list of deltas at the same time.
+- **Disk space**: the kept database, the archive during the download of the full database, and the published Parquet files. For the NSRL *modern* set, prefer the **minimal** database (distinct hashes, the equivalent of the former `NSRLFile.txt`): it is much smaller than the full one, which also holds paths and metadata.
+- An incremental SQLite database cannot be confidential (the database is kept on disk unencrypted).
+
 ### Large volumes (passive DNS, hundreds of millions of rows and more)
 
 The `storage` block adapts storage to very large referentials:
@@ -800,6 +902,14 @@ storage:
 - total not computed when the filter is not on an indexed column;
 - downloads limited to Parquet;
 - every API query is stopped after `REFEX_QUERY_TIMEOUT` seconds (60 by default).
+
+**Parquet sources of tens of GB** (e.g. the passive DNS of [ip.thc.org](https://ip.thc.org/docs/bulk-data-access), 6 billion rows):
+
+- A **single Parquet file** without `transform`, `options` or confidentiality is **published as is**: no rewrite of the rows. A downloaded or imported file is hard-linked (no copy); a file of `sync/` or of a local source is copied. With `sort_by`, the file is published as is when its row groups already follow each other on the first sort column. The footer statistics tell this without a scan. Otherwise it is rewritten sorted, which is the long step.
+- An **interrupted download is resumed** where it stopped (HTTP `Range` + `If-Range`), up to 5 times within a run, then by the next run. When the source changed meanwhile, it is downloaded again from the start.
+- The fingerprint of a download is computed **while receiving it**; a file above 1 GB of another source is fingerprinted from its size and date. Files are not read a second time.
+- The sampled profile reads **blocks of rows** at random instead of the whole file.
+- A `.parquet.gz` costs a decompression pass and twice the disk space. Point to the `.parquet` file when the source offers it, or decompress it beforehand and drop it into `import/<id>/`.
 
 To find every sub-domain of a domain (`*.example.com`), add a reversed column in the transformation (`reverse(rrname) AS rrname_rev`), index it, and search the reversed form by prefix (`rrname_rev__startswith=moc.elpmaxe.`).
 
@@ -884,6 +994,25 @@ A referential marked **confidential** (`confidential: true`, or the switch in it
   - SQL queries logged at the `trace` level;
   - Bloom filters and MaxMind databases, which are served as is to tools and cannot be confidential.
 - **Searching** an internal referential decrypts its rows in the application, because the database only holds ciphertexts. This stays fast up to a few hundred thousand rows.
+
+## Secret manager
+
+API keys, license keys, tokens and passwords of the sources are stored in **Administration › Secrets**, and the definitions only hold a reference:
+
+```yaml
+source:
+  urls: [https://api.vendor.example/v2/feed.csv]
+  headers:
+    Authorization: "Bearer ${secret:vendor-api}"
+# or: basic_auth: "123456:${secret:maxmind-key}"   ·   Git: token: "${secret:gitlab-token}"
+```
+
+- **Write-only**: values are encrypted at rest (AES-256-GCM, key derived from `REFEX_SECRET_KEY`, bound to the name of the secret) and never returned, neither by the interface nor by the API nor by the MCP server. The list shows the name, the description, the allowed hosts and the referentials using each secret.
+- **Where**: header values, `basic_auth` and the Git `token`, the places that are never displayed. A reference in a URL or a path is refused. In the editor, the key button of these fields picks a secret.
+- **Allowed hosts** (`api.vendor.example`, `*.vendor.example`): the secret is only sent to these hosts. A source pointed at another server (by mistake, or by an agent misled by a prompt) fails with an explanation and sends nothing. Restrict every secret that can be.
+- **Checked**: a definition referencing an unknown secret is refused, and a secret still in use is only deleted when forced. A new value takes effect at the next update, without editing the definitions.
+- **Literal credentials** still written in a definition are masked in the administration API (`********`). Sent back unchanged, a masked value keeps the stored one; a new value replaces it.
+- `${REFEX_SOURCE_…}` environment variables remain supported. Secrets are part of the configuration backups, still encrypted: restore them with the same `REFEX_SECRET_KEY`.
 
 ## Sync folder
 
@@ -1089,7 +1218,7 @@ Lost access: set `REFEX_ADMIN_RESET_PASSWORD=true` with a new `REFEX_ADMIN_PASSW
 - **Personal API tokens** (`rfx_…`, 256 random bits), shown once, stored as SHA3-256, with optional expiration (a maximum can be enforced with `REFEX_API_TOKEN_MAX_DAYS`). They carry exactly the rights of their owner.
 - **Sandboxed SQL console**: each set of rights has its own DuckDB connection, which only sees the allowed tables. Only the Parquet files of these tables can be read (`allowed_paths`), which also blocks bypasses such as `read_parquet('/data/…')`.
 - **Audit log**: sign-ins (successful or not, with the source: local, LDAP, OIDC), access requests, approvals and refusals, settings changes, password changes, tokens, administration of accounts, rights and referentials, updates, manual imports, internal row edits, exports, downloads and SQL queries. The user, IP and details are recorded.
-- Source credentials (`source.headers`, `basic_auth`, Git `token`) are never returned to the users by the API, and can reference `${REFEX_SOURCE_…}` environment variables instead of being stored in the definitions.
+- Source credentials (`source.headers`, `basic_auth`, Git `token`) are never returned by the API (masked for administrators too). They should reference a secret of the [secret manager](#secret-manager) (`${secret:…}`: encrypted, optionally restricted to its hosts) or a `${REFEX_SOURCE_…}` environment variable instead of being stored in the definitions.
 - Behind HTTPS, cookies are `Secure` as soon as `REFEX_PUBLIC_URL` starts with `https://`.
 
 ---
@@ -1204,6 +1333,43 @@ SQL queries run in an isolated DuckDB connection, specific to the rights of the 
 
 ---
 
+## Notifications (e-mail, webhooks)
+
+**Administration › Notifications** sends the events of the referentials to channels:
+
+| Event | When |
+|---|---|
+| `failure` | an update ends in error, with a corrupted source or a rejected version (the published version is kept) |
+| `recovered` | first successful update after a failure |
+| `published` | a new version is published |
+
+- **No flood**: a referential failing at every scheduled update is notified once, when it starts failing, then at its recovery. Tick *Every failed update* to be told each time.
+- **Filters**: every channel chooses its events and its referentials (ids and / or categories; all when empty).
+- **E-mail**: SMTP server in **Settings › E-mail** (STARTTLS, TLS or an internal relay, authentication, company certificate authorities, test button). Recipients, plus optionally the `owner` of the referential when it is an e-mail address. The message gives the error, the state before, a link to the referential and the last lines of the log.
+- **Webhook**: `POST` of a JSON document. The generic document holds `event`, `text` (a ready-made sentence, read as is by Slack, Mattermost, Rocket.Chat, Google Chat and the classic Teams incoming webhooks; Teams Workflows expect an Adaptive Card template), `referential` (id, name, category, owner, url), `run` (status, message, trigger, dates, rows) and `previous_status`. A **template** can shape the body for another tool, with `{{placeholders}}` between quotes, e.g. Discord: `{"content": "{{text}}"}`.
+- **Credentials and signature**: header values may be `${secret:…}` references (restricted to their hosts, see [Secret manager](#secret-manager)). Literal values are masked by the API. With a signing secret, the body is signed: `X-RefExposer-Signature: sha256=<HMAC-SHA256 of the body>`. `X-RefExposer-Event` gives the event.
+- **Reliability**: deliveries run in the background (an update never waits for them), with 3 attempts (after 2 s, then 8 s). The 500 last deliveries and their result are listed on the page (`data/.notifications.jsonl`). The send button of a channel sends a test at once.
+- API: `/api/admin/notifications` (channels, `POST /{id}/test`, `GET /deliveries`), `PUT /api/admin/settings/smtp`, `POST /api/admin/settings/smtp/test`.
+
+## Administration MCP server
+
+An AI agent (Claude Code, Claude Desktop, any [MCP](https://modelcontextprotocol.io) client) can drive RefExposer: analyse a source, create and update referentials, follow imports, query the data, manage secrets, discover a repository, manage users and rights.
+
+1. **Administration › Users › New service account**, then create its API token.
+2. **Administration › Settings › MCP server**: enable the server, choose the service account(s) allowed, optionally **read-only**.
+3. Connect the client to `https://<public URL>/api/mcp` (Streamable HTTP) with the token:
+
+```bash
+claude mcp add --transport http refexposer https://refexposer.example.com/api/mcp --header "Authorization: Bearer $REFEX_MCP_TOKEN"
+```
+
+- **Disabled by default.** It answers only to the API tokens of the chosen service accounts. Any other token, a session cookie or a disabled server is refused.
+- **Admin powers through the server only**: the token alone keeps the usual rights of the account on the REST API (role *user*). Through `/api/mcp`, its calls are signed by the server and run as an administrator. Disabling the server, or removing the account from the list, withdraws these powers at once.
+- **Same rules as the interface**: every tool calls the REST API in-process, as the service account. Validations and rights apply, and every change is recorded in the audit log with `via: mcp`.
+- **Tools**: `list_referentials`, `get_referential`, `get_definition`, `list_runs`, `query_rows`, `lookup`, `search`, `run_sql`, `sql_schema`, `preview_source`, `create_referential`, `update_referential`, `delete_referential`, `refresh_referential`, `cancel_run`, `list_secrets`, `create_secret`, `update_secret`, `delete_secret`, `discovery_scan`, `discovery_apply`, `export_configuration`, `import_configuration`, `list_users`, `list_groups`, `list_grants`, `grant_access`, `get_audit_log`, `list_tasks`, `run_task`, `get_settings`, `reload_configuration`, plus `api_endpoints` and `api_request` for the rest of the API (sign-in and personal tokens excluded).
+- **Read-only mode**: only the reading tools are offered (state, data, SQL, preview, scan), and the API refuses any change made through the server.
+- **Secrets stay write-only**: an agent can create or replace a secret, never read one back. With allowed hosts, a secret cannot be sent elsewhere, even by an agent.
+
 ## System tasks
 
 **Administration › Tasks** lists the scheduled background tasks. For each task you can:
@@ -1308,7 +1474,7 @@ This section lists the security mechanisms in place, by area. The linked section
 | Secrets in the database | LDAP, OpenID Connect and proxy secrets and the syslog client key are encrypted with **AES-256-GCM**, and are never sent back by the API. |
 | Keys | Derived with **HKDF-SHA256** from `REFEX_SECRET_KEY`, one key per use and per referential. The backend refuses to start with a key shorter than 32 characters. |
 | Confidential referentials | Data **encrypted at rest**: Parquet files (AES-GCM), internal rows (AES-256-GCM), keys of these rows (HMAC fingerprint) and column profiles. Source files and generated downloads are never kept on disk. See [Confidential referentials](#confidential-referentials). |
-| Source credentials | API keys, license keys and Git tokens (HTTP headers, `basic_auth`, `token`) can reference `${REFEX_SOURCE_…}` environment variables, so they stay out of the definitions. Only this prefix is expanded, so other secrets can never be sent to a source. Credentials are masked in the API answers. |
+| Source credentials | API keys, license keys and Git tokens (HTTP headers, `basic_auth`, `token`) reference the secret manager (`${secret:…}`: encrypted, write-only, optionally restricted to their hosts) or `${REFEX_SOURCE_…}` environment variables, so they stay out of the definitions. Only this prefix of variables is expanded, so other secrets can never be sent to a source. Credentials are masked in the API answers. |
 
 ### Integrity of the published data
 

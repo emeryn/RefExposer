@@ -30,6 +30,7 @@ from .models import (
     Group,
     InternalRecord,
     ReferentialDefinition,
+    SourceSecret,
     User,
     WebauthnCredential,
     user_groups,
@@ -40,7 +41,8 @@ MAGIC = b"RFXBK1"
 NAME_RE = re.compile(r"^refexposer-config-\d{8}-\d{6}\.json\.gz(\.enc)?$")
 # Insertion order (foreign keys); deletion uses the reverse order
 TABLES = [AppSetting.__table__, ReferentialDefinition.__table__, Group.__table__, User.__table__, user_groups,
-          Grant.__table__, ApiToken.__table__, WebauthnCredential.__table__, InternalRecord.__table__]
+          Grant.__table__, ApiToken.__table__, WebauthnCredential.__table__, InternalRecord.__table__,
+          SourceSecret.__table__]  # secrets stay encrypted: restored with the same REFEX_SECRET_KEY
 
 
 class BackupError(ValueError):

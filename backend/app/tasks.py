@@ -406,13 +406,13 @@ def _sources(m: TaskManager, p: dict[str, Any]) -> Result:
         for ref in m.service.refs.values():
             if not ref.enabled or ref.source.type != "http":
                 continue
-            try:
-                headers = ref.source.request_headers()
-            except ValueError as e:
-                failures.append({"id": ref.id, "url": None, "error": str(e)})
-                continue
             for url in ref.source.urls:
                 checked += 1
+                try:
+                    headers = ref.source.request_headers(url)  # a secret may be restricted to some hosts
+                except ValueError as e:
+                    failures.append({"id": ref.id, "url": url, "error": str(e)})
+                    continue
                 try:
                     r = c.head(url, headers=headers)
                     if r.status_code in (403, 405, 501):  # HEAD refused by some servers: first byte only

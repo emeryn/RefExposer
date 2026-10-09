@@ -158,8 +158,9 @@ def test_large_line_source_is_sampled_and_kept_compressed(env, http_dir, monkeyp
     raw = env.data_dir / "rdns" / "raw"
     assert [f.name for f in raw.iterdir() if f.is_file()] == ["rdns-aug.csv.gz"]  # kept compressed
 
-    # Formats read as a whole are refused above the size limit instead of timing out
+    # Formats read as a whole are not downloaded above the size limit: the format and options are set by hand
     monkeypatch.setattr(preview, "FULL_MAX_BYTES", 10)
     (root / "big.json").write_text(json.dumps({"items": [{"a": i} for i in range(100)]}), encoding="utf-8")
     r = env.post("/api/admin/referentials/preview", json={"source": {"type": "http", "urls": [f"http://127.0.0.1:{port}/big.json"]}})
-    assert r.status_code == 400 and "too large to be analysed" in r.json()["detail"]
+    assert r.status_code == 200 and "too large to be analysed" in r.json()["unanalysed"], r.text
+    assert r.json()["format"] == "json" and r.json()["rows"] == []

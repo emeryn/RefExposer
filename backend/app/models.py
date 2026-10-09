@@ -213,6 +213,24 @@ class InternalRecord(Base):
     __table_args__ = (UniqueConstraint("referential_id", "row_key", name="uq_internal_records_key"),)
 
 
+class SourceSecret(Base):
+    """Credential of a source (API key, token, password), referenced as ${secret:<name>} in source headers, Basic
+    authentication or Git token. The value is encrypted at rest and never returned by the API."""
+
+    __tablename__ = "source_secrets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(String(255))
+    value: Mapped[str] = mapped_column(String(8192))
+    # Hosts the secret may be sent to (fnmatch patterns, e.g. "*.example.com"); any host when empty
+    hosts: Mapped[list | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+
+
 class AuditLog(Base):
     """Kept even when the user is deleted (no foreign key)."""
 

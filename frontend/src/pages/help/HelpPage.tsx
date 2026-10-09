@@ -1,13 +1,11 @@
 import { Alert, Anchor, Badge, Code, Grid, Group, List, NavLink, Paper, Stack, Table, Text, Title } from '@mantine/core';
-import { IconBook, IconShieldCog } from '@tabler/icons-react';
+import { IconBook, IconPlugConnected, IconShieldCog } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { absoluteUrl } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { HEALTH, RUN_STATUS } from '../../components/Status';
-import type { Me } from '../../api/types';
-
-type Section = { id: string; title: string; admin?: boolean; visible?: (me: Me) => boolean; body: (me: Me) => ReactNode };
+import { INTEGRATIONS, type Section } from './IntegrationsHelp';
 
 const H = ({ children }: { children: ReactNode }) => (
   <Title order={4} mt="lg" mb={6}>
@@ -431,6 +429,15 @@ const ADMIN: Section[] = [
             case. Several large documents (all NVD years…) are read one document at a time to keep memory bounded.
           </List.Item>
         </List>
+        <H>SQLite databases and SQL deltas (NIST NSRL)</H>
+        <P>
+          Format <b>SQLite database</b>: choose the table or view to publish (e.g. <Code>FILE</Code> for the NSRL). When the publisher
+          provides SQL deltas, list their URLs in the <b>Deltas</b> field, oldest first: the full database is kept and each delta is
+          applied once, in this order, in a transaction (a broken delta changes nothing). Add each new delta at the end of the list, or
+          import it by hand with the <b>Import</b> button (<Code>.sql</Code> or the publisher's zip). A source of tens of GB is not
+          analysed by the preview: set the format and the table by hand, the import runs in the background. For the NSRL, prefer the{' '}
+          <i>minimal</i> database (distinct hashes, a few times smaller).
+        </P>
         <H>Validation and corrupted sources</H>
         <P>
           A new version is published only if it passes the checks: the downloaded file must not be empty, an HTML error page or an
@@ -627,7 +634,8 @@ export default function HelpPage() {
   const { section } = useParams();
   const { me } = useAuth();
   if (!me) return null;
-  const all = [...USER, ...(me.is_admin ? ADMIN : [])].filter((s) => !s.visible || s.visible(me));
+  const shown = (list: Section[]) => list.filter((s) => !s.visible || s.visible(me));
+  const all = shown([...USER, ...INTEGRATIONS, ...(me.is_admin ? ADMIN : [])]);
   const current = all.find((s) => s.id === section) ?? all[0];
   const link = (s: Section) => (
     <NavLink key={s.id} component={Link} to={`/help/${s.id}`} label={s.title} active={s.id === current.id} style={{ borderRadius: 8 }} />
@@ -642,7 +650,14 @@ export default function HelpPage() {
               User guide
             </Text>
           </Group>
-          {USER.map(link)}
+          {shown(USER).map(link)}
+          <Group gap={6} px="sm" py={6} mt="sm">
+            <IconPlugConnected size={16} />
+            <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+              Integrations
+            </Text>
+          </Group>
+          {INTEGRATIONS.map(link)}
           {me.is_admin && (
             <>
               <Group gap={6} px="sm" py={6} mt="sm">
@@ -659,7 +674,7 @@ export default function HelpPage() {
       <Grid.Col span={{ base: 12, md: 9 }}>
         <Stack gap={0}>
           <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-            {current.admin ? 'Administrator guide' : 'User guide'}
+            {current.admin ? 'Administrator guide' : INTEGRATIONS.includes(current) ? 'Integrations' : 'User guide'}
           </Text>
           <Title order={2} mb="md">
             {current.title}

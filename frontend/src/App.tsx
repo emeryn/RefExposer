@@ -27,6 +27,9 @@ import {
   IconDatabasePlus,
   IconHelp,
   IconDownload,
+  IconBell,
+  IconFolderSearch,
+  IconKey,
   IconSettings,
   IconLogout,
   IconUserCircle,
@@ -64,6 +67,9 @@ const GroupsPage = lazy(() => import('./pages/admin/GroupsPage'));
 const UsersPage = lazy(() => import('./pages/admin/UsersPage'));
 const ReferentialsAdminPage = lazy(() => import('./pages/admin/ReferentialsAdminPage'));
 const ReferentialEditor = lazy(() => import('./pages/admin/ReferentialEditor'));
+const SecretsPage = lazy(() => import('./pages/admin/SecretsPage'));
+const DiscoveryPage = lazy(() => import('./pages/admin/DiscoveryPage'));
+const NotificationsPage = lazy(() => import('./pages/admin/NotificationsPage'));
 const DownloadsPage = lazy(() => import('./pages/DownloadsPage'));
 const SqlConsole = lazy(() => import('./pages/SqlConsole'));
 const SystemPage = lazy(() => import('./pages/SystemPage'));
@@ -215,6 +221,9 @@ function Shell() {
   ];
   const admin = [
     { to: '/admin/referentials', label: 'Referentials', icon: IconDatabaseCog, active: path.startsWith('/admin/referentials') },
+    { to: '/admin/discovery', label: 'Bulk discovery', icon: IconFolderSearch, active: path.startsWith('/admin/discovery') },
+    { to: '/admin/secrets', label: 'Secrets', icon: IconKey, active: path.startsWith('/admin/secrets') },
+    { to: '/admin/notifications', label: 'Notifications', icon: IconBell, active: path.startsWith('/admin/notifications') },
     { to: '/admin/users', label: 'Users', icon: IconUsers, active: path.startsWith('/admin/users'), badge: me?.pending_requests },
     { to: '/admin/groups', label: 'Groups', icon: IconUsersGroup, active: path.startsWith('/admin/groups') },
     { to: '/admin/audit', label: 'Audit log', icon: IconClipboardList, active: path.startsWith('/admin/audit') },
@@ -362,6 +371,9 @@ function Shell() {
               <Route path="/admin/referentials/new" element={<ReferentialEditor />} />
               <Route path="/admin/referentials/:id/edit" element={<ReferentialEditor />} />
               <Route path="/admin/groups" element={<GroupsPage />} />
+              <Route path="/admin/secrets" element={<SecretsPage />} />
+              <Route path="/admin/discovery" element={<DiscoveryPage />} />
+              <Route path="/admin/notifications" element={<NotificationsPage />} />
               <Route path="/admin/audit" element={<AuditPage />} />
               <Route path="/admin/tasks" element={<TasksPage />} />
             </>

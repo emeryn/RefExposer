@@ -39,13 +39,14 @@ def fnv1_64(data: bytes) -> int:
 
 
 class BloomFilter:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, writable: bool = False):
         self.path = Path(path)
-        self._file = self.path.open("rb")
+        self._file = self.path.open("r+b" if writable else "rb")
         size = self.path.stat().st_size
         if size < HEADER_SIZE:
+            self._file.close()
             raise BloomError("file too short for a Bloom filter")
-        self._mm = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+        self._mm = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_WRITE if writable else mmap.ACCESS_READ)
         self.flags, self.n = struct.unpack_from("<QQ", self._mm, 0)
         (self.p,) = struct.unpack_from("<d", self._mm, 16)
         self.k, self.m, self.count = struct.unpack_from("<QQQ", self._mm, 24)
@@ -79,6 +80,53 @@ class BloomFilter:
                 return False
         return True
 
+    # ------------------------------------------------------------------ incremental updates (writable filter)
+    def add(self, value: str) -> bool:
+        """Insert a value; True when it was not already (probably) present. Inserting twice changes nothing."""
+        mm = self._mm
+        new = False
+        for pos in self.positions(value.encode()):
+            offset = HEADER_SIZE + (pos >> 6) * 8
+            (word,) = struct.unpack_from("<Q", mm, offset)
+            bit = 1 << (pos & 63)
+            if not word & bit:
+                struct.pack_into("<Q", mm, offset, word | bit)
+                new = True
+        if new:
+            self.count += 1
+        return new
+
+    def merge(self, other: "BloomFilter") -> None:
+        """Bitwise OR of a filter built with the same size and hash functions (union of both sets)."""
+        if (other.m, other.k) != (self.m, self.k):
+            raise BloomError(f"incompatible filter: {other.m:,} bits / {other.k} hash functions, "
+                             f"{self.m:,} bits / {self.k} expected")
+        chunk = 1 << 20
+        end = HEADER_SIZE + self.words * 8
+        for start in range(HEADER_SIZE, end, chunk):
+            stop = min(start + chunk, end)
+            a = int.from_bytes(self._mm[start:stop], "little")
+            b = int.from_bytes(other._mm[start:stop], "little")
+            self._mm[start:stop] = (a | b).to_bytes(stop - start, "little")
+        # Element count of the union, estimated from the bits set (Swamidass & Baldi)
+        self.count = max(self.count, other.count, self.estimated_count())
+
+    def bits_set(self) -> int:
+        chunk = 1 << 20
+        end = HEADER_SIZE + self.words * 8
+        return sum(int.from_bytes(self._mm[s:min(s + chunk, end)], "little").bit_count() for s in range(HEADER_SIZE, end, chunk))
+
+    def estimated_count(self) -> int:
+        x = self.bits_set()
+        if x >= self.m:
+            return self.n
+        return round(-self.m / self.k * math.log(1 - x / self.m))
+
+    def flush(self) -> None:
+        """Write the element count into the header and the changes to disk."""
+        struct.pack_into("<Q", self._mm, 40, self.count)
+        self._mm.flush()
+
     @property
     def estimated_fp_rate(self) -> float:
         """False positive probability for the actual number of inserted elements."""
@@ -96,6 +144,29 @@ class BloomFilter:
             "estimated_fp_rate": self.estimated_fp_rate,
             "size": self.size,
         }
+
+
+def header_info(head: bytes, size: int | None = None) -> dict[str, Any]:
+    """Description of a filter from its first bytes only (preview of a remote file of several GB).
+    `size`: size of the whole file when known, checked against the bit array announced by the header."""
+    if len(head) < HEADER_SIZE:
+        raise BloomError("file too short for a Bloom filter")
+    flags, n, p, k, m, count = struct.unpack_from("<QQdQQQ", head, 0)
+    if not (flags & 1):
+        raise BloomError(f"unknown format version (flags {flags:#x})")
+    if not (0 < k <= 64 and m > 0):
+        raise BloomError("invalid Bloom filter header")
+    if size and size < HEADER_SIZE + math.ceil(m / 64) * 8:
+        raise BloomError("truncated file: incomplete bit array")
+    return {
+        "capacity": n,
+        "target_fp_rate": p,
+        "hash_functions": k,
+        "bits": m,
+        "elements": count,
+        "estimated_fp_rate": (1 - math.exp(-k * count / m)) ** k if count else 0.0,
+        "size": size or HEADER_SIZE + math.ceil(m / 64) * 8,
+    }
 
 
 def normalize(value: str, mode: str) -> str:

@@ -17,6 +17,7 @@ from ..config import FORMATS, validate_definition
 from ..db import get_db
 from ..models import Grant, Group, ReferentialDefinition
 from ..preview import PreviewError, adopt_upload, preview, store_upload
+from ..secretstore import SecretError, check_references, mask_config, mask_source, unmask_source
 from ..service import Service
 from ..storage import RefPaths
 from .deps import get_service
@@ -73,7 +74,8 @@ def _definition_dict(service: Service, ref_id: str) -> dict[str, Any]:
         "origin": ref.origin,
         "config_file": ref.config_file,
         "editable": ref.origin == "database",
-        "config": ref.model_dump(mode="json", exclude_defaults=False),
+        # Literal credentials are masked (sent back unchanged, they keep their value); ${secret:...} references are shown
+        "config": mask_config(ref.model_dump(mode="json", exclude_defaults=False)),
         "summary": service.summary(ref, "manage"),
     }
 
@@ -102,7 +104,7 @@ def get_yaml(ref_id: str, service: Service = Depends(get_service)):
     ref = service.refs.get(ref_id)
     if not ref:
         raise HTTPException(404, f"unknown referential: '{ref_id}'")
-    config = _clean(ref.model_dump(mode="json"))
+    config = mask_config(_clean(ref.model_dump(mode="json")))
     return yaml.safe_dump({"referentials": [config]}, allow_unicode=True, sort_keys=False, width=110)
 
 
@@ -119,19 +121,28 @@ def run_preview(body: PreviewRequest, service: Service = Depends(get_service)):
     ref_root = RefPaths(service.settings.data_dir, body.referential_id).root if body.referential_id else None
     if body.format and body.format not in FORMATS:
         raise HTTPException(400, f"unknown format: {body.format}")
+    source = body.source.model_dump()
+    stored = service.refs.get(body.referential_id) if body.referential_id else None
+    try:  # masked credentials of the edited referential: its stored values
+        source = unmask_source(source, stored.source.model_dump() if stored else None)
+    except SecretError as e:
+        raise HTTPException(400, str(e)) from e
     try:
-        return preview(service.settings, body.source.model_dump(), body.format, body.options, body.transform or None, ref_root, body.refresh)
+        return preview(service.settings, source, body.format, body.options, body.transform or None, ref_root, body.refresh)
     except PreviewError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"{type(e).__name__}: {e}") from e
 
 
-def _validate(config: dict[str, Any], ref_id: str | None = None) -> dict[str, Any]:
+def _validate(db: Session, config: dict[str, Any], ref_id: str | None = None, stored: dict[str, Any] | None = None) -> dict[str, Any]:
     data = {**config}
     if ref_id:
         data["id"] = ref_id
     try:
+        if data.get("source"):
+            data["source"] = unmask_source(data["source"], (stored or {}).get("source"))
+        check_references(db, data)
         ref = validate_definition(data)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
@@ -147,27 +158,36 @@ def _adopt(service: Service, ref_id: str, upload_id: str, config: dict[str, Any]
     return {**config, "source": {"type": "local", "path": "raw/**/*"}}
 
 
-@router.post("", summary="Create a referential", status_code=201)
-def create_definition(body: DefinitionIn, request: Request, db: Session = Depends(get_db), service: Service = Depends(get_service), admin: CurrentUser = Depends(require_admin)):
-    ref_id = str(body.config.get("id") or "").strip()
-    config = {k: v for k, v in body.config.items() if k != "id"}
-    if body.upload_id:
+def store_definition(db: Session, service: Service, admin: CurrentUser, request: Request, raw_config: dict[str, Any],
+                     grant_group_ids: list[int], upload_id: str | None = None, origin: str | None = None) -> str:
+    """Validate and store a new definition (with its read grants); the caller reloads the service. Returns the id."""
+    ref_id = str(raw_config.get("id") or "").strip()
+    config = {k: v for k, v in raw_config.items() if k != "id"}
+    if upload_id:
         config["source"] = {"type": "local", "path": "raw/**/*"}
-    config = _validate(config, ref_id)
+    config = _validate(db, config, ref_id)
     if ref_id in service.refs or db.get(ReferentialDefinition, ref_id):
         raise HTTPException(409, f"identifier '{ref_id}' is already used")
-    if RefPaths(service.settings.data_dir, ref_id).root.exists() and not body.upload_id and config.get("source", {}).get("type") != "local":
+    if RefPaths(service.settings.data_dir, ref_id).root.exists() and not upload_id and config.get("source", {}).get("type") != "local":
         # Leftover data from a deleted referential would be silently reused. Local sources are
         # kept: their files may have been dropped beforehand by another tool.
         shutil.rmtree(RefPaths(service.settings.data_dir, ref_id).root, ignore_errors=True)
-    if body.upload_id:
-        config = _adopt(service, ref_id, body.upload_id, config)
+    if upload_id:
+        config = _adopt(service, ref_id, upload_id, config)
     db.add(ReferentialDefinition(id=ref_id, config=config, created_by=admin.username, updated_by=admin.username))
-    for gid in body.grant_group_ids:
+    for gid in grant_group_ids:
         if db.get(Group, gid):
             db.add(Grant(referential_id=ref_id, group_id=gid, level="read", created_by=admin.username))
-    audit(db, "referential.create", user=admin, target=f"ref:{ref_id}", request=request,
-          detail={"source": config.get("source"), "format": config.get("format")})
+    detail = {"source": mask_source(config.get("source")), "format": config.get("format")}
+    if origin:
+        detail["origin"] = origin
+    audit(db, "referential.create", user=admin, target=f"ref:{ref_id}", request=request, detail=detail)
+    return ref_id
+
+
+@router.post("", summary="Create a referential", status_code=201)
+def create_definition(body: DefinitionIn, request: Request, db: Session = Depends(get_db), service: Service = Depends(get_service), admin: CurrentUser = Depends(require_admin)):
+    ref_id = store_definition(db, service, admin, request, body.config, body.grant_group_ids, body.upload_id)
     service.reload()
     run = service.submit(ref_id, "manual", False, admin.username).to_dict() if body.pull and service.refs[ref_id].enabled else None
     return {**_definition_dict(service, ref_id), "run": run}
@@ -188,7 +208,7 @@ def update_definition(ref_id: str, body: DefinitionIn, request: Request, db: Ses
     config = {k: v for k, v in body.config.items() if k != "id"}
     if body.upload_id:
         config["source"] = {"type": "local", "path": "raw/**/*"}
-    config = _validate(config, ref_id)
+    config = _validate(db, config, ref_id, d.config)
     if body.upload_id:
         config = _adopt(service, ref_id, body.upload_id, config)
     d.config = config

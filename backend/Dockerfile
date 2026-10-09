@@ -33,7 +33,8 @@ USER refex
 # (read-only filesystem, servers without Internet access):
 # - excel: xlsx read/export
 # - httpfs: OpenSSL crypto, required to write encrypted Parquet files (confidential referentials)
-RUN python -c "import duckdb; duckdb.execute('INSTALL excel'); duckdb.execute('INSTALL httpfs')"
+# - sqlite: SQLite databases (e.g. NIST NSRL RDSv3)
+RUN python -c "import duckdb; duckdb.execute('INSTALL excel'); duckdb.execute('INSTALL httpfs'); duckdb.execute('INSTALL sqlite')"
 
 VOLUME ["/data"]
 EXPOSE 8000

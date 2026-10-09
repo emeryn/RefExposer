@@ -31,7 +31,7 @@ class GitError(Exception):
 
 
 def _token(src: SourceConfig) -> str | None:
-    return expand_env(src.token).strip() or None if src.token else None
+    return expand_env(src.token, src.repository).strip() or None if src.token else None
 
 
 def _scrub(text: str, secrets_: list[str]) -> str:
@@ -132,23 +132,48 @@ def remote_commit(settings: Settings, src: SourceConfig) -> str | None:
     return None
 
 
-def fetch(settings: Settings, src: SourceConfig, dest: Path, log: Callable[[str], None] = lambda m: None) -> tuple[str, list[Path]]:
-    """Fetch the files matching `src.path` at `src.ref` into `dest`. Returns (commit, files)."""
+def fetch(settings: Settings, src: SourceConfig, dest: Path, log: Callable[[str], None] = lambda m: None,
+          paths: list[str] | None = None) -> tuple[str, list[Path]]:
+    """Fetch the files matching `src.path` (or the exact `paths`) at `src.ref` into `dest`. Returns (commit, files)."""
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True)
     git = _Git(settings, src)
     ref = src.ref or "HEAD"
-    pattern = "/" + (src.path or "").lstrip("/")
+    patterns = ["/" + _glob_escape(p.lstrip("/")) for p in paths] if paths else ["/" + (src.path or "").lstrip("/")]
     try:
         git.run("init", "-q", str(dest))
         git.run("remote", "add", "origin", src.repository or "", cwd=dest)
-        git.run("sparse-checkout", "set", "--no-cone", pattern, cwd=dest)
+        git.run("sparse-checkout", "set", "--no-cone", *patterns, cwd=dest)
         git.run("fetch", "-q", "--depth", "1", "--filter=blob:none", "--no-tags", "origin", ref, cwd=dest)
         git.run("checkout", "-q", "FETCH_HEAD", cwd=dest)
         commit = git.run("rev-parse", "FETCH_HEAD", cwd=dest).strip()
     finally:
         git.close()
     shutil.rmtree(dest / ".git", ignore_errors=True)  # history not kept: the next update fetches again
-    files = sorted(p for p in dest.glob((src.path or "").lstrip("/")) if p.is_file())
+    if paths:
+        files = sorted(dest / p.lstrip("/") for p in paths if (dest / p.lstrip("/")).is_file())
+    else:
+        files = sorted(p for p in dest.glob((src.path or "").lstrip("/")) if p.is_file())
     log(f"Git: {src.repository} @ {ref} = commit {commit[:12]}, {len(files)} file(s) matching '{src.path}'")
     return commit, files
+
+
+def _glob_escape(path: str) -> str:
+    """Exact path in a sparse-checkout pattern (gitignore syntax)."""
+    return re.sub(r"([*?\[\]!#\\])", r"\\\1", path)
+
+
+def list_files(settings: Settings, src: SourceConfig) -> tuple[str, list[str]]:
+    """Paths of every file of the repository at `src.ref`, without downloading their content (trees only)."""
+    git = _Git(settings, src)
+    ref = src.ref or "HEAD"
+    with tempfile.TemporaryDirectory(prefix="refex-git-list-") as tmp:
+        try:
+            git.run("init", "-q", "--bare", tmp)
+            git.run("remote", "add", "origin", src.repository or "", cwd=Path(tmp))
+            git.run("fetch", "-q", "--depth", "1", "--filter=blob:none", "--no-tags", "origin", ref, cwd=Path(tmp))
+            commit = git.run("rev-parse", "FETCH_HEAD", cwd=Path(tmp)).strip()
+            out = git.run("ls-tree", "-r", "-z", "--name-only", "FETCH_HEAD", cwd=Path(tmp))
+        finally:
+            git.close()
+    return commit, sorted(p for p in out.split("\0") if p)

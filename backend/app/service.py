@@ -53,6 +53,9 @@ class Service:
         self._sync_seen: dict[str, tuple] = {}  # last file signature observed per sync referential
         self._sync_done: dict[str, tuple] = self._load_sync_state()  # signature already imported
         self.executor = ThreadPoolExecutor(max_workers=max(1, settings.max_concurrent_jobs), thread_name_prefix="ingest")
+        from .notify import Notifier
+
+        self.notifier = Notifier(settings)  # e-mails and webhooks on failures, recoveries, new versions
         self.tz = ZoneInfo(settings.timezone)
         self.scheduler = BackgroundScheduler(timezone=self.tz)
         self.started_at = utcnow()
@@ -86,6 +89,7 @@ class Service:
                 timer.cancel()
             self._debounce.clear()
         self.tasks.stop()
+        self.notifier.stop()
         self._cancel.update(self.active)
         self.executor.shutdown(wait=False, cancel_futures=True)
 
@@ -458,6 +462,7 @@ class Service:
     def _execute(self, ref: ReferentialConfig, run: Run, manual: dict[str, Any] | None = None) -> None:
         paths = RefPaths(self.settings.data_dir, ref.id)
         old_meta = dict(self.metas.get(ref.id, {}))
+        previous_status = read_meta(paths).get("status")  # last finished update (in memory: queued)
         self.metas[ref.id] = {**old_meta, "status": "running"}
         try:
             meta = execute_run(ref, self.settings, run, cancelled=lambda: ref.id in self._cancel, manual=manual,
@@ -526,6 +531,10 @@ class Service:
         meta["storage_size"] = dir_size(paths.root)
         write_meta(paths, meta)
         append_run(paths, run.to_dict(), self.settings.keep_runs)
+        try:
+            self.notifier.run_finished(ref, run.to_dict(with_logs=False), previous_status, meta.get("status"), run.logs)
+        except Exception:  # noqa: BLE001 (a notification never breaks an update)
+            log.exception("[%s] notifications not sent", ref.id)
         with self._lock:
             self.metas[ref.id] = self._in_memory(ref.id, meta)
             self.active.pop(ref.id, None)

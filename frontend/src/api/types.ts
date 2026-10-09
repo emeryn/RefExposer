@@ -431,6 +431,8 @@ export interface DefinitionConfig {
     track_changes: boolean;
     check_key: boolean;
   };
+  /** Bloom filter or SQLite database updated by deltas */
+  incremental?: { urls: string[]; format?: 'values' | 'bloom' | 'sql' | null; full_every?: string | null; max_fp_rate?: number | null } | null;
 }
 
 export interface Definition {
@@ -461,6 +463,8 @@ export interface PreviewResult {
   total_rows: number | null;
   error: string | null;
   sql: string | null;
+  /** Source too large to be analysed before the import: the format and its options are set by hand */
+  unanalysed?: string | null;
 }
 
 export interface UploadResult {
@@ -598,12 +602,151 @@ export interface AllSettings {
   syslog: SyslogSettings;
   syslog_status: SyslogStatus | null;
   mfa: MfaSettings;
+  mcp: McpSettings;
+  mcp_url: string;
+  smtp: SmtpSettings;
   local_login: boolean;
   log_level: LogLevel;
   public_url: string | null;
   oidc_redirect_uri: string;
   secret_key_source: 'env' | 'file';
   environment_proxy: Record<string, string>;
+}
+
+export interface SmtpSettings {
+  host: string;
+  port: number;
+  security: 'starttls' | 'tls' | 'none';
+  username: string;
+  password: string;
+  password_set?: boolean;
+  password_clear?: boolean;
+  from_address: string;
+  verify_tls: boolean;
+  timeout: number;
+}
+
+export type NotificationEvent = 'failure' | 'recovered' | 'published';
+
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  type: 'email' | 'webhook';
+  enabled: boolean;
+  events: NotificationEvent[];
+  repeat_failures: boolean;
+  referentials: string[];
+  categories: string[];
+  recipients: string[];
+  notify_owner: boolean;
+  url: string;
+  headers: Record<string, string>;
+  signing_secret: string;
+  template: string;
+}
+
+export interface NotificationDelivery {
+  at: string;
+  channel_id: string;
+  channel: string;
+  type: 'email' | 'webhook';
+  event: NotificationEvent | 'test';
+  referential: string;
+  ok: boolean;
+  attempts: number;
+  detail: string;
+}
+
+export interface ConfigImportResult {
+  export: { format: string; version: number; exported_at?: string; exported_by?: string; instance?: string | null; credentials?: string } | null;
+  plan: {
+    id: string | null;
+    name?: string | null;
+    type?: string;
+    action: 'create' | 'update' | 'unchanged' | 'skip' | 'conflict' | 'error';
+    reason?: string;
+    changed?: string[];
+    missing_secrets?: string[];
+  }[];
+  missing_secrets: { name: string; description: string | null; hosts: string[]; used_by: string[] }[];
+  missing_groups: string[];
+  grants: number;
+  applied: boolean;
+  created?: string[];
+  updated?: string[];
+  errors?: { id: string; error: string }[];
+  groups_created?: string[];
+  grants_changed?: number;
+  runs?: number;
+}
+
+export interface McpSettings {
+  enabled: boolean;
+  account_ids: number[];
+  read_only: boolean;
+}
+
+/** Secret of the secret manager: the value is write-only, never returned by the API. */
+export interface SourceSecret {
+  id: number;
+  name: string;
+  reference: string;
+  description: string | null;
+  hosts: string[];
+  used_by: string[];
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+export interface DiscoverySource {
+  type: 'git' | 'http';
+  repository?: string | null;
+  ref?: string | null;
+  path?: string | null;
+  token?: string | null;
+  username?: string | null;
+  url?: string | null;
+  pattern?: string | null;
+  depth?: number;
+  headers?: Record<string, string>;
+  basic_auth?: string | null;
+}
+
+export interface DiscoveryCandidate {
+  path: string;
+  url: string | null;
+  config: Partial<DefinitionConfig> & { id: string; name: string; format: string };
+  duplicate_of: string | null;
+  selected: boolean;
+  analysis: {
+    format?: string | null;
+    columns?: string[];
+    rows?: unknown[][];
+    total_rows?: number | null;
+    records_path_candidates?: string[];
+    error?: string | null;
+  } | null;
+}
+
+export interface DiscoveryScan {
+  repository?: string;
+  ref?: string | null;
+  commit?: string;
+  folder?: string;
+  count: number;
+  candidates: DiscoveryCandidate[];
+  skipped: string[];
+  skipped_count: number;
+  analysed: boolean;
+  truncated: boolean;
+}
+
+export interface DiscoveryApplyResult {
+  created: string[];
+  errors: { id: string; status: number; error: string }[];
+  runs: number;
 }
 
 export interface TestStep {

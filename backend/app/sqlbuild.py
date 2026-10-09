@@ -46,11 +46,50 @@ def _opts(options: dict[str, Any]) -> str:
     return "".join(f", {k}={lit(v)}" for k, v in options.items())
 
 
+SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def is_sqlite_file(path: str | Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == SQLITE_MAGIC
+    except OSError:
+        return False
+
+
+def sqlite_alias(path: str) -> str:
+    """Name under which a SQLite database is attached to a DuckDB connection (see attach_sqlite)."""
+    import hashlib
+
+    return "sqlite_" + hashlib.sha1(str(path).encode()).hexdigest()[:12]
+
+
+def attach_sqlite(con: Any, files: Iterable[str | Path]) -> None:
+    """Attach the SQLite databases read by reader_expr('sqlite', ...), read-only. Attaching (rather than
+    sqlite_scan) keeps the column types of views, such as the FILE view of the NIST NSRL databases."""
+    try:
+        con.execute("LOAD sqlite")
+    except Exception:  # noqa: BLE001 - not pre-installed (development): installed on first use
+        con.execute("INSTALL sqlite; LOAD sqlite")
+    attached = {r[0] for r in con.execute("SELECT database_name FROM duckdb_databases()").fetchall()}
+    for f in files:
+        alias = sqlite_alias(str(f))
+        if alias not in attached:
+            con.execute(f"ATTACH {lit(str(f))} AS {qi(alias)} (TYPE sqlite, READ_ONLY)")
+            attached.add(alias)
+
+
 def reader_expr(fmt: str, files: list[str], options: dict[str, Any] | None = None) -> str:
     """Return a table expression reading `files` according to the referential format."""
     if not files:
         raise ValueError("no source file")
     options = dict(options or {})
+    if fmt == "sqlite":
+        table = options.get("table")
+        if not table:
+            raise ValueError("SQLite database: choose the table or view to read (option 'table')")
+        parts = [f"SELECT * FROM {qi(sqlite_alias(f))}.{qi(str(table))}" for f in files]
+        return "(" + " UNION ALL BY NAME ".join(parts) + ")"
     if fmt in ("json", "xml"):
         from .convert import needs_conversion, needs_split, split_records, to_jsonl
 

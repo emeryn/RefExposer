@@ -37,7 +37,7 @@ class CurrentUser:
     must_change_password: bool
     groups: list[str] = field(default_factory=list)
     grants: dict[str, int] = field(default_factory=dict)  # referential id -> level
-    via: Literal["session", "token"] = "session"
+    via: Literal["session", "token", "mcp"] = "session"  # mcp: internal call of the MCP server (service account)
     credential_id: int | None = None
     status: str = "active"
     auth_source: str = "local"
@@ -117,6 +117,8 @@ def audit(
 ) -> None:
     ip = client_ip(request) if request else None
     name = getattr(user, "username", None) or username
+    if getattr(user, "via", None) == "mcp":  # action of an agent through the administration MCP server
+        detail = {**(detail or {}), "via": "mcp"}
     db.add(AuditLog(
         user_id=getattr(user, "id", None),
         username=name,
@@ -187,7 +189,12 @@ def authenticate(request: Request, db: Session) -> CurrentUser | None:
         if not api_token.last_used_at or t - aware(api_token.last_used_at) > timedelta(minutes=1):
             api_token.last_used_at = t
             db.commit()
-        return to_current(db, user, "token", api_token.id)
+        current = to_current(db, user, "token", api_token.id)
+        if request.headers.get("x-refexposer-mcp"):  # call of the MCP server: signed, checked against its settings
+            from .mcp import elevate
+
+            current = elevate(db, request, current, api_token.id)
+        return current
 
     cookie = request.cookies.get(SESSION_COOKIE)
     if not cookie:

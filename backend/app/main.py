@@ -10,9 +10,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from . import __version__
 from . import appsettings, logsetup, network, syslog
-from .api import admin, admin_referentials, auth, branding, catalog, records, referentials, settings_api, system, tasks_api
+from . import mcp
+from .api import admin, admin_referentials, auth, config_transfer, discovery_api, notifications_api, branding, catalog, records, referentials, secrets_api, settings_api, system, tasks_api
 from .auth import bootstrap_admin, purge_expired_sessions
 from .crypto import check_key
+from . import secretstore
 from .db import dispose_db, init_db, session_factory
 from .api.deps import ORJSONResponse
 from .service import Service
@@ -59,6 +61,7 @@ async def lifespan(app: FastAPI):
     check_writable(settings.data_dir, settings.import_dir)
     check_key()
     init_db(settings.db_url)
+    secretstore.install()
     appsettings.clear_cache()
     with session_factory()() as db:
         bootstrap_admin(db, settings)
@@ -111,6 +114,11 @@ app.include_router(branding.router, prefix="/api")
 app.include_router(admin_referentials.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
+app.include_router(secrets_api.router, prefix="/api")
+app.include_router(mcp.router, prefix="/api")
+app.include_router(discovery_api.router, prefix="/api")
+app.include_router(notifications_api.router, prefix="/api")
+app.include_router(config_transfer.router, prefix="/api")
 app.include_router(tasks_api.router, prefix="/api")
 app.include_router(catalog.router, prefix="/api")
 app.include_router(records.router, prefix="/api")

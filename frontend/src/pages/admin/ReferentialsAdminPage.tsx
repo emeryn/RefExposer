@@ -20,7 +20,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconDatabaseEdit, IconDatabasePlus, IconDots, IconFolderShare, IconEdit, IconFileCode, IconFileText, IconPlus, IconRefresh, IconSearch, IconTrash, IconUpload, IconWorld } from '@tabler/icons-react';
+import { IconDatabaseEdit, IconDatabasePlus, IconDots, IconDownload, IconFileImport, IconFolderShare, IconEdit, IconFileCode, IconFileText, IconPlus, IconRefresh, IconSearch, IconTrash, IconUpload, IconWorld } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -28,6 +28,7 @@ import { api } from '../../api/client';
 import { useRefresh } from '../../api/hooks';
 import type { Definition } from '../../api/types';
 import { CopyIcon } from '../../components/Common';
+import { ExportModal, ImportModal } from '../../components/ConfigTransfer';
 import { HealthBadge } from '../../components/Status';
 import { describeCron, fmtNumber, fmtRelative } from '../../lib/format';
 
@@ -72,6 +73,7 @@ export default function ReferentialsAdminPage() {
     refetchInterval: (q) => (q.state.data?.some((d) => d.summary?.current_run || d.run) ? 2000 : 15000),
   });
   const [filter, setFilter] = useState('');
+  const [transfer, setTransfer] = useState<'export' | 'import' | null>(null);
   const [yamlId, setYamlId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Definition | null>(null);
   const [purge, setPurge] = useState(true);
@@ -104,6 +106,12 @@ export default function ReferentialsAdminPage() {
           </Text>
         </div>
         <Group gap="xs">
+          <Button variant="default" leftSection={<IconDownload size={16} />} onClick={() => setTransfer('export')}>
+            Export
+          </Button>
+          <Button variant="default" leftSection={<IconFileImport size={16} />} onClick={() => setTransfer('import')}>
+            Import
+          </Button>
           <Button variant="light" leftSection={<IconDatabasePlus size={16} />} onClick={() => navigate('/internal/new')}>
             New internal referential
           </Button>
@@ -259,6 +267,8 @@ export default function ReferentialsAdminPage() {
           </Group>
         </Stack>
       </Modal>
+      <ExportModal opened={transfer === 'export'} onClose={() => setTransfer(null)} definitions={data ?? []} />
+      <ImportModal opened={transfer === 'import'} onClose={() => setTransfer(null)} />
     </Stack>
   );
 }

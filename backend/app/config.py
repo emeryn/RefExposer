@@ -10,7 +10,7 @@ import os
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import yaml
 from apscheduler.triggers.cron import CronTrigger
@@ -19,20 +19,42 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 log = logging.getLogger(__name__)
 
 _ENV_REF = re.compile(r"\$\{(REFEX_SOURCE_[A-Z0-9_]+)\}")
+# Secret of the secret manager (secretstore.py): ${secret:<name>}
+SECRET_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+SECRET_REF = re.compile(r"\$\{secret:(" + SECRET_NAME + r")\}")
+# Set by secretstore.py: (name, URL the value is sent to) -> value; raises ValueError (unknown, host not allowed)
+SECRET_RESOLVER: Callable[[str, str | None], str] | None = None
 
 
-def expand_env(value: str) -> str:
-    """Replace ${REFEX_SOURCE_...} with the environment variable, so that source credentials (API keys,
-    license keys) stay out of the definitions. Only this prefix is expanded: other variables (secret key,
-    database password...) can never be sent to a source."""
+def expand_env(value: str, url: str | None = None) -> str:
+    """Replace ${REFEX_SOURCE_...} with the environment variable and ${secret:<name>} with the secret of the secret
+    manager, so that source credentials (API keys, license keys) stay out of the definitions. Only this prefix of
+    variables is expanded: other variables (secret key, database password...) can never be sent to a source.
+    `url`: where the value is sent (a secret may be restricted to some hosts)."""
     def repl(m: re.Match) -> str:
         if m.group(1) not in os.environ:
             raise ValueError(f"environment variable {m.group(1)} is not defined")
         return os.environ[m.group(1)]
 
-    return _ENV_REF.sub(repl, value)
+    def secret(m: re.Match) -> str:
+        if SECRET_RESOLVER is None:
+            raise ValueError(f"secret '{m.group(1)}': the secret manager is not available")
+        return SECRET_RESOLVER(m.group(1), url)
 
-Format = Literal["csv", "tsv", "json", "jsonl", "txt", "parquet", "xlsx", "xml", "bloom", "mmdb"]
+    return SECRET_REF.sub(secret, _ENV_REF.sub(repl, value))
+
+
+def secret_names(value: Any) -> set[str]:
+    """Names of the secrets referenced anywhere in a value (definition, source...)."""
+    if isinstance(value, str):
+        return set(SECRET_REF.findall(value))
+    if isinstance(value, dict):
+        return set().union(*(secret_names(v) for v in value.values())) if value else set()
+    if isinstance(value, (list, tuple)):
+        return set().union(*(secret_names(v) for v in value)) if value else set()
+    return set()
+
+Format = Literal["csv", "tsv", "json", "jsonl", "txt", "parquet", "xlsx", "xml", "bloom", "mmdb", "sqlite"]
 FORMATS: tuple[str, ...] = Format.__args__  # type: ignore[attr-defined]
 DownloadFormat = Literal["csv", "csv.gz", "xlsx", "json", "jsonl", "parquet"]
 
@@ -69,15 +91,19 @@ class SourceConfig(BaseModel):
     # Glob applied to archive members (zip / tar); all files are kept when omitted.
     extract: str | None = None
 
-    def request_headers(self) -> dict[str, str]:
-        """Headers actually sent: ${REFEX_SOURCE_*} variables expanded, Basic authentication added."""
-        out = {k: expand_env(v) for k, v in self.headers.items()}
+    def request_headers(self, url: str | None = None) -> dict[str, str]:
+        """Headers actually sent to `url`: ${REFEX_SOURCE_*} variables and ${secret:*} expanded, Basic
+        authentication added."""
+        out = {k: expand_env(v, url) for k, v in self.headers.items()}
         if self.basic_auth:
-            out["Authorization"] = "Basic " + base64.b64encode(expand_env(self.basic_auth).encode()).decode()
+            out["Authorization"] = "Basic " + base64.b64encode(expand_env(self.basic_auth, url).encode()).decode()
         return out
 
     @model_validator(mode="after")
     def _check(self) -> "SourceConfig":
+        # URLs and paths are shown in logs and pages: a secret only goes where it is never displayed
+        if secret_names([self.urls, self.path, self.repository, self.ref, self.username, self.extract, list(self.headers)]):
+            raise ValueError("a ${secret:...} reference is only allowed in header values, 'basic_auth' and 'token'")
         if self.type == "http" and not self.urls:
             raise ValueError("an http source must define at least one url")
         if self.type in ("local", "sync", "git") and not self.path:
@@ -143,6 +169,36 @@ class StorageConfig(BaseModel):
     check_key: bool = True
 
 
+class IncrementalConfig(BaseModel):
+    """Updates by deltas, instead of downloading the whole source again.
+
+    Bloom filter: each delta (stable URL, revalidated with ETag / Last-Modified) adds its values to the published filter.
+    SQLite database (e.g. NIST NSRL RDSv3): the full database is kept, each delta (SQL file of INSERT / UPDATE /
+    DELETE statements) is applied once, in the order of the list, then the referential is rebuilt from the database."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Bloom: delta files, at least one · SQLite: deltas to apply on top of the full database (source.urls), in order;
+    # add the new delta at the end of the list (it may stay empty: deltas imported by hand)
+    urls: list[str] = Field(default_factory=list)
+    # values: one value per line (# comments, .gz accepted) · bloom: filter of the same size and hash functions
+    # sql: SQL statements run in the SQLite database (default for a SQLite referential)
+    format: Literal["values", "bloom", "sql"] | None = None
+    # The full filter (source.urls) is checked at most this often (e.g. 30d); every run when empty.
+    # A new full filter replaces the published one, then the deltas are applied again on top of it.
+    full_every: str | None = None
+    # A delta making the estimated false positive rate exceed this value is rejected (filter saturated:
+    # a new full filter, sized for more elements, is needed). Default: 10 times the rate the filter was built for.
+    max_fp_rate: float | None = Field(default=None, gt=0, lt=1)
+
+    @field_validator("full_every")
+    @classmethod
+    def _check_full_every(cls, v: str | None) -> str | None:
+        if v:
+            parse_duration(v)
+        return v
+
+
 class ReferentialConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -175,6 +231,8 @@ class ReferentialConfig(BaseModel):
     # Download formats generated right after each update (others are generated on first request)
     downloads: list[DownloadFormat] = Field(default_factory=list)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    # Bloom filters only: deltas applied between two full downloads
+    incremental: IncrementalConfig | None = None
 
     # Filled by the loader
     config_file: str | None = Field(default=None, exclude=True)
@@ -204,6 +262,19 @@ class ReferentialConfig(BaseModel):
                 raise ValueError("only a text key can be generated automatically")
         elif self.columns:
             raise ValueError("'columns' only applies to internal referentials")
+        if self.incremental:
+            inc = self.incremental
+            if inc.format is None:  # deltas of a Bloom filter: values; of a SQLite database: SQL
+                inc.format = "sql" if self.format == "sqlite" else "values"
+            if self.format not in ("bloom", "sqlite") or self.source.type != "http" or len(self.source.urls) != 1:
+                raise ValueError("'incremental' only applies to a Bloom filter or a SQLite database downloaded from a single URL")
+            if self.format == "bloom" and (not inc.urls or inc.format == "sql"):
+                raise ValueError("incremental Bloom filter: give at least one delta URL, in the 'values' or 'bloom' format")
+            if self.format == "sqlite" and self.confidential:
+                raise ValueError("an incremental SQLite database cannot be confidential: the full database is kept on disk to apply the deltas")
+            if self.format == "sqlite" and (inc.format != "sql" or inc.full_every or inc.max_fp_rate):
+                raise ValueError("incremental SQLite database: the deltas are SQL files ('full_every' and 'max_fp_rate' "
+                                 "only apply to Bloom filters)")
         if self.format in ("bloom", "mmdb"):  # published as is: no table to transform, sort or export
             label = "a Bloom filter" if self.format == "bloom" else "a MaxMind DB"
             if self.confidential:
@@ -255,6 +326,11 @@ class ReferentialConfig(BaseModel):
         return self.format == "mmdb"
 
     @property
+    def is_sqlite(self) -> bool:
+        """SQLite database: one table or view read (options.table), possibly updated by SQL deltas."""
+        return self.format == "sqlite"
+
+    @property
     def is_artifact(self) -> bool:
         """Binary file published as is (Bloom filter, MaxMind DB): no table, raw download for tools."""
         return self.format in ("bloom", "mmdb")
@@ -280,6 +356,9 @@ class ReferentialConfig(BaseModel):
                 payload["source"].pop(f, None)
         if self.confidential:  # encrypted output
             payload["confidential"] = True
+        if self.incremental and self.is_bloom:  # deltas: another set of values (full download again when they change)
+            payload["incremental"] = {"urls": self.incremental.urls, "format": self.incremental.format}
+        # SQLite: the deltas are not part of the hash, the kept database records which ones were applied
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     @property

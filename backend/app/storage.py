@@ -53,6 +53,8 @@ class RefPaths:
         self.previous_bloom = self.root / "previous.bloom"
         self.mmdb = self.root / "current.mmdb"
         self.previous_mmdb = self.root / "previous.mmdb"
+        # SQLite with deltas: full database kept to apply the next deltas (e.g. NIST NSRL RDSv3)
+        self.base = self.root / "base"
 
     @property
     def published(self) -> Path:
