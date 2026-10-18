@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from .crypto import decrypt, encrypt
+from .federation import FederationSettings
 from .models import AppSetting
 
 log = logging.getLogger(__name__)
@@ -242,6 +243,10 @@ class McpSettings(BaseModel):
     account_ids: list[int] = Field(default_factory=list)
     # Only the tools that read (no creation, change, deletion, update)
     read_only: bool = False
+    # Data server (/api/mcp/user): every account queries, with its own API token, the referentials it may read
+    users_enabled: bool = False
+    # Groups allowed to use it (names); every account when empty
+    user_groups: list[str] = Field(default_factory=list)
 
 
 EMAIL_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
@@ -282,7 +287,7 @@ class SmtpSettings(BaseModel):
         return bool(self.host and self.from_address)
 
 
-NotificationEvent = Literal["failure", "recovered", "published"]
+NotificationEvent = Literal["failure", "recovered", "published", "quality"]
 
 
 class NotificationChannel(BaseModel):
@@ -293,6 +298,7 @@ class NotificationChannel(BaseModel):
     type: Literal["email", "webhook"]
     enabled: bool = True
     # failure: update in error, corrupted or rejected source · recovered: first success after a failure · published: new version
+    # quality: a new version published with failed quality rules (warning), the previous one passing them
     events: list[NotificationEvent] = Field(default_factory=lambda: ["failure", "recovered"])
     # A referential failing again and again: notified once (when it starts failing), unless repeat_failures
     repeat_failures: bool = False
@@ -362,10 +368,10 @@ M = TypeVar("M", bound=BaseModel)
 SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSettings, "oidc": OidcSettings, "branding": BrandingSettings,
                                          "syslog": SyslogSettings, "tasks": TasksSettings,
                                          "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
-                                         "notifications": NotificationsSettings}
+                                         "notifications": NotificationsSettings, "federation": FederationSettings}
 SECRETS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
                                        "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
-                                       "notifications": ()}
+                                       "notifications": (), "federation": ()}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()

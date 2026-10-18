@@ -162,7 +162,8 @@ def json_candidates(path: Path, max_bytes: int = 64 * 1024 * 1024) -> list[str]:
         if not isinstance(node, dict):
             return
         values = list(node.values())
-        recordish = sum(isinstance(v, dict) or (isinstance(v, list) and v and isinstance(v[0], dict)) for v in values[:500])
+        # bool(): an empty list ("errors": []) would otherwise be added to the count (TypeError)
+        recordish = sum(bool(isinstance(v, dict) or (isinstance(v, list) and v and isinstance(v[0], dict))) for v in values[:500])
         if len(values) >= 10 and recordish >= 0.8 * min(len(values), 500):
             found.append((len(values), f"{prefix}.*" if prefix else "*"))
             return

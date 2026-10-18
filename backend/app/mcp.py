@@ -1,4 +1,12 @@
-"""Administration MCP server (Model Context Protocol): an AI agent drives RefExposer through /api/mcp.
+"""MCP servers (Model Context Protocol): AI agents use RefExposer through two endpoints.
+
+/api/mcp/user: data server. Any user (or service account) queries, with an API token of its own, the referentials it
+may read: list, rows, lookups, search, changes, quality, SQL when its role allows it. No elevation: the REST API applies
+the rights of the token as for any call. Enabled by an administrator (Settings > MCP), possibly for some groups only.
+
+/api/mcp: administration server, described below.
+
+Administration MCP server: an AI agent drives RefExposer through /api/mcp.
 
 - Disabled by default; enabled by an administrator (Settings > MCP), who chooses the service accounts allowed.
 - The agent authenticates with an API token of one of these service accounts (Authorization: Bearer rfx_...).
@@ -188,6 +196,9 @@ TOOLS: list[Tool] = [
          "the secrets they need, never their values), to set up another environment.",
          {"ids": {"type": "array", "items": S, "description": "Referential ids (all when empty)"}, "grants": B}, (),
          lambda a: ("GET", "/api/admin/config/export", {"ids": ",".join(a.get("ids") or []) or None, "grants": a.get("grants", True)}, None)),
+    Tool("list_endpoints", "Every URL contacted by the referentials, grouped by host (APIs called by several referentials once), "
+         "with authentication (names only), calls per day, last contact, errors; and the other outgoing connections.",
+         {}, (), lambda a: ("GET", "/api/admin/endpoints", None, None)),
     Tool("list_users", "Users and service accounts.", {}, (), lambda a: ("GET", "/api/admin/users", None, None)),
     Tool("list_groups", "Groups and their members.", {}, (), lambda a: ("GET", "/api/admin/groups", None, None)),
     Tool("list_grants", "Access rights on the referentials.", {"referential_id": S}, (),
@@ -256,6 +267,42 @@ TOOLS: list[Tool] = [
 ]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
+# Data server: reading tools only, run with the rights of the token (sql: advanced users and administrators)
+_TOOL = {t.name: t for t in TOOLS}
+USER_TOOLS: list[Tool] = [
+    Tool("whoami", "The account of the token: name, role, groups and the referentials it may read.", {}, (),
+         lambda a: ("GET", "/api/auth/me", None, None)),
+    _TOOL["list_referentials"],
+    Tool("get_referential", "Detail of a referential: description, columns and their types, column profile, key, state, quality.",
+         {"id": REF_ID}, ("id",), lambda a: ("GET", f"/api/referentials/{_p(a['id'])}", None, None), shape=_compact_detail),
+    _TOOL["query_rows"],
+    _TOOL["lookup"],
+    Tool("lookup_many", "Look up many values at once (up to 10,000) on the key of a referential, or on another column.",
+         {"id": REF_ID, "values": {"type": "array", "items": S}, "column": S}, ("id", "values"),
+         lambda a: ("POST", f"/api/referentials/{_p(a['id'])}/lookup", None,
+                    {k: a[k] for k in ("values", "column") if a.get(k) is not None})),
+    _TOOL["search"],
+    Tool("column_stats", "Statistics of a column: distinct values, most frequent ones, min / max.", {"id": REF_ID, "column": S},
+         ("id", "column"), lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/columns/{_p(a['column'])}/stats", None, None)),
+    Tool("get_changes", "Rows added, removed or modified by the last version.",
+         {"id": REF_ID, "kind": {"type": "string", "enum": ["added", "removed", "modified"]}, "limit": I}, ("id",),
+         lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/changes",
+                    {"kind": a.get("kind", "added"), "limit": min(int(a.get("limit") or 50), 500)}, None)),
+    Tool("get_quality", "Data quality of a referential: score, rules and their pass rates, history.", {"id": REF_ID}, ("id",),
+         lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/quality", None, None)),
+    _TOOL["list_runs"],
+    _TOOL["run_sql"],
+    _TOOL["sql_schema"],
+]
+SQL_TOOLS = {"run_sql", "sql_schema"}
+
+USER_INSTRUCTIONS = (
+    "RefExposer exposes referentials (threat intelligence, IP ranges, vulnerabilities, internal lists...) as tables. "
+    "Start with list_referentials, then get_referential for the columns of one. Exact values: lookup or lookup_many on the "
+    "key; filters and text search: query_rows; a value in every referential: search. You only see the referentials your "
+    "account may read."
+)
+
 INSTRUCTIONS = (
     "RefExposer exposes referentials (CSV, JSON, Parquet... downloaded from HTTP, Git or files, normalized to Parquet). "
     "To add a source: preview_source, then create_referential with the detected format and options, then follow it with "
@@ -282,11 +329,28 @@ def _text(data: Any) -> str:
     return text
 
 
-class McpCaller:
-    """Calls the REST API in-process, as the service account, elevated by a signed header."""
+@dataclass
+class Profile:
+    name: str
+    title: str
+    tools: list[Tool]
+    instructions: str
+    elevated: bool  # administration server: the calls run as an administrator (signed header)
 
-    def __init__(self, request: Request, token: str, token_id: int, read_only: bool):
+
+ADMIN = Profile("refexposer-admin", "RefExposer administration", TOOLS, INSTRUCTIONS, True)
+USER = Profile("refexposer", "RefExposer referentials", USER_TOOLS, USER_INSTRUCTIONS, False)
+
+
+class McpCaller:
+    """Calls the REST API in-process, with the token of the caller (elevated by a signed header on the admin server)."""
+
+    def __init__(self, request: Request, token: str, token_id: int, read_only: bool, profile: Profile = ADMIN,
+                 can_sql: bool = True):
         self.request, self.token, self.token_id, self.read_only = request, token, token_id, read_only
+        self.profile = profile
+        self.tools = [t for t in profile.tools if not (t.write and read_only) and (can_sql or t.name not in SQL_TOOLS)]
+        self.by_name = {t.name: t for t in self.tools}
 
     def endpoints(self, text: str) -> list[dict[str, str]]:
         out = []
@@ -307,7 +371,9 @@ class McpCaller:
             return {"content": [{"type": "text", "text": f"path not allowed: {path}"}], "isError": True}
         if self.read_only and not is_read_request(method, path):
             return {"content": [{"type": "text", "text": "the MCP server is in read-only mode"}], "isError": True}
-        headers = {"Authorization": f"Bearer {self.token}", INTERNAL_HEADER: internal_header(self.token_id)}
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if self.profile.elevated:
+            headers[INTERNAL_HEADER] = internal_header(self.token_id)
         client_ip = self.request.headers.get("x-forwarded-for") or (self.request.client.host if self.request.client else None)
         if client_ip:
             headers["X-Forwarded-For"] = client_ip
@@ -346,26 +412,55 @@ def mcp_account(request: Request, db: Session = Depends(get_db)) -> dict[str, An
     return {"user": user, "token": authz[7:].strip(), "token_id": user.credential_id, "read_only": cfg.read_only}
 
 
-@router.get("/mcp", include_in_schema=False)
-def mcp_get():
+def mcp_user_account(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """The data server answers, when enabled, to the API token of any active account (of the groups chosen, if any)."""
+    from .auth import authenticate
+
+    cfg = appsettings.load(db, "mcp")
+    if not cfg.users_enabled:  # type: ignore[attr-defined]
+        raise HTTPException(404, "the MCP data server is disabled (Settings > MCP)")
+    authz = request.headers.get("authorization", "")
+    if not authz.lower().startswith("bearer "):
+        raise HTTPException(401, "API token required (Authorization: Bearer rfx_...): create one in My account",
+                            headers={"WWW-Authenticate": "Bearer"})
+    user = authenticate(request, db)
+    if user is None or user.via != "token":
+        raise HTTPException(401, "API token required", headers={"WWW-Authenticate": "Bearer"})
+    if user.status != "active" or user.must_change_password:
+        raise HTTPException(403, "account not active (pending approval or password change)")
+    groups = cfg.user_groups  # type: ignore[attr-defined]
+    if groups and not user.is_admin and not set(groups) & set(user.groups):
+        raise HTTPException(403, "your groups are not allowed to use the MCP data server")
+    return {"user": user, "token": authz[7:].strip(), "token_id": user.credential_id}
+
+
+def _not_streamed():
     # No server-initiated stream: every answer is the response of its POST
     return Response(status_code=405, headers={"Allow": "POST"})
 
 
-@router.delete("/mcp", include_in_schema=False)
-def mcp_delete():
-    return Response(status_code=405, headers={"Allow": "POST"})
+for _path in ("/mcp", "/mcp/user"):
+    router.add_api_route(_path, _not_streamed, methods=["GET", "DELETE"], include_in_schema=False)
 
 
-@router.post("/mcp", summary="MCP server (JSON-RPC 2.0, Streamable HTTP)")
+@router.post("/mcp", summary="Administration MCP server (JSON-RPC 2.0, Streamable HTTP)")
 async def mcp_post(request: Request, account: dict[str, Any] = Depends(mcp_account)):
+    return await _serve(request, McpCaller(request, account["token"], account["token_id"], account["read_only"]))
+
+
+@router.post("/mcp/user", summary="MCP data server: the referentials readable with the token (JSON-RPC 2.0, Streamable HTTP)")
+async def mcp_user_post(request: Request, account: dict[str, Any] = Depends(mcp_user_account)):
+    user = account["user"]
+    return await _serve(request, McpCaller(request, account["token"], account["token_id"], True, USER, can_sql=user.can_use_sql))
+
+
+async def _serve(request: Request, caller: McpCaller):
     try:
         payload = json.loads(await request.body())
     except ValueError:
         return JSONResponse(_error(None, -32700, "parse error"), status_code=400)
     batch = isinstance(payload, list)
     messages = payload if batch else [payload]
-    caller = McpCaller(request, account["token"], account["token_id"], account["read_only"])
     responses = []
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or "method" not in msg:
@@ -388,16 +483,17 @@ async def _handle(caller: McpCaller, msg: dict[str, Any]) -> dict[str, Any]:
         return _result(id_, {
             "protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "refexposer-admin", "title": "RefExposer administration", "version": __version__},
-            "instructions": INSTRUCTIONS + (" The server is in read-only mode." if caller.read_only else ""),
+            "serverInfo": {"name": caller.profile.name, "title": caller.profile.title, "version": __version__},
+            "instructions": caller.profile.instructions
+            + (" The server is in read-only mode." if caller.read_only and caller.profile.elevated else ""),
         })
     if method == "ping":
         return _result(id_, {})
     if method == "tools/list":
-        return _result(id_, {"tools": [t.schema() for t in TOOLS if not (t.write and caller.read_only)]})
+        return _result(id_, {"tools": [t.schema() for t in caller.tools]})
     if method == "tools/call":
-        tool = TOOLS_BY_NAME.get(params.get("name", ""))
-        if tool is None or (tool.write and caller.read_only):
+        tool = caller.by_name.get(params.get("name", ""))
+        if tool is None:
             return _error(id_, -32602, f"unknown tool: {params.get('name')}")
         args = params.get("arguments") or {}
         missing = [r for r in tool.required if args.get(r) in (None, "")]

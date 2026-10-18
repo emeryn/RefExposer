@@ -58,7 +58,7 @@ def list_channels(db: Session = Depends(get_db), service: Service = Depends(get_
     return {
         "channels": [_public(c) for c in _channels(db)],
         "smtp_configured": appsettings.load(db, "smtp").configured,  # type: ignore[attr-defined]
-        "events": ["failure", "recovered", "published"],
+        "events": ["failure", "recovered", "published", "quality"],
         "categories": sorted({r.category for r in service.refs.values()}),
     }
 

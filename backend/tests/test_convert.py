@@ -164,3 +164,15 @@ def test_large_line_source_is_sampled_and_kept_compressed(env, http_dir, monkeyp
     r = env.post("/api/admin/referentials/preview", json={"source": {"type": "http", "urls": [f"http://127.0.0.1:{port}/big.json"]}})
     assert r.status_code == 200 and "too large to be analysed" in r.json()["unanalysed"], r.text
     assert r.json()["format"] == "json" and r.json()["rows"] == []
+
+
+def test_json_candidates_with_empty_lists(tmp_path):
+    """An object holding empty lists among its values (Cloudflare API answer: "errors": []) is analysed, not a TypeError."""
+    import json
+
+    from app.convert import json_candidates
+
+    doc = {"result": {"ipv4_cidrs": ["173.245.48.0/20"], "ipv6_cidrs": ["2400:cb00::/32"]}, "success": True,
+           "errors": [], "messages": [], **{f"k{i}": [] for i in range(10)}}
+    (tmp_path / "cf.json").write_text(json.dumps(doc))
+    assert json_candidates(tmp_path / "cf.json") == []

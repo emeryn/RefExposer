@@ -12,6 +12,7 @@ import {
   Menu,
   Modal,
   ScrollArea,
+  SegmentedControl,
   Stack,
   Table,
   Text,
@@ -20,17 +21,18 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconDatabaseEdit, IconDatabasePlus, IconDots, IconDownload, IconFileImport, IconFolderShare, IconEdit, IconFileCode, IconFileText, IconPlus, IconRefresh, IconSearch, IconTrash, IconUpload, IconWorld } from '@tabler/icons-react';
+import { IconAlertTriangle, IconDatabaseEdit, IconDatabasePlus, IconDots, IconDownload, IconPlayerStop, IconFileImport, IconFolderShare, IconEdit, IconFileCode, IconFileText, IconPlus, IconRefresh, IconSearch, IconTrash, IconUpload, IconWorld } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useRefresh } from '../../api/hooks';
 import type { Definition } from '../../api/types';
 import { CopyIcon } from '../../components/Common';
+import { QualityBadge } from '../../components/Quality';
 import { ExportModal, ImportModal } from '../../components/ConfigTransfer';
-import { HealthBadge } from '../../components/Status';
-import { describeCron, fmtNumber, fmtRelative } from '../../lib/format';
+import { HealthBadge, RUN_STATUS } from '../../components/Status';
+import { describeCron, fmtBytes, fmtNumber, fmtRelative } from '../../lib/format';
 
 function sourceLabel(d: Definition) {
   const s = d.config.source;
@@ -39,6 +41,31 @@ function sourceLabel(d: Definition) {
   if (s.type === 'local') return { icon: <IconUpload size={14} />, text: d.origin === 'database' ? 'Uploaded files' : `Local files (${s.path})` };
   const hosts = [...new Set(s.urls.map((u) => { try { return new URL(u).host; } catch { return u; } }))];
   return { icon: <IconWorld size={14} />, text: `${hosts.join(', ')}${s.urls.length > 1 ? ` · ${s.urls.length} URLs` : ''}` };
+}
+
+type StatusFilter = 'all' | 'error' | 'running' | 'stale' | 'quality';
+
+const PHASES: Record<string, string> = {
+  queued: 'Queued',
+  download: 'Downloading',
+  transform: 'Transforming',
+  validate: 'Validating',
+  profile: 'Profiling',
+  publish: 'Publishing',
+  downloads: 'Preparing downloads',
+  build: 'Building',
+};
+
+function RunProgress({ run }: { run: NonNullable<Definition['summary']['current_run']> }) {
+  const { done, total } = run.progress ?? { done: 0, total: 0 };
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+  return (
+    <Text size="xs" c="dimmed">
+      {run.status === 'queued' ? 'Waiting for a free slot' : PHASES[run.phase] ?? run.phase}
+      {run.phase === 'download' && done > 0 && <> · {fmtBytes(done)}{pct != null && ` / ${fmtBytes(total)} (${pct}%)`}</>}
+      {run.started_at && <> · {fmtRelative(run.started_at)}</>}
+    </Text>
+  );
 }
 
 function YamlModal({ id, onClose }: { id: string | null; onClose: () => void }) {
@@ -73,6 +100,9 @@ export default function ReferentialsAdminPage() {
     refetchInterval: (q) => (q.state.data?.some((d) => d.summary?.current_run || d.run) ? 2000 : 15000),
   });
   const [filter, setFilter] = useState('');
+  const [params, setParams] = useSearchParams();
+  const status = (params.get('status') as StatusFilter) || 'all';
+  const setStatus = (v: StatusFilter) => setParams(v === 'all' ? {} : { status: v }, { replace: true });
   const [transfer, setTransfer] = useState<'export' | 'import' | null>(null);
   const [yamlId, setYamlId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Definition | null>(null);
@@ -88,12 +118,45 @@ export default function ReferentialsAdminPage() {
     onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
   });
 
+  const cancel = useMutation({
+    mutationFn: (id: string) => api.cancel(id),
+    onSuccess: () => {
+      notifications.show({ message: 'Cancellation requested: the update stops within a few seconds', color: 'teal' });
+      qc.invalidateQueries({ queryKey: ['definitions'] });
+    },
+    onError: (e: Error) => notifications.show({ title: 'Cannot cancel', message: e.message, color: 'red' }),
+  });
+  const askCancel = (d: Definition) => {
+    if (window.confirm(`Stop the update of “${d.config.name}”? The published version is kept.`)) cancel.mutate(d.id);
+  };
+
+  const counts = useMemo(() => {
+    const all = data ?? [];
+    return {
+      all: all.length,
+      error: all.filter((d) => d.summary.health === 'error').length,
+      running: all.filter((d) => d.summary.current_run).length,
+      stale: all.filter((d) => d.summary.health === 'stale').length,
+      quality: all.filter((d) => d.summary.quality && d.summary.quality.status !== 'ok').length,
+    };
+  }, [data]);
+
   const rows = useMemo(
     () =>
-      (data ?? []).filter((d) =>
-        `${d.id} ${d.config.name} ${d.config.category} ${d.config.source.urls.join(' ')}`.toLowerCase().includes(filter.toLowerCase()),
-      ),
-    [data, filter],
+      (data ?? [])
+        .filter((d) =>
+          status === 'error' ? d.summary.health === 'error'
+            : status === 'running' ? !!d.summary.current_run
+              : status === 'stale' ? d.summary.health === 'stale'
+                : status === 'quality' ? !!d.summary.quality && d.summary.quality.status !== 'ok'
+                  : true,
+        )
+        .filter((d) =>
+          `${d.id} ${d.config.name} ${d.config.category} ${d.config.source.urls.join(' ')} ${d.summary.last_error ?? ''}`
+            .toLowerCase()
+            .includes(filter.toLowerCase()),
+        ),
+    [data, filter, status],
   );
 
   return (
@@ -127,7 +190,33 @@ export default function ReferentialsAdminPage() {
           the sync folder become referentials by themselves (see Help › Sync folder).
         </Text>
       </Alert>
-      <TextInput placeholder="Filter…" leftSection={<IconSearch size={16} />} value={filter} onChange={(e) => setFilter(e.currentTarget.value)} w={300} />
+      {counts.error > 0 && status !== 'error' && (
+        <Alert color="red" variant="light" icon={<IconAlertTriangle size={18} />} p="sm">
+          <Group justify="space-between">
+            <Text size="sm">
+              <b>{counts.error}</b> referential(s) in error: their last update failed (the published version, if any, is kept).
+            </Text>
+            <Button size="compact-sm" color="red" variant="light" onClick={() => setStatus('error')}>
+              Show them
+            </Button>
+          </Group>
+        </Alert>
+      )}
+      <Group justify="space-between">
+        <SegmentedControl
+          value={status}
+          onChange={(v) => setStatus(v as StatusFilter)}
+          data={[
+            { value: 'all', label: `All (${counts.all})` },
+            { value: 'error', label: `In error (${counts.error})` },
+            { value: 'running', label: `Running (${counts.running})` },
+            { value: 'stale', label: `Out of date (${counts.stale})` },
+            { value: 'quality', label: `Quality issues (${counts.quality})` },
+          ]}
+          color={status === 'error' ? 'red' : undefined}
+        />
+        <TextInput placeholder="Filter (name, URL, error…)" leftSection={<IconSearch size={16} />} value={filter} onChange={(e) => setFilter(e.currentTarget.value)} w={300} />
+      </Group>
       <Card padding={0}>
         {isLoading ? (
           <Loader m="md" />
@@ -197,8 +286,33 @@ export default function ReferentialsAdminPage() {
                           </Text>
                         )}
                       </Table.Td>
-                      <Table.Td>
-                        <HealthBadge health={s.health} />
+                      <Table.Td maw={320}>
+                        <Group gap={4} wrap="nowrap">
+                          <HealthBadge health={s.health} />
+                          <QualityBadge quality={s.quality} />
+                        </Group>
+                        {s.current_run ? (
+                          <RunProgress run={s.current_run} />
+                        ) : s.health === 'error' ? (
+                          <>
+                            <Tooltip label={s.last_error} multiline w={480} withArrow disabled={!s.last_error}>
+                              <Text size="xs" c="red" lineClamp={2} style={{ wordBreak: 'break-word' }}>
+                                {s.status && s.status in RUN_STATUS ? `${RUN_STATUS[s.status as keyof typeof RUN_STATUS].label}: ` : ''}
+                                {s.last_error ?? 'see the history'}
+                              </Text>
+                            </Tooltip>
+                            <Group gap={6}>
+                              {s.last_attempt_at && (
+                                <Text size="xs" c="dimmed">
+                                  {fmtRelative(s.last_attempt_at)}
+                                </Text>
+                              )}
+                              <Anchor component={Link} to={`/r/${d.id}/history`} size="xs">
+                                Logs
+                              </Anchor>
+                            </Group>
+                          </>
+                        ) : null}
                       </Table.Td>
                       <Table.Td ta="right" className="tabular">
                         {fmtNumber(s.row_count)}
@@ -210,12 +324,26 @@ export default function ReferentialsAdminPage() {
                               Configure
                             </Button>
                           )}
-                          {d.kind !== 'internal' && (
-                          <Tooltip label="Update now">
-                            <ActionIcon variant="subtle" onClick={() => refresh.mutate({ id: d.id })} loading={!!s.current_run} aria-label="Update">
-                              <IconRefresh size={16} />
-                            </ActionIcon>
-                          </Tooltip>
+                          {s.current_run ? (
+                            <Tooltip label="Stop the update (the published version is kept)">
+                              <ActionIcon
+                                variant="light"
+                                color="red"
+                                onClick={() => askCancel(d)}
+                                loading={cancel.isPending && cancel.variables === d.id}
+                                aria-label="Stop the update"
+                              >
+                                <IconPlayerStop size={16} />
+                              </ActionIcon>
+                            </Tooltip>
+                          ) : (
+                            d.kind !== 'internal' && (
+                              <Tooltip label="Update now">
+                                <ActionIcon variant="subtle" onClick={() => refresh.mutate({ id: d.id })} aria-label="Update">
+                                  <IconRefresh size={16} />
+                                </ActionIcon>
+                              </Tooltip>
+                            )
                           )}
                           <Menu position="bottom-end" withinPortal>
                             <Menu.Target>
@@ -224,9 +352,14 @@ export default function ReferentialsAdminPage() {
                               </ActionIcon>
                             </Menu.Target>
                             <Menu.Dropdown>
-                              <Menu.Item leftSection={<IconRefresh size={14} />} onClick={() => refresh.mutate({ id: d.id, force: true })}>
+                              <Menu.Item leftSection={<IconRefresh size={14} />} disabled={!!s.current_run} onClick={() => refresh.mutate({ id: d.id, force: true })}>
                                 Force a rebuild
                               </Menu.Item>
+                              {s.current_run && (
+                                <Menu.Item leftSection={<IconPlayerStop size={14} />} color="red" onClick={() => askCancel(d)}>
+                                  Stop the update
+                                </Menu.Item>
+                              )}
                               <Menu.Item leftSection={<IconFileCode size={14} />} onClick={() => setYamlId(d.id)}>
                                 View as YAML
                               </Menu.Item>

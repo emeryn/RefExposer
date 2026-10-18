@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from . import __version__
 from . import appsettings, logsetup, network, syslog
 from . import mcp
-from .api import admin, admin_referentials, auth, config_transfer, discovery_api, notifications_api, branding, catalog, records, referentials, secrets_api, settings_api, system, tasks_api
+from .api import admin, admin_referentials, auth, config_transfer, discovery_api, endpoints_api, federation_api, notifications_api, branding, catalog, records, referentials, secrets_api, settings_api, system, tasks_api
 from .auth import bootstrap_admin, purge_expired_sessions
 from .crypto import check_key
 from . import secretstore
@@ -55,6 +55,32 @@ def check_writable(*folders, limit: int = 100_000) -> None:
                                f"{', '.join(blocked[:5])}{'…' if len(blocked) >= 5 else ''}. {fix}")
 
 
+def _record_stop_on_sigterm(service: Service) -> None:
+    """docker stop sends SIGTERM, then kills the process after a delay (10 s): the running updates are recorded as
+    interrupted by a stop as soon as SIGTERM arrives, so that the next start never takes them for a crash. The handler
+    of the server (graceful shutdown) is then called as before."""
+    import signal
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def handler(signum, frame):  # noqa: ANN001
+        try:
+            service.mark_shutdown()
+        finally:
+            if callable(previous):
+                previous(signum, frame)
+            elif previous == signal.SIG_DFL:
+                raise SystemExit(128 + signum)
+
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except (ValueError, OSError):  # not available here (tests, embedded server)
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -79,6 +105,7 @@ async def lifespan(app: FastAPI):
     service = Service(settings)
     app.state.service = service
     service.start()  # also schedules the system tasks (session purge, backups...: tasks.py)
+    _record_stop_on_sigterm(service)
     try:
         yield
     finally:
@@ -119,7 +146,10 @@ app.include_router(mcp.router, prefix="/api")
 app.include_router(discovery_api.router, prefix="/api")
 app.include_router(notifications_api.router, prefix="/api")
 app.include_router(config_transfer.router, prefix="/api")
+app.include_router(endpoints_api.router, prefix="/api")
 app.include_router(tasks_api.router, prefix="/api")
+app.include_router(federation_api.router, prefix="/api")
+app.include_router(federation_api.admin_router, prefix="/api")
 app.include_router(catalog.router, prefix="/api")
 app.include_router(records.router, prefix="/api")
 app.include_router(referentials.router, prefix="/api")

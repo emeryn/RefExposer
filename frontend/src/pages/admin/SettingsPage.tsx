@@ -369,12 +369,13 @@ function SmtpTab({ initial }: { initial: SmtpSettings }) {
 
 // ------------------------------------------------------------------ MCP server
 
-function McpTab({ initial, url }: { initial: McpSettings; url: string }) {
+function McpTab({ initial, url, userUrl }: { initial: McpSettings; url: string; userUrl: string }) {
   const [cfg, setCfg] = useState(initial);
   useEffect(() => setCfg(initial), [initial]);
   const save = useSave('mcp');
   const { data: users } = useQuery({ queryKey: ['admin-users'], queryFn: api.users });
   const services = (users ?? []).filter((u) => u.is_service);
+  const { data: groups } = useQuery({ queryKey: ['admin-groups'], queryFn: api.groups });
   const claude = `claude mcp add --transport http refexposer ${url} --header "Authorization: Bearer $REFEX_MCP_TOKEN"`;
   const json = JSON.stringify(
     { mcpServers: { refexposer: { type: 'http', url, headers: { Authorization: 'Bearer ${REFEX_MCP_TOKEN}' } } } },
@@ -418,6 +419,38 @@ function McpTab({ initial, url }: { initial: McpSettings; url: string }) {
               <Text size="xs">No service account allowed: nobody can use the server.</Text>
             </Alert>
           )}
+          <Group>
+            <Button onClick={() => save.mutate(cfg)} loading={save.isPending}>
+              Save
+            </Button>
+          </Group>
+        </Section>
+        <Section title="Data server (every user)" icon={<IconRobot size={18} />}>
+          <Text size="sm" c="dimmed">
+            Each user (or service account) connects an AI assistant with <b>its own API token</b> and queries the referentials it may
+            read: lookups, filters, search, changes, quality, SQL for advanced users and administrators. Reading only, no elevation:
+            the rights of the token apply. The URL is shown in <b>My account</b> of the users allowed.
+          </Text>
+          <Switch
+            label="Enable the data server"
+            checked={cfg.users_enabled}
+            onChange={(e) => setCfg((c) => ({ ...c, users_enabled: e.currentTarget.checked }))}
+          />
+          <MultiSelect
+            label="Groups allowed"
+            description="Every account when empty (administrators always)"
+            data={(groups ?? []).map((g) => g.name)}
+            value={cfg.user_groups}
+            onChange={(v) => setCfg((c) => ({ ...c, user_groups: v }))}
+            disabled={!cfg.users_enabled}
+            searchable
+            clearable
+          />
+          <Group gap={4}>
+            <Text size="sm">URL:</Text>
+            <Code>{userUrl}</Code>
+            <CopyIcon value={userUrl} />
+          </Group>
           <Group>
             <Button onClick={() => save.mutate(cfg)} loading={save.isPending}>
               Save
@@ -1060,7 +1093,7 @@ export default function SettingsPage() {
           <SmtpTab initial={data.smtp} />
         </Tabs.Panel>
         <Tabs.Panel value="mcp">
-          <McpTab initial={data.mcp} url={data.mcp_url} />
+          <McpTab initial={data.mcp} url={data.mcp_url} userUrl={data.mcp_user_url} />
         </Tabs.Panel>
       </Tabs>
     </Stack>

@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import tarfile
+import threading
 import time
 import uuid
 import zipfile
@@ -27,8 +28,11 @@ from .bloom import BloomError, BloomFilter
 from .bloom import normalize as bloom_normalize
 from .config import ReferentialConfig, parse_duration
 from .crypto import encrypt_data, parquet_key
+from .quality import SAMPLE_ROWS as QUALITY_SAMPLE_ROWS
+from .resources import sqlite_cache_kib
+from .quality import evaluate as evaluate_quality
 from .settings import Settings
-from .sqlbuild import SQLITE_MAGIC, attach_sqlite, build_source_sql, is_sqlite_file, lit, parquet_reader, qi
+from .sqlbuild import SQLITE_MAGIC, attach_sqlite, build_source_sql, is_sqlite_file, lit, parquet_reader, parquet_sample, qi
 from .storage import RefPaths, dir_size, iso, parse_iso, read_meta, utcnow, write_meta
 
 log = logging.getLogger(__name__)
@@ -99,11 +103,15 @@ def check_source_file(path: Path, fmt: str, label: str | None = None) -> None:
 class Run:
     """A single update run with live progress, serialized into runs.jsonl at the end."""
 
-    def __init__(self, ref_id: str, trigger: str, force: bool = False, user: str | None = None):
+    def __init__(self, ref_id: str, trigger: str, force: bool = False, user: str | None = None, replace: bool = False):
         self.id = uuid.uuid4().hex[:12]
         self.ref_id = ref_id
         self.trigger = trigger
         self.force = force
+        # Merged referential (deltas): publish the new data set alone instead of merging it (new base)
+        self.replace = replace
+        # Interrupted by a stop of the service (not by a user, not a crash): recorded in the journal, started again
+        self.shutdown = False
         self.user = user
         self.status = "queued"
         self.phase = "queued"
@@ -115,10 +123,26 @@ class Run:
         self.bytes_done = 0
         self.bytes_total = 0
         self.stats: dict[str, Any] = {}
+        # New attempts of a failed download (None: DOWNLOAD_RETRIES), set from the source / the settings
+        self.retries: int | None = None
+        # File holding the run while it is going on: when the service dies (out of memory...), the next start
+        # finds it, with the logs and the phase reached
+        self.journal: Path | None = None
 
     def log(self, msg: str, level: str = "info") -> None:
         self.logs.append({"t": iso(utcnow()), "level": level, "msg": msg})
         getattr(log, "warning" if level == "warn" else level, log.info)("[%s] %s", self.ref_id, msg)
+        self.save_journal()
+
+    def save_journal(self) -> None:
+        if self.journal is None:
+            return
+        try:
+            tmp = self.journal.with_suffix(".tmp")
+            tmp.write_bytes(orjson.dumps(self.to_dict()))
+            os.replace(tmp, self.journal)
+        except OSError:
+            pass
 
     def to_dict(self, with_logs: bool = True) -> dict[str, Any]:
         duration = None
@@ -130,6 +154,8 @@ class Run:
             "trigger": self.trigger,
             "user": self.user,
             "force": self.force,
+            "replace": self.replace,
+            **({"shutdown": True} if self.shutdown else {}),
             "status": self.status,
             "phase": self.phase,
             "queued_at": iso(self.queued_at),
@@ -163,6 +189,9 @@ def _safe_member(base: Path, name: str) -> Path:
     return target
 
 
+# Above this size of source files, the update runs in low memory mode (see _connect)
+LARGE_SOURCE_BYTES = 2 << 30
+
 # Line-based formats DuckDB reads straight from .gz files: those are kept compressed (no huge decompressed copy)
 STREAMABLE_GZIP = ("csv", "tsv", "txt", "jsonl")
 
@@ -172,7 +201,156 @@ def keeps_gzip(path: Path, fmt: str | None) -> bool:
     return fmt in STREAMABLE_GZIP and name.endswith(".gz") and not name.endswith(".tar.gz")
 
 
-def unpack(path: Path, dest: Path, pattern: str | None, run: Run, fmt: str | None = None) -> list[Path]:
+def inflated_while_downloading(name: str, fmt: str | None) -> bool:
+    """A .gz of a format read as a whole (Parquet, JSON, XML, SQLite...): decompressed as it arrives, so that the
+    compressed file never sits on the disk next to the decompressed one (53 GB + 91 GB for a passive DNS dump)."""
+    low = name.lower()
+    return low.endswith(".gz") and not low.endswith(".tar.gz") and not keeps_gzip(Path(name), fmt)
+
+
+_SYNC = b"\x00\x00\xff\xff"  # end of the empty stored block written by a deflate sync flush (byte aligned)
+RESUME_POINT_EVERY = 64 << 20  # compressed bytes between two resume points kept
+
+
+class _Inflater:
+    """Streaming gzip decompression (several members allowed, like gzip -d).
+
+    It also records **resume points**: the ends of the empty stored blocks written by a sync flush (00 00 FF FF), which
+    many compressors emit regularly (pigz, Python gzip.flush()...). There the deflate stream is byte aligned and the
+    whole state of the decompressor is the last 32 KB of output, already on disk: a transfer stopped by a restart of the
+    service resumes from the last point (raw deflate primed with that window) instead of from zero. Points are only taken
+    in the first member, whose CRC is then checked over the whole file (see `trailer`)."""
+
+    def __init__(self, zin: int = 0, zout: int = 0, window: bytes | None = None) -> None:
+        self.raw = window is not None  # resumed in the middle of the first member: no gzip header, trailer read here
+        self._d = zlib.decompressobj(-zlib.MAX_WBITS, zdict=window) if window else (
+            zlib.decompressobj(-zlib.MAX_WBITS) if self.raw else zlib.decompressobj(16 + zlib.MAX_WBITS))
+        self.zin, self.zout = zin, zout
+        self.started = zin > 0
+        self.member = 1
+        self.points: list[tuple[int, int]] = []  # (compressed offset, decompressed offset)
+        self.trailer: bytes | None = None  # raw mode: CRC32 + ISIZE of the first member
+        self.first_member_size: int | None = None
+        self._after = b""  # bytes after the end of a raw member: its trailer, then the next members
+        self._tail = b""
+
+    @property
+    def finished(self) -> bool:
+        if self.raw and self.member == 1:
+            return self._d.eof and self.trailer is not None and not self._after
+        return self.started and self._d.eof and not self._d.unused_data
+
+    def _next_member(self, data: bytes) -> None:
+        self.member += 1
+        self._d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+    def _feed(self, data: bytes) -> bytes:
+        out = []
+        self.zin += len(data)
+        while data:
+            if self._d.eof:
+                if self.raw and self.member == 1 and self.trailer is None:
+                    self._after += data
+                    if len(self._after) < 8:
+                        break
+                    self.trailer, data, self._after = self._after[:8], self._after[8:], b""
+                    self.first_member_size = self.zout + sum(len(o) for o in out)
+                    if not data:
+                        break
+                self._next_member(data)
+            self.started = True
+            out.append(self._d.decompress(data))
+            data = self._d.unused_data if self._d.eof else b""
+        result = b"".join(out)
+        self.zout += len(result)
+        return result
+
+    def feed(self, data: bytes) -> bytes:
+        """Decompress `data`, cut at the sync points so that each point maps a compressed offset to a decompressed one."""
+        if self.member > 1 or self._d.eof:
+            return self._feed(data)
+        out, start = [], 0
+        buf = self._tail + data
+        i = buf.find(_SYNC)
+        while i != -1:
+            end = i + 4 - len(self._tail)  # end of the marker, in `data`
+            if end > start:
+                out.append(self._feed(data[start:end]))
+                start = end
+                if self.member == 1 and not self._d.eof and (not self.points or self.zin - self.points[-1][0] >= RESUME_POINT_EVERY):
+                    self.points = [*self.points[-5:], (self.zin, self.zout)]
+            i = buf.find(_SYNC, i + 1)
+        out.append(self._feed(data[start:]))
+        self._tail = buf[-3:]
+        return b"".join(out)
+
+
+def _resume_inflated(client: httpx.Client, url: str, headers: dict[str, str], state: dict[str, Any], part: Path,
+                     run: Run) -> _Inflater | None:
+    """Resume a download decompressed on the fly, left by a previous run (service restarted): from the last resume point,
+    the decompression starts again primed with the 32 KB of output before it, and what it produces must be exactly the
+    bytes already on disk after that point. Otherwise the previous point is tried. None: start again from zero."""
+    size = part.stat().st_size if part.exists() else 0
+    for c, d in reversed([tuple(p) for p in state.get("points") or []]):
+        if d > size or not c:
+            continue
+        with part.open("rb") as f:
+            f.seek(max(0, d - 32768))
+            window = f.read(d - max(0, d - 32768))
+            overlap = f.read(min(size - d, 4 << 20))
+        inflater = _Inflater(zin=c, zout=d, window=window)
+        produced = bytearray()
+        req = {k: v for k, v in headers.items() if k not in ("If-None-Match", "If-Modified-Since")}
+        req.update({"Range": f"bytes={c}-", "If-Range": _validator(state)})
+        try:
+            with client.stream("GET", url, headers=req) as resp:
+                if resp.status_code != 206:  # changed meanwhile, or ranges no longer accepted
+                    return None
+                for chunk in resp.iter_bytes():
+                    produced += inflater.feed(chunk)
+                    if len(produced) >= max(len(overlap), 1 << 20) or inflater.finished:
+                        break
+        except zlib.error:
+            produced = bytearray()  # not a real resume point: the previous one is tried
+        except httpx.HTTPError as e:
+            run.log(f"Resuming the decompressed download failed ({e}): started again", "warn")
+            return None
+        if len(produced) < len(overlap) or bytes(produced[:len(overlap)]) != overlap:
+            continue
+        with part.open("r+b") as f:  # the bytes after the point are replaced by the ones just checked
+            f.seek(d)
+            f.truncate()
+            f.write(produced)
+        run.log(f"Download resumed after a restart at {c:,} / {state.get('total') or 0:,} compressed bytes "
+                f"({d:,} bytes already decompressed, checked against the stream)")
+        return inflater
+    return None
+
+
+def _check_crc(part: Path, inflater: _Inflater, cancelled: Callable[[], bool]) -> None:
+    """After a resumed decompression: CRC32 and size of the first member, over the whole file, as gzip -t does."""
+    if inflater.trailer is None or inflater.first_member_size is None:
+        return
+    crc, isize = int.from_bytes(inflater.trailer[:4], "little"), int.from_bytes(inflater.trailer[4:], "little")
+    if inflater.first_member_size % (1 << 32) != isize:
+        raise SourceCorrupted(f"corrupted download: {inflater.first_member_size:,} bytes decompressed, the gzip trailer says "
+                              f"{isize:,} (mod 2^32)")
+    value, left = 0, inflater.first_member_size
+    with part.open("rb") as f:
+        while left > 0:
+            if cancelled():
+                raise RunCancelled()
+            chunk = f.read(min(left, 16 << 20))
+            if not chunk:
+                break
+            value = zlib.crc32(chunk, value)
+            left -= len(chunk)
+    if value != crc:
+        raise SourceCorrupted("corrupted download: the CRC32 of the decompressed file does not match the gzip trailer "
+                              "after the download was resumed (downloaded again at the next update)")
+
+
+def unpack(path: Path, dest: Path, pattern: str | None, run: Run, fmt: str | None = None, guard: Any = None) -> list[Path]:
     """Decompress gz / zip / tar archives, returning the produced files.
 
     A .gz file of a line-based format (csv, tsv, txt, jsonl) is kept as is: DuckDB reads it while decompressing."""
@@ -180,12 +358,22 @@ def unpack(path: Path, dest: Path, pattern: str | None, run: Run, fmt: str | Non
         run.log(f"{path.name}: kept compressed, read directly by the import")
         return [path]
     try:
-        return _unpack(path, dest, pattern, run)
+        return _unpack(path, dest, pattern, run, guard)
     except (OSError, EOFError, zipfile.BadZipFile, tarfile.TarError, zlib.error) as e:
         raise SourceCorrupted(f"corrupted source: unreadable archive '{path.name}' ({e})") from e
 
 
-def _unpack(path: Path, dest: Path, pattern: str | None, run: Run) -> list[Path]:
+def _copy(src: Any, dst: Any, guard: Any = None) -> None:
+    """copyfileobj, with the free space watched (DiskGuard) while an archive is extracted."""
+    if guard is None:
+        shutil.copyfileobj(src, dst, 1 << 20)
+        return
+    while chunk := src.read(1 << 20):
+        dst.write(chunk)
+        guard.wrote(len(chunk))
+
+
+def _unpack(path: Path, dest: Path, pattern: str | None, run: Run, guard: Any = None) -> list[Path]:
     name = path.name.lower()
     if name.endswith((".tar.gz", ".tgz", ".tar")):
         out_dir = dest / re.sub(r"(\.tar\.gz|\.tgz|\.tar)$", "", path.name, flags=re.I)
@@ -199,7 +387,7 @@ def _unpack(path: Path, dest: Path, pattern: str | None, run: Run) -> list[Path]
                 target = _safe_member(out_dir, m.name)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with tar.extractfile(m) as src, target.open("wb") as dst:  # type: ignore[union-attr]
-                    shutil.copyfileobj(src, dst, 1 << 20)
+                    _copy(src, dst, guard)
                 files.append(target)
         path.unlink()
         run.log(f"Tar archive extracted: {len(files)} file(s)")
@@ -207,7 +395,7 @@ def _unpack(path: Path, dest: Path, pattern: str | None, run: Run) -> list[Path]
     if name.endswith(".gz"):
         target = path.with_name(path.name[:-3])
         with gzip.open(path, "rb") as src, target.open("wb") as dst:
-            shutil.copyfileobj(src, dst, 1 << 20)
+            _copy(src, dst, guard)
         path.unlink()
         run.log(f"Decompressed {path.name} -> {target.name} ({target.stat().st_size:,} bytes)")
         return [target]
@@ -223,7 +411,7 @@ def _unpack(path: Path, dest: Path, pattern: str | None, run: Run) -> list[Path]
                 target = _safe_member(out_dir, info.filename)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info) as src, target.open("wb") as dst:
-                    shutil.copyfileobj(src, dst, 1 << 20)
+                    _copy(src, dst, guard)
                 files.append(target)
         path.unlink()
         run.log(f"Zip archive extracted: {len(files)} file(s)")
@@ -231,11 +419,44 @@ def _unpack(path: Path, dest: Path, pattern: str | None, run: Run) -> list[Path]
     return [path]
 
 
-DOWNLOAD_ATTEMPTS = 5
+# New attempts after a failure of the remote site (like curl --retry), unless set by the source or the settings
+DOWNLOAD_RETRIES = 5
+# Answers worth trying again (the same as curl --retry): timeout, too many requests, server errors
+RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+RETRY_MAX_WAIT = 300  # seconds: longest wait, even when the server asks for more (Retry-After)
 
 
 class _Interrupted(Exception):
     """The connection ended before the announced size."""
+
+
+class _RetryableStatus(Exception):
+    """Answer of a site temporarily unavailable (RETRY_STATUSES)."""
+
+    def __init__(self, error: httpx.HTTPStatusError):
+        super().__init__(f"HTTP {error.response.status_code}")
+        self.error = error
+        self.retry_after = error.response.headers.get("retry-after")
+
+
+def retry_wait(attempt: int, retry_after: str | None = None) -> float:
+    """Seconds before attempt `attempt` + 1: the Retry-After of the server (seconds or date), else 1, 2, 4... s up
+    to 60 s, like curl."""
+    if retry_after:
+        try:
+            wait = float(retry_after) if retry_after.strip().isdigit() else                 (parsedate_to_datetime(retry_after) - utcnow()).total_seconds()
+            return max(0.0, min(wait, RETRY_MAX_WAIT))
+        except (TypeError, ValueError):
+            pass
+    return float(min(2 ** (attempt - 1), 60))
+
+
+def _sleep(seconds: float, cancelled: Callable[[], bool]) -> None:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if cancelled():
+            raise RunCancelled()
+        time.sleep(min(0.5, max(0.0, end - time.monotonic())))
 
 
 def _partial(dest: Path, url: str) -> tuple[Path, Path]:
@@ -273,8 +494,23 @@ def download(
     run: Run,
     cancelled: Callable[[], bool] = lambda: False,
     fmt: str = "csv",
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """Download `url` into `dest` (decompressing archives). Returns the source entry."""
+    """Download `url` into `dest` (decompressing archives). Returns the source entry.
+    With `settings`, the free space is watched while writing (REFEX_MIN_FREE_DISK)."""
+    from .resources import DiskFull, DiskGuard
+
+    guard = DiskGuard(settings, dest, f"download of {url}") if settings else None
+    try:
+        return _download(client, url, dest, headers, extract, previous, run, cancelled, fmt, guard)
+    except DiskFull as e:
+        raise RunRejected(str(e)) from e
+
+
+def _download(client: httpx.Client, url: str, dest: Path, headers: dict[str, str], extract: str | None,
+              previous: dict[str, Any] | None, run: Run, cancelled: Callable[[], bool], fmt: str, guard: Any) -> dict[str, Any]:
+    from .resources import DiskFull, fmt_gb, free_disk
+
     headers = dict(headers)
     dest.mkdir(parents=True, exist_ok=True)
     prev_files = [dest / f for f in (previous or {}).get("files", [])]
@@ -296,12 +532,37 @@ def download(
     part, state_file = _partial(dest, url)
     state = _partial_state(part, state_file, url)
     digest = None  # SHA-256 of the received bytes: fingerprint of the source, without reading the files again
+    # .gz of a format read as a whole: decompressed as it arrives (`part` then holds the decompressed bytes and
+    # `inflater.zin` counts the compressed ones, the offset of a resumed request)
+    inflater: _Inflater | None = None
+    resumed = False  # decompressed transfer resumed from a resume point left by a previous run
+    if state.get("inflate"):
+        inflater = _resume_inflated(client, url, headers, state, part, run)
+        if inflater is None:
+            if state.get("points"):
+                run.log("The decompressed download left by the previous run cannot be resumed: started again", "warn")
+            part.unlink(missing_ok=True)
+            state_file.unlink(missing_ok=True)
+            state = {}
+        else:
+            resumed = True
+            # The compressed bytes before the point are gone: the source is identified by its validators
+            digest = hashlib.sha256(f"{state.get('etag')}|{state.get('last_modified')}|{state.get('total')}".encode())
+    saved_point = inflater.points[-1] if inflater and inflater.points else None
     done0, total0 = run.bytes_done, run.bytes_total
     started = time.monotonic()
     attempt = 0
     try:
         while True:
-            offset = part.stat().st_size if state and part.exists() else 0
+            if inflater is not None and resumed and inflater.finished:  # the check of the resume point reached the end
+                total, size, name = state.get("total") or inflater.zin, inflater.zin, state.get("name") or (unquote(Path(urlparse(url).path).name) or "download")
+                etag, last_modified, final_url = state.get("etag"), state.get("last_modified"), url
+                break
+            if inflater is not None:
+                offset = inflater.zin
+            else:
+                offset = part.stat().st_size if state and part.exists() else 0
+            progress0 = offset
             req = dict(headers)
             if offset:  # a newer version may have started: If-Range sends the whole file when it changed
                 req = {k: v for k, v in headers.items() if k not in ("If-None-Match", "If-Modified-Since")}
@@ -312,29 +573,47 @@ def download(
                     if resp.status_code == 304 and can_revalidate and not offset:
                         run.log("Source unchanged (HTTP 304), local files kept")
                         return {**previous, "checked_at": iso(utcnow()), "not_modified": True}
-                    if offset and resp.status_code == 416 and offset == state.get("total"):
+                    if offset and inflater is None and resp.status_code == 416 and offset == state.get("total"):
                         run.log(f"Download already complete ({offset:,} bytes)")
                         total, mode = offset, None
                     elif offset and resp.status_code == 206:
                         total, mode = offset + int(resp.headers.get("content-length") or 0), "ab"
                         run.log(f"Download resumed at {offset:,} / {total:,} bytes")
                     else:
-                        resp.raise_for_status()
+                        try:
+                            resp.raise_for_status()
+                        except httpx.HTTPStatusError as e:
+                            if resp.status_code in RETRY_STATUSES:
+                                raise _RetryableStatus(e) from e
+                            raise
                         if offset:
                             run.log("The server sent the whole file (source changed, or resuming not supported): downloading it again", "warn")
-                        offset, mode = 0, "wb"
+                        offset, mode, resumed = 0, "wb", False
                         total = int(resp.headers.get("content-length") or 0)
                         digest = hashlib.sha256()
                         state = {"url": url, "name": _filename(resp, url), "etag": resp.headers.get("etag"),
                                  "last_modified": resp.headers.get("last-modified"), "total": total}
-                        # Resumable only with a strong validator, and when the bytes are stored as sent
-                        if "content-encoding" in resp.headers or not _validator(state):
+                        plain = "content-encoding" not in resp.headers
+                        inflater = _Inflater() if plain and inflated_while_downloading(state["name"], fmt) else None
+                        # Resumable only with a strong validator, and when the bytes are stored as sent. A decompressed
+                        # transfer is resumed by the next runs from its resume points (state saved with them)
+                        if not plain or not _validator(state):
                             state = {}
                         part.parent.mkdir(parents=True, exist_ok=True)
                         if state:
-                            state_file.write_bytes(orjson.dumps(state))
+                            state_file.write_bytes(orjson.dumps({**state, "inflate": inflater is not None, "points": []}))
                         else:
                             state_file.unlink(missing_ok=True)
+                        if guard is not None and total:
+                            # Decompressed, the file is at least as large as what is announced
+                            free = free_disk(dest)
+                            if free < total + guard.reserve:
+                                raise DiskFull(f"download of {url}: {fmt_gb(total)} announced"
+                                               + (" (more once decompressed)" if inflater else "")
+                                               + f", {fmt_gb(free)} free with a reserve of {fmt_gb(guard.reserve)} "
+                                               "(REFEX_MIN_FREE_DISK): not started")
+                        if inflater is not None:
+                            run.log(f"{state.get('name') or _filename(resp, url)}: decompressed while it is downloaded")
                     if digest is None:  # resumed by another run: hash of the bytes already received
                         with part.open("rb") as fh:
                             digest = hashlib.file_digest(fh, "sha256")
@@ -345,47 +624,89 @@ def download(
                             for chunk in resp.iter_bytes():
                                 if cancelled():
                                     raise RunCancelled()
-                                f.write(chunk)
                                 digest.update(chunk)
                                 run.bytes_done += len(chunk)
-                    size = part.stat().st_size
+                                if inflater is not None:
+                                    try:
+                                        chunk = inflater.feed(chunk)
+                                    except zlib.error as e:
+                                        raise SourceCorrupted(f"corrupted remote source: {url} is not a valid gzip file ({e})") from e
+                                f.write(chunk)
+                                if guard is not None:
+                                    guard.wrote(len(chunk))
+                                if inflater is not None and state and inflater.points and inflater.points[-1] != saved_point:
+                                    # The bytes up to the new resume point are written before the point is recorded
+                                    f.flush()
+                                    saved_point = inflater.points[-1]
+                                    state_file.write_bytes(orjson.dumps({**state, "inflate": True, "points": inflater.points}))
+                    size = inflater.zin if inflater is not None else part.stat().st_size
                     if total and size < total and "content-encoding" not in resp.headers:
                         raise _Interrupted(f"incomplete download ({size:,} / {total:,} bytes)")
+                    if inflater is not None and not inflater.finished:
+                        raise SourceCorrupted(f"corrupted remote source: {url} ends before the end of its gzip stream (truncated file)")
                     etag = resp.headers.get("etag") or state.get("etag")
                     last_modified = resp.headers.get("last-modified") or state.get("last_modified")
                     final_url = str(resp.url)
                     name = state.get("name") or _filename(resp, url)
                 break
-            except (httpx.TransportError, _Interrupted) as e:
+            except (httpx.TransportError, _Interrupted, _RetryableStatus) as e:
+                # Remote site failing (connection refused or cut, timeout, 429, 5xx...): tried again later, like curl
+                # --retry. A transfer with a strong validator is resumed where it stopped, otherwise started again.
+                # Only the failures in a row count: an attempt that received data (a cut after 14 GB) starts the count again
+                received = inflater.zin if inflater is not None else (part.stat().st_size if part.exists() else 0)
+                if state and received > progress0:
+                    attempt = 0
                 attempt += 1
-                if not state or attempt >= DOWNLOAD_ATTEMPTS:
+                retries = run.retries if run.retries is not None else DOWNLOAD_RETRIES
+                if attempt > retries:
+                    if isinstance(e, _RetryableStatus):
+                        raise e.error from None
                     if isinstance(e, _Interrupted):
                         raise IOError(str(e)) from e
                     raise
-                received = part.stat().st_size if part.exists() else 0
-                run.log(f"Download interrupted after {received:,} bytes ({e}): resuming, attempt {attempt + 1}/{DOWNLOAD_ATTEMPTS}", "warn")
-                time.sleep(min(2 ** attempt, 30))
-    except BaseException:
-        if not state:  # cannot be resumed: nothing to keep
+                wait = retry_wait(attempt, e.retry_after if isinstance(e, _RetryableStatus) else None)
+                what = (f"resumed at {received:,} bytes" if state and received else "started again")
+                if inflater is not None and not (state and received):
+                    inflater = None  # started again: a new decompression
+                reason = str(e) or type(e).__name__
+                run.log(f"Download of {url} failed ({reason}): {what} in {wait:.0f}s, "
+                        f"attempt {attempt + 1}/{retries + 1}", "warn")
+                _sleep(wait, cancelled)
+    except BaseException as e:
+        # Kept for the next run when it can resume it: the bytes as sent, or a decompression with resume points
+        resumable = bool(state) and (inflater is None or bool(inflater.points)) and not isinstance(e, SourceCorrupted)
+        if not resumable:
             part.unlink(missing_ok=True)
+            state_file.unlink(missing_ok=True)
         raise
+    if resumed and inflater is not None:
+        run.log("Checking the CRC32 of the decompressed file (download resumed after a restart)")
+        try:
+            _check_crc(part, inflater, cancelled)
+        except SourceCorrupted:
+            part.unlink(missing_ok=True)
+            state_file.unlink(missing_ok=True)
+            raise
     state_file.unlink(missing_ok=True)
     if size == 0:
         part.unlink(missing_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
         raise SourceCorrupted(f"corrupted remote source: {url} returned an empty file (0 bytes)")
     elapsed = max(time.monotonic() - started, 1e-6)
-    run.log(f"Received {name}: {size:,} bytes in {elapsed:.1f}s ({(run.bytes_done - done0) / elapsed / 1e6:.1f} MB/s)")
+    run.log(f"Received {name}: {size:,} bytes in {elapsed:.1f}s ({(run.bytes_done - done0) / elapsed / 1e6:.1f} MB/s)"
+            + (f", {part.stat().st_size:,} bytes once decompressed" if inflater is not None else ""))
 
+    if inflater is not None:
+        name = name[:-3]  # decompressed: the .gz never reached the disk
     final = staging / name
     os.replace(part, final)
     try:
-        staged = unpack(final, staging, extract, run, fmt)
+        staged = unpack(final, staging, extract, run, fmt, guard)
         if not staged:
             raise SourceCorrupted(f"corrupted remote source: no usable file in {name}")
         for f in staged:
             check_source_file(f, fmt, f"{name} → {f.name}" if f.name != name else name)
-    except SourceCorrupted:
+    except (SourceCorrupted, DiskFull):  # nothing half-extracted is left behind
         shutil.rmtree(staging, ignore_errors=True)
         raise
     produced = []
@@ -468,23 +789,65 @@ def _fingerprint_downloads(sources: list[dict[str, Any]], config_hash: str) -> s
 
 # --------------------------------------------------------------------------- pipeline
 
-def _connect(settings: Settings, paths: RefPaths, fmt: str, key: tuple[str, str] | None = None) -> duckdb.DuckDBPyConnection:
+def _connect(settings: Settings, paths: RefPaths, fmt: str, key: tuple[str, str] | None = None,
+             large_source: bool = False) -> duckdb.DuckDBPyConnection:
+    from .resources import ingest_limits, temp_limit
+
     con = duckdb.connect()
     if key:
         # Writing encrypted Parquet needs the OpenSSL crypto of httpfs (the built-in one can only decrypt)
         con.execute("LOAD httpfs")
         con.execute(f"PRAGMA add_parquet_key({lit(key[0])}, {lit(key[1])})")
     con.execute(f"SET temp_directory = {lit(str(paths.work / 'duckdb'))}")
-    if settings.duckdb_memory_limit:
-        con.execute(f"SET memory_limit = {lit(settings.duckdb_memory_limit)}")
-    if settings.duckdb_threads:
-        con.execute(f"SET threads = {int(settings.duckdb_threads)}")
+    # Spill files of a large sort: bounded by the free space minus the reserve (default: 90 % of the free space,
+    # enough to fill the disk shared with the database and the other referentials)
+    limit = temp_limit(settings, paths.work)
+    if limit:
+        con.execute(f"SET max_temp_directory_size = {lit(limit)}")
+    memory, threads = ingest_limits(settings)
+    con.execute(f"SET memory_limit = {lit(memory)}")
+    con.execute(f"SET threads = {int(threads)}")
+    if large_source:
+        # The order of the rows is not kept (a sort orders them anyway): much less memory to copy GB of rows
+        con.execute("SET preserve_insertion_order = false")
     if fmt == "xlsx":
         try:
             con.execute("LOAD excel")
         except duckdb.Error:
             con.execute("INSTALL excel; LOAD excel")
     return con
+
+
+class _Watch(threading.Event):
+    """Set to stop watching; `disk_full` holds the message when the query was stopped because the disk was filling."""
+
+    disk_full: str | None = None
+
+
+def _interrupt_on_cancel(con: duckdb.DuckDBPyConnection, cancelled: Callable[[], bool],
+                         disk: tuple[Path, int] | None = None) -> _Watch:
+    """Interrupt the running DuckDB query as soon as the run is cancelled, or when the free space of `disk` (folder,
+    reserve in bytes) falls below the reserve: the file written by a COPY is not bounded by max_temp_directory_size.
+    Set the returned event to stop watching."""
+    from .resources import fmt_gb, free_disk
+
+    done = _Watch()
+
+    def watch() -> None:
+        while not done.wait(0.5):
+            if cancelled():
+                con.interrupt()
+                return
+            if disk and disk[1]:
+                free = free_disk(disk[0])
+                if free < disk[1]:
+                    done.disk_full = (f"disk almost full while writing the new version ({fmt_gb(free)} free, reserve "
+                                      f"{fmt_gb(disk[1])}, REFEX_MIN_FREE_DISK): stopped before filling it")
+                    con.interrupt()
+                    return
+
+    threading.Thread(target=watch, daemon=True, name="cancel-watch").start()
+    return done
 
 
 def _profile(con: duckdb.DuckDBPyConnection, rel: str) -> list[dict[str, Any]]:
@@ -520,6 +883,71 @@ def _passthrough_source(ref: ReferentialConfig, groups: list[list[Path]]) -> Pat
     if ref.format != "parquet" or len(files) != 1 or ref.transform or ref.options or ref.confidential:
         return None
     return files[0]
+
+
+def _make_room(settings: Settings, run: Run, paths: RefPaths, meta: dict[str, Any]) -> None:
+    """Before a large update: when the free space (minus the reserve) cannot hold a new source and a new version of
+    the sizes of the last ones, the previous version (kept for rollback) is removed first, instead of the update
+    failing halfway."""
+    from .resources import fmt_gb, free_disk, min_free_disk
+
+    need = int(meta.get("raw_size") or 0) + int(meta.get("parquet_size") or 0)
+    if need < (1 << 30) or not paths.previous.exists():
+        return
+    room = free_disk(paths.root) - min_free_disk(settings)
+    if room >= need:
+        return
+    st = paths.previous.stat()
+    freed = st.st_size if st.st_nlink == 1 else 0  # a hard link to the source frees nothing
+    paths.previous.unlink(missing_ok=True)
+    meta["has_previous"] = False
+    run.log(f"Not enough free disk for the update (about {fmt_gb(need)} needed, {fmt_gb(max(room, 0))} usable): "
+            f"previous version removed ({fmt_gb(freed)} freed)", "warn")
+
+
+RECOMPRESS_SAMPLE_ROWS = 1_000_000
+
+
+def _keep_or_recompress(con: duckdb.DuckDBPyConnection, settings: Settings, run: Run, source: Path) -> Path | None:
+    """A large Parquet source is published as is only when it is well compressed. Uncompressed or barely compressed
+    data (e.g. the THC passive DNS: 91 GB once its .gz is decompressed) is rewritten with zstd, often 3 to 5 times
+    smaller and faster to query, when the disk can hold the copy. The size of the copy is measured on a sample of rows.
+    Returns the source to publish as is, None to rewrite it."""
+    from .resources import fmt_gb, free_disk, min_free_disk
+
+    src = lit(str(source))
+    try:
+        stats = con.execute(f"SELECT compression, sum(total_compressed_size), sum(total_uncompressed_size) "
+                            f"FROM parquet_metadata({src}) GROUP BY ALL").fetchall()
+        rows = con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata({src})").fetchone()[0]
+    except duckdb.Error:
+        return source
+    stored, plain = sum(r[1] or 0 for r in stats), sum(r[2] or 0 for r in stats)
+    codecs = ", ".join(sorted({str(r[0]) for r in stats}))
+    if not rows or not plain or stored / plain < 0.75:  # compressed: published as is
+        return source
+    size = source.stat().st_size
+    n = min(rows, RECOMPRESS_SAMPLE_ROWS)
+    sample = source.parent / f".{source.name}.sample.parquet"
+    try:
+        con.execute(f"COPY (SELECT * FROM read_parquet({src}) LIMIT {n}) TO {lit(str(sample))} (FORMAT parquet, COMPRESSION zstd)")
+        estimate = int(sample.stat().st_size * rows / n)
+    except duckdb.Error:
+        return source
+    finally:
+        sample.unlink(missing_ok=True)
+    if estimate > size * 0.8:
+        run.log(f"Parquet source stored with {codecs}: zstd would barely reduce it, published as is")
+        return source
+    room = free_disk(source.parent) - min_free_disk(settings)
+    if room < estimate * 1.2:
+        run.log(f"Parquet source stored with {codecs} ({fmt_gb(size)}): it would take about {fmt_gb(estimate)} with zstd, "
+                f"but only {fmt_gb(max(room, 0))} can be used: published as is (slower queries). Free some space to "
+                "have it rewritten at the next update", "warn")
+        return source
+    run.log(f"Parquet source stored with {codecs} ({fmt_gb(size)}): rewritten with zstd, about {fmt_gb(estimate)} "
+            "(smaller, faster queries)")
+    return None
 
 
 def _sorted_row_groups(con: duckdb.DuckDBPyConnection, path: str, column: str) -> bool:
@@ -577,6 +1005,62 @@ def compute_changes(con: duckdb.DuckDBPyConnection, current: str, previous: str,
 _COMPRESSED = re.compile(r"\.(gz|zip|tgz|tar\.gz|tar)$", re.IGNORECASE)
 
 
+class _NothingToMerge(Exception):
+    """The delta holds no row: the published version stays as it is."""
+
+
+def _merge_into_published(con: duckdb.DuckDBPyConnection, ref: ReferentialConfig, run: Run, paths: RefPaths, tmp: Path,
+                          new_key: str | None, old_key: str | None, copy_opts: str, base: bool = False) -> dict[str, Any] | None:
+    """Merge the data set just written to `tmp` (a delta) into the published version, then put the result in `tmp`.
+    With a key, the rows of the delta replace the published rows of the same key (and the rows flagged in
+    merge.delete_column remove them); without key, the rows are added, identical rows kept once. New columns are added
+    (empty for the older rows). Returns {rows: rows of the delta, deleted: rows flagged for deletion}.
+    `base`: the data set is published alone (first one, or replace): only the rows flagged for deletion are left out."""
+    assert ref.merge is not None
+    delta = parquet_reader(str(tmp), new_key)
+    columns = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {delta}").fetchall()}
+    key, flag_col = ref.key, ref.merge.delete_column
+    flagged = bool(flag_col and flag_col in columns)
+    if base:
+        if not flagged:
+            return None
+        sql = f"SELECT * EXCLUDE ({qi(flag_col)}) FROM {delta} WHERE NOT coalesce(TRY_CAST({qi(flag_col)} AS BOOLEAN), false)"
+        what = "flagged rows of the data set left out"
+    else:
+        rows = con.execute(f"SELECT count(*) FROM {delta}").fetchone()[0]
+        if rows == 0:
+            raise _NothingToMerge()
+        if key and key not in columns:
+            raise RunRejected(f"the delta has no '{key}' column (key of the referential): it cannot be merged")
+        current = parquet_reader(str(paths.current), old_key)
+        deleted = 0
+        if flagged:
+            flag = f"coalesce(TRY_CAST({qi(flag_col)} AS BOOLEAN), false)"
+            added = f"SELECT * EXCLUDE ({qi(flag_col)}) FROM {delta} WHERE NOT {flag}"
+            deleted = con.execute(f"SELECT count(*) FROM {delta} WHERE {flag}").fetchone()[0]
+        else:
+            added = f"SELECT * FROM {delta}"
+        if key:  # upsert: the published rows whose key is in the delta (replaced or deleted) are left out
+            sql = f"SELECT o.* FROM {current} o ANTI JOIN {delta} d ON o.{qi(key)} = d.{qi(key)} UNION ALL BY NAME {added}"
+        else:
+            sql = f"SELECT * FROM {current} UNION BY NAME {added}"
+        what = (f"Delta merged into the published version: {rows:,} row(s)" + (f", {deleted:,} flagged for deletion" if deleted else "")
+                + (f" (upsert on '{key}')" if key else " (added, identical rows kept once)"))
+    if ref.storage.sort_by:
+        sql = f"SELECT * FROM ({sql}) ORDER BY {', '.join(qi(c) for c in ref.storage.sort_by)}"
+    out = paths.work / "next.merged.parquet"
+    try:
+        con.execute(f"COPY ({sql}) TO {lit(str(out))} ({copy_opts})")
+    except duckdb.InterruptException:
+        raise
+    except duckdb.Error as e:
+        out.unlink(missing_ok=True)
+        raise RunRejected(f"the delta cannot be merged into the published version: {e}") from e
+    os.replace(out, tmp)
+    run.log(what[0].upper() + what[1:])
+    return None if base else {"rows": rows, "deleted": deleted}
+
+
 def strip_compression(name: str) -> str:
     return re.sub(r"\.(gz|zip|tgz|tar\.gz)$", "", name, flags=re.IGNORECASE)
 
@@ -620,8 +1104,13 @@ def execute_run(
     """Run the full pipeline. Returns the new meta. Raises on failure."""
     paths = RefPaths(settings.data_dir, ref.id).ensure()
     meta = read_meta(paths)
+    run.retries = ref.source.retries if ref.source.retries is not None else settings.download_retries
     run.started_at = utcnow()
     run.status = "running"
+    if cancelled():  # cancelled while waiting in the queue
+        raise RunCancelled()
+
+    _make_room(settings, run, paths, meta)
 
     # 1. Acquire source files ------------------------------------------------
     run.phase = "download"
@@ -671,7 +1160,7 @@ def execute_run(
         previous_sources = {} if config_changed else {s.get("url"): s for s in meta.get("sources", [])}
         with http_client(settings) as client:
             for url in ref.source.urls:
-                entry = download(client, url, paths.raw, ref.source.request_headers(url), ref.source.extract, previous_sources.get(url), run, cancelled, ref.format)
+                entry = download(client, url, paths.raw, ref.source.request_headers(url), ref.source.extract, previous_sources.get(url), run, cancelled, ref.format, settings)
                 sources.append(entry)
                 groups.append([paths.raw / f for f in entry["files"]])
         _cleanup_raw(paths, {f for s in sources for f in s["files"]})
@@ -806,16 +1295,37 @@ def execute_run(
         copy_opts += f", ENCRYPTION_CONFIG {{footer_key: {lit(new_key)}}}"
     if st.sort_by:
         sql = f"SELECT * FROM ({sql}) ORDER BY {', '.join(qi(c) for c in st.sort_by)}"
-    con = _connect(settings, paths, ref.format, pkey)
+    large_source = meta["raw_size"] > LARGE_SOURCE_BYTES
+    con = _connect(settings, paths, ref.format, pkey, large_source)
+    if large_source:
+        memory, threads = (con.execute(f"SELECT current_setting('{k}')").fetchone()[0] for k in ("memory_limit", "threads"))
+        run.log(f"Large source ({meta['raw_size'] / (1 << 30):.1f} GB): DuckDB limited to {memory} of memory and {threads} "
+                "thread(s), beyond which it works on disk")
     if ref.is_sqlite:
         attach_sqlite(con, [str(f) for f in all_files])
     index_tmp: dict[str, Path] = {}
+    quality = None
+    # Deltas: merged into the published version, unless the data set is published alone (replace: new base)
+    merging = ref.is_merge and paths.current.exists() and not run.replace
+    merged: dict[str, Any] | None = None
+    if ref.is_merge and not merging:
+        run.log("Merged referential: " + ("the data set replaces the published version (new base)" if run.replace
+                                          else "first data set, published as the base of the next deltas"))
+    from .resources import min_free_disk
+
+    # A COPY of billions of rows stops at once when cancelled, or before it fills the disk
+    watching = _interrupt_on_cancel(con, cancelled, (paths.work, min_free_disk(settings)))
+    built = False  # files of a failed build (tens of GB of next.parquet) are not left in work/
+    published_as_is = False
     try:
         t0 = time.monotonic()
         source = _passthrough_source(ref, groups)
         if source is not None and st.sort_by and not _sorted_row_groups(con, str(source), st.sort_by[0]):
             run.log(f"The Parquet source is not sorted on '{st.sort_by[0]}': it is rewritten sorted (long for billions of rows)")
             source = None
+        if source is not None and large_source:
+            source = _keep_or_recompress(con, settings, run, source)
+        published_as_is = source is not None
         if source is not None:
             # A single Parquet file, nothing to change: published as is (hard link, else copy), not rewritten row by row
             # Files of RefExposer (downloads, imports) are linked; files of the user are copied, as they may be rewritten in place
@@ -824,6 +1334,10 @@ def execute_run(
         else:
             run.log("Transforming and writing parquet" + (f" (sorted on {', '.join(st.sort_by)})" if st.sort_by else ""))
             con.execute(f"COPY ({sql}) TO {lit(str(tmp))} ({copy_opts})")
+        if merging:  # the data set is a delta: merged into the published version
+            merged = _merge_into_published(con, ref, run, paths, tmp, new_key, pkey[0] if was_encrypted else None, copy_opts)
+        elif ref.is_merge:  # published alone: the rows flagged for deletion are still left out
+            _merge_into_published(con, ref, run, paths, tmp, new_key, None, copy_opts, base=True)
         rel = parquet_reader(str(tmp), new_key)
         if new_key:  # the footer of an encrypted file is not readable by parquet_file_metadata()
             rows = con.execute(f"SELECT count(*) FROM {rel}").fetchone()[0]
@@ -875,6 +1389,23 @@ def execute_run(
             if c not in col_names:
                 run.log(f"search column '{c}' is missing from the data set", "warn")
 
+        # Data quality: one scan for every rule; a failed 'error' rule rejects the version
+        run.phase = "quality"
+        quality = evaluate_quality(con, rel, col_names, ref.quality, ref.key, examples=not ref.confidential, large=large,
+                                   sample=parquet_sample(str(tmp), new_key, rows, QUALITY_SAMPLE_ROWS, st.row_group_size))
+        if quality:
+            quality["checked_at"] = iso(utcnow())
+            run.stats["quality"] = {"score": quality["score"], "status": quality["status"]}
+            run.log(f"Quality: score {quality['score']}/100 ({quality['status']}), {len(quality['checks'])} check(s) "
+                    f"in {quality['duration']}s" + (" on a sample (large referential)" if quality.get("sampled") else ""))
+            failed = [c for c in quality["checks"] if not c["ok"]]
+            for c in failed:
+                detail = c.get("error") or f"{c['pass_pct']}% of the rows pass, {c['threshold']}% required ({c['failing']:,} failing)"
+                run.log(f"Quality rule '{c['name']}' ({c['severity']}): {detail}", "warn" if c["severity"] == "warning" else "error")
+            if quality["status"] == "failed" and not ref.is_internal:
+                blocking = [c["name"] for c in failed if c["severity"] == "error"]
+                raise RunRejected(f"quality rule(s) not met: {', '.join(blocking)}")
+
         # 4. Changes versus the published version -------------------------------
         changes = None
         if ref.key and paths.current.exists() and (large or not st.track_changes):
@@ -897,14 +1428,40 @@ def execute_run(
                     source, sampled = rel, ""
                 else:
                     # Blocks of rows picked at random: only they are read (a sample of single rows reads the whole file)
-                    source = f"(SELECT * FROM {rel} USING SAMPLE {PROFILE_SAMPLE_ROWS / rows * 100:.8f}% (system))"
+                    source = parquet_sample(str(tmp), new_key, rows, PROFILE_SAMPLE_ROWS, st.row_group_size)
                     sampled = f" on a sample of about {PROFILE_SAMPLE_ROWS:,} rows"
                 profile = _profile(con, source)
                 run.log(f"Column profile computed{sampled} in {time.monotonic() - t1:.1f}s")
             except duckdb.Error as e:
                 run.log(f"Cannot compute the column profile: {e}", "warn")
+        built = True
+    except duckdb.InterruptException as e:
+        if watching.disk_full:
+            raise RunRejected(watching.disk_full) from e
+        raise RunCancelled() from e
+    except duckdb.OutOfMemoryException as e:
+        if "max_temp_directory_size" in str(e):  # spill files reached the free space minus the reserve
+            from .resources import fmt_gb, free_disk, min_free_disk
+
+            raise RunRejected(f"not enough disk space for the work files of DuckDB ({fmt_gb(free_disk(paths.work))} free, "
+                              f"reserve {fmt_gb(min_free_disk(settings))}): stopped before filling the disk. A sort or an "
+                              "index of billions of rows needs about the size of the uncompressed data") from e
+        raise
+    except _NothingToMerge:
+        shutil.rmtree(paths.work, ignore_errors=True)
+        run.log("Empty delta: nothing to merge, the published version is kept")
+        run.status = "unchanged"
+        run.stats.update({"rows": meta.get("row_count")})
+        meta["fingerprint"] = fingerprint  # the same empty data set is not read again
+        return meta
     finally:
+        watching.set()
         con.close()
+        if not built:
+            shutil.rmtree(paths.work, ignore_errors=True)
+    if cancelled():  # interrupted in a step that tolerates errors (changes, profile): nothing is published
+        shutil.rmtree(paths.work, ignore_errors=True)
+        raise RunCancelled()
 
     # 6. Publish --------------------------------------------------------------
     run.phase = "publish"
@@ -923,13 +1480,21 @@ def execute_run(
         if f not in wanted:
             f.unlink(missing_ok=True)
     shutil.rmtree(paths.work, ignore_errors=True)
-    if (not st.keep_raw or ref.confidential) and ref.source.type in ("http", "internal", "git"):
+    # A large source that is not the published file itself (decompressed, rewritten, transformed) would double the disk
+    # used, and triple it during the next update (old source, new source, new version): not kept above keep_raw_max
+    from .resources import fmt_gb, keep_raw_max
+
+    too_big = (not published_as_is and keep_raw_max(settings) and meta["raw_size"] > keep_raw_max(settings)
+               and ref.source.type in ("http", "git"))
+    if (not st.keep_raw or ref.confidential or too_big) and ref.source.type in ("http", "internal", "git"):
         shutil.rmtree(paths.raw, ignore_errors=True)
         paths.raw.mkdir(parents=True, exist_ok=True)
         for s in sources:
             s["discarded"] = True
         if ref.source.type == "http":
-            run.log("Source files deleted after import" + (" (confidential)" if ref.confidential else " (storage.keep_raw: false)"))
+            why = ("confidential" if ref.confidential else "storage.keep_raw: false" if not st.keep_raw
+                   else f"{fmt_gb(meta['raw_size'])}, more than REFEX_KEEP_RAW_MAX")
+            run.log(f"Source files deleted after import ({why})")
     if ref.confidential or switched:
         shutil.rmtree(paths.root / "exports", ignore_errors=True)  # downloads generated from a previous version
 
@@ -956,7 +1521,20 @@ def execute_run(
         "sort_by": st.sort_by,
         "indexes": st.indexes,
         "sources": sources,
+        "quality": quality,
     })
+    if ref.is_merge:  # deltas merged since the base (the last data set published alone)
+        before = meta.get("merge") or {}
+        meta["merge"] = {
+            "base_at": before.get("base_at") if merged else now,
+            "deltas": int(before.get("deltas") or 0) + 1 if merged else 0,
+            "last_delta_rows": merged["rows"] if merged else rows,
+            "last_delta_deleted": merged["deleted"] if merged else 0,
+            "last_merged_at": now if merged else before.get("last_merged_at"),
+        }
+        run.stats["merge"] = {"delta_rows": meta["merge"]["last_delta_rows"], "merged": bool(merged)}
+    else:
+        meta.pop("merge", None)
     run.stats.update({"rows": rows, "previous_rows": prev_rows, "changes": changes, "version": meta["version"]})
     run.log(f"Version {meta['version']} published ({meta['parquet_size']:,} bytes of parquet)")
     return meta
@@ -1041,7 +1619,7 @@ def _run_bloom_incremental(ref: ReferentialConfig, settings: Settings, run: Run,
     try:
         with http_client(settings) as client:
             if full_due:
-                full_entry = download(client, url, paths.raw, headers(url), ref.source.extract, previous.get(url), run, cancelled, "bloom")
+                full_entry = download(client, url, paths.raw, headers(url), ref.source.extract, previous.get(url), run, cancelled, "bloom", settings)
                 state["full_checked_at"] = iso(utcnow())
                 if not full_entry.get("not_modified"):
                     files = [paths.raw / f for f in full_entry["files"]]
@@ -1054,7 +1632,7 @@ def _run_bloom_incremental(ref: ReferentialConfig, settings: Settings, run: Run,
                 # After a new full filter, every delta is applied again: no conditional request
                 prev = previous.get(durl) if new_full is None else None
                 dest = work / f"delta{i}"
-                entry = download(client, durl, dest, headers(durl), None, prev, run, cancelled, delta_fmt)
+                entry = download(client, durl, dest, headers(durl), None, prev, run, cancelled, delta_fmt, settings)
                 deltas.append(({**entry, "delta": True}, dest))
     except Exception:
         shutil.rmtree(work, ignore_errors=True)
@@ -1160,6 +1738,7 @@ def _add_values(bf: BloomFilter, path: Path, mode: str, pattern: re.Pattern | No
 
 
 _TX_CONTROL = re.compile(r"^\s*(BEGIN|COMMIT|END|ROLLBACK)\b", re.I)
+_INSERT = re.compile(r"^\s*INSERT\b", re.I)
 
 
 def _sql_statements(path: Path):
@@ -1188,22 +1767,40 @@ def _sql_statements(path: Path):
         raise RunRejected(f"delta {path.name}: the last statement is incomplete (truncated file?)")
 
 
-def apply_sql_delta(db: Path, sql_file: Path, run: Run, cancelled: Callable[[], bool] = lambda: False) -> int:
+def apply_sql_delta(db: Path, sql_file: Path, run: Run, cancelled: Callable[[], bool] = lambda: False,
+                    cache_kib: int = 262_144, origin: str | None = None) -> int:
     """Run the statements of a SQL delta (INSERT / UPDATE / DELETE, e.g. NIST NSRL RDSv3) in the database, in a
-    single transaction: on any error or cancellation nothing is applied. Returns the number of statements."""
+    single transaction: on any error or cancellation nothing is applied. Returns the number of statements.
+    An INSERT of a row already in the database (UNIQUE constraint) is skipped: the row is there. With `origin`
+    (NIST NSRL mode), the inserted rows are recorded as coming from this publication (nsrl.track_origin).
+
+    The transaction runs in WAL mode: the changed pages are appended to the -wal file instead of copying every
+    original page to a rollback journal first (4 to 5 times faster on a database of tens of GB), and it stays atomic,
+    also when the service is killed (the uncommitted frames are ignored). The database goes back to the usual
+    journal at the end, which writes the pages into it."""
     import sqlite3
 
     con = sqlite3.connect(db, isolation_level=None)
-    count = 0
+    count = duplicates = 0
     started = time.monotonic()
     try:
-        con.execute("PRAGMA cache_size = -262144")  # 256 MB
+        con.execute(f"PRAGMA cache_size = -{int(cache_kib)}")
+        con.execute("PRAGMA journal_mode = WAL")
+        con.execute("PRAGMA synchronous = NORMAL")
         con.execute("BEGIN IMMEDIATE")
+        if origin:
+            from .nsrl import track_origin
+
+            track_origin(con, origin)
         for lineno, stmt in _sql_statements(sql_file):
             if _TX_CONTROL.match(stmt):  # the transaction of the delta file is replaced by ours
                 continue
             try:
                 con.execute(stmt)
+            except sqlite3.IntegrityError as e:
+                if not (_INSERT.match(stmt) and "UNIQUE constraint failed" in str(e)):
+                    raise RunRejected(f"delta {sql_file.name}, line {lineno}: {e} (nothing applied)") from e
+                duplicates += 1
             except sqlite3.Error as e:
                 raise RunRejected(f"delta {sql_file.name}, line {lineno}: {e} (nothing applied)") from e
             count += 1
@@ -1217,14 +1814,119 @@ def apply_sql_delta(db: Path, sql_file: Path, run: Run, cancelled: Callable[[], 
             con.execute("ROLLBACK")
         raise
     finally:
-        con.close()
-    run.log(f"Delta {sql_file.name}: {count:,} statements applied in {time.monotonic() - started:.1f}s")
+        try:
+            con.execute("PRAGMA journal_mode = DELETE")  # checkpoint: the database file is complete again
+        finally:
+            con.close()
+    run.log(f"Delta {sql_file.name}: {count:,} statements applied in {time.monotonic() - started:.1f}s"
+            + (f" ({duplicates:,} rows already in the database, skipped)" if duplicates else ""))
     return count
 
 
 def _delta_sql_files(files: list[Path]) -> list[Path]:
     """SQL files of a delta, in name order; the schema shipped with the NSRL deltas is not a delta."""
     return sorted(f for f in files if f.suffix.lower() == ".sql" and "schema" not in f.name.lower())
+
+
+class DeltaOutOfSequence(RunRejected):
+    """A chained delta (NIST NSRL) made for another release than the one of the database."""
+
+
+def apply_chained_delta(db: Path, sql_file: Path, run: Run, cancelled: Callable[[], bool] = lambda: False,
+                        cache_kib: int = 262_144, origin: str | None = None) -> int | None:
+    """Apply a delta, checking its place in the chain of releases when it carries one (NIST NSRL: each delta brings
+    the previous release to the next one). Returns the number of statements, None when the database already holds it."""
+    from .nsrl import db_version, delta_versions, version_key
+
+    before, after = delta_versions(sql_file)
+    current = db_version(db) if before or after else None
+    if current and after and version_key(after) <= version_key(current):
+        run.log(f"Delta {sql_file.name} (release {after}) skipped: the database is already at release {current}")
+        return None
+    if current and before and before != current:
+        raise DeltaOutOfSequence(f"delta {sql_file.name} updates release {before} to {after}, but the database is at release "
+                                 f"{current}: the deltas must be applied in order, without gap (nothing applied)")
+    n = apply_sql_delta(db, sql_file, run, cancelled, cache_kib, origin)
+    if after:
+        run.log(f"Database now at release {after}")
+    return n
+
+
+def _acquire_nsrl(ref: ReferentialConfig, settings: Settings, run: Run, paths: RefPaths, state: dict[str, Any],
+                  new_base: Callable[[Path, dict[str, Any]], Path], save_state: Callable[[], None],
+                  applied: list[dict[str, Any]], cancelled: Callable[[], bool]) -> list[dict[str, Any]]:
+    """NIST NSRL: publications of the set found on the download page. The latest full database is loaded once, then
+    each new quarterly delta is applied to it: no list to maintain. Returns the source entries."""
+    from . import nsrl
+
+    nsrl_set, page = ref.options["nsrl"], ref.source.urls[0]
+    base_info = state.get("base") or {}
+    base = paths.base / base_info["file"] if base_info.get("file") else None
+    run.log(f"Reading the NIST download page: {page}")
+    with http_client(settings) as client:
+        try:
+            fulls, deltas = nsrl.discover(client, page, nsrl_set, ref.source.request_headers(page),
+                                          run.retries if run.retries is not None else DOWNLOAD_RETRIES, run.log)
+        except nsrl.NsrlError as e:
+            raise SourceCorrupted(str(e)) from e
+    usable = base is not None and base.exists() and base_info.get("set") == nsrl_set and not run.force
+    current = nsrl.db_version(base) if usable and base else None
+    latest = max([*fulls, *deltas], key=nsrl.version_key)
+    run.log(f"NIST NSRL '{nsrl_set}': latest release {latest}, latest full database {max(fulls, key=nsrl.version_key)}"
+            + (f", kept database at release {current}" if current else ""))
+    sources: list[dict[str, Any]] = []
+
+    def load_full(version: str) -> Path:
+        url = fulls[version]
+        run.log(f"Full database {version} needed: downloading {url}")
+        dest = paths.raw / "full"
+        for old in dest.iterdir() if dest.exists() else ():
+            if old.name != ".partial":  # interrupted download of the database: resumed
+                shutil.rmtree(old, ignore_errors=True) if old.is_dir() else old.unlink(missing_ok=True)
+        with http_client(settings) as client:
+            entry = download(client, url, dest, ref.source.request_headers(url), ref.source.extract, None, run, cancelled, "sqlite", settings)
+        dbs = [dest / f for f in entry["files"] if is_sqlite_file(dest / f)]
+        if len(dbs) != 1:
+            raise SourceCorrupted(f"corrupted source: a single SQLite database is expected in {url} ({len(dbs)} found)")
+        kept = new_base(dbs[0], {"url": url, "set": nsrl_set, "etag": entry.get("etag"), "last_modified": entry.get("last_modified")})
+        shutil.rmtree(dest, ignore_errors=True)
+        sources.append({**entry, "files": [], "discarded": True})
+        return kept
+
+    for attempt in range(2):
+        full, todo = nsrl.plan(fulls, deltas, current)
+        if full:
+            base = load_full(full)
+        assert base is not None
+        if todo:
+            run.log(f"{len(todo)} delta(s) to apply: {', '.join(v for v, _ in todo)}")
+        work = paths.work / "deltas"
+        try:
+            with http_client(settings) as client:
+                for version, durl in todo:
+                    shutil.rmtree(work, ignore_errors=True)
+                    entry = download(client, durl, work, ref.source.request_headers(durl), None, None, run, cancelled, "sql", settings)
+                    files = _delta_sql_files([work / f for f in entry["files"]])
+                    if not files:
+                        raise SourceCorrupted(f"corrupted delta: no SQL file in {durl}")
+                    counts = [apply_chained_delta(base, f, run, cancelled, sqlite_cache_kib(settings), f.name) for f in files]
+                    applied.append({"url": durl, "version": version, "file": ", ".join(f.name for f in files),
+                                    "statements": sum(c or 0 for c in counts), "skipped": all(c is None for c in counts),
+                                    "at": iso(utcnow())})
+                    save_state()
+                    sources.append({**entry, "files": [], "discarded": True, "delta": True})
+            break
+        except DeltaOutOfSequence as e:
+            # A new full database only helps when it is more recent than the kept one (tens of GB downloaded)
+            if attempt or full or not current or nsrl.version_key(max(fulls, key=nsrl.version_key)) <= nsrl.version_key(current):
+                raise
+            run.log(f"{e}: the latest full database is loaded again")
+            current = None
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    if not sources:
+        sources.append({"url": page, "files": [], "discarded": True, "base": base.name, "checked_at": iso(utcnow())})
+    return sources
 
 
 def _acquire_sqlite_base(ref: ReferentialConfig, settings: Settings, run: Run, paths: RefPaths, meta: dict[str, Any],
@@ -1255,14 +1957,15 @@ def _acquire_sqlite_base(ref: ReferentialConfig, settings: Settings, run: Run, p
         write_meta(paths, on_disk)
 
     def new_base(db: Path, origin: dict[str, Any]) -> Path:
-        nonlocal base, applied
+        nonlocal base
         paths.base.mkdir(parents=True, exist_ok=True)
         target = paths.base / db.name
         for old in paths.base.iterdir():
             if old != target:
                 old.unlink(missing_ok=True)
         shutil.move(db, target)  # the import folder may be another volume: copied then deleted
-        base, applied = target, []
+        base = target
+        applied.clear()
         state["base"] = {**origin, "file": target.name, "size": target.stat().st_size, "loaded_at": iso(utcnow())}
         save_state()
         run.log(f"Full database kept: {target.name} ({target.stat().st_size:,} bytes)")
@@ -1276,8 +1979,18 @@ def _acquire_sqlite_base(ref: ReferentialConfig, settings: Settings, run: Run, p
     if len(manual_db) > 1:
         raise RunRejected(f"a single full database is expected ({len(manual_db)} found)")
 
+    nsrl_set = ref.options.get("nsrl")
     if manual_db:
-        new_base(manual_db[0], {"url": None, "manual": True})
+        new_base(manual_db[0], {"url": None, "manual": True, "set": nsrl_set})
+    if nsrl_set and (manual_files is None or manual_db):
+        # NIST NSRL: the deltas newer than the database are found and applied (after a full database imported by hand too)
+        sources = _acquire_nsrl(ref, settings, run, paths, state, new_base, save_state, applied, cancelled)
+        base = paths.base / state["base"]["file"]
+    elif nsrl_set:
+        if base is None or not base.exists():
+            raise RunRejected("no full database to apply the delta to: update the referential first (the full database is downloaded)")
+    elif manual_db:
+        pass
     else:
         reload = (run.force and manual_files is None) or base is None or not base.exists() \
             or (base_info.get("url") not in (None, url)) or applied_urls != wanted[:len(applied_urls)]
@@ -1292,7 +2005,7 @@ def _acquire_sqlite_base(ref: ReferentialConfig, settings: Settings, run: Run, p
                 if old.name != ".partial":  # interrupted download of the database: resumed
                     shutil.rmtree(old, ignore_errors=True) if old.is_dir() else old.unlink(missing_ok=True)
             with http_client(settings) as client:
-                entry = download(client, url, dest, ref.source.request_headers(url), ref.source.extract, None, run, cancelled, "sqlite")
+                entry = download(client, url, dest, ref.source.request_headers(url), ref.source.extract, None, run, cancelled, "sqlite", settings)
             dbs = [dest / f for f in entry["files"] if is_sqlite_file(dest / f)]
             if len(dbs) != 1:
                 raise SourceCorrupted(f"corrupted source: a single SQLite database is expected in {url} ({len(dbs)} found)")
@@ -1309,12 +2022,13 @@ def _acquire_sqlite_base(ref: ReferentialConfig, settings: Settings, run: Run, p
         size = f.stat().st_size
         if any(a.get("file") == f.name and a.get("size") == size for a in applied):
             raise RunRejected(f"the delta {f.name} has already been applied to this database")
-        n = apply_sql_delta(base, f, run, cancelled)
-        applied.append({"url": None, "file": f.name, "size": size, "statements": n, "manual": True, "at": iso(utcnow())})
+        n = apply_chained_delta(base, f, run, cancelled, sqlite_cache_kib(settings), f.name if nsrl_set else None)
+        applied.append({"url": None, "file": f.name, "size": size, "statements": n or 0, "skipped": n is None, "manual": True,
+                        "at": iso(utcnow())})
         save_state()
 
     # Listed deltas not applied yet (after a new full database: all of them). Not with a manual delta only.
-    if manual_files is None or manual_db:
+    if not nsrl_set and (manual_files is None or manual_db):
         pending = wanted[len([a for a in applied if a.get("url")]):]
         if pending:
             run.log(f"{len(pending)} delta(s) to apply")
@@ -1323,16 +2037,32 @@ def _acquire_sqlite_base(ref: ReferentialConfig, settings: Settings, run: Run, p
             with http_client(settings) as client:
                 for durl in pending:
                     shutil.rmtree(work, ignore_errors=True)
-                    entry = download(client, durl, work, ref.source.request_headers(durl), None, None, run, cancelled, "sql")
+                    entry = download(client, durl, work, ref.source.request_headers(durl), None, None, run, cancelled, "sql", settings)
                     files = _delta_sql_files([work / f for f in entry["files"]])
                     if not files:
                         raise SourceCorrupted(f"corrupted delta: no SQL file in {durl}")
-                    n = sum(apply_sql_delta(base, f, run, cancelled) for f in files)
-                    applied.append({"url": durl, "file": ", ".join(f.name for f in files), "statements": n, "at": iso(utcnow())})
+                    counts = [apply_chained_delta(base, f, run, cancelled, sqlite_cache_kib(settings)) for f in files]
+                    applied.append({"url": durl, "file": ", ".join(f.name for f in files), "statements": sum(c or 0 for c in counts),
+                                    "skipped": all(c is None for c in counts), "at": iso(utcnow())})
                     save_state()
                     sources.append({**entry, "files": [], "discarded": True, "delta": True})
         finally:
             shutil.rmtree(work, ignore_errors=True)
+    from .nsrl import db_version, ensure_origin
+
+    if nsrl_set:  # read with the publication of each row (sqlbuild.reader_expr): none recorded yet after a full database
+        import sqlite3
+
+        con = sqlite3.connect(base)
+        try:
+            ensure_origin(con)
+            con.commit()
+        finally:
+            con.close()
+    version = db_version(base)  # release of a NIST NSRL database, shown with the applied deltas
+    if version != state.get("version"):
+        state["version"] = version
+        save_state()
     return [[base]], sources
 
 

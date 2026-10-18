@@ -1,4 +1,4 @@
-import { Alert, Button, Checkbox, Code, Group, List, Modal, Stack, Text } from '@mantine/core';
+import { Alert, Button, Checkbox, Code, Group, List, Modal, SegmentedControl, Stack, Text } from '@mantine/core';
 import { Dropzone } from '@mantine/dropzone';
 import '@mantine/dropzone/styles.css';
 import { notifications } from '@mantine/notifications';
@@ -15,11 +15,14 @@ export function ImportButton({ r, size = 'sm' }: { r: ReferentialDetail; size?: 
   const [opened, setOpened] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [pin, setPin] = useState(false);
+  // Merged referential: the files are a delta (merge) or the new base (replace)
+  const [mode, setMode] = useState<'merge' | 'replace'>('merge');
+  const merged = !!r.merge?.enabled;
   const urls = r.source_type === 'http' ? r.source_urls : [];
   const expected = urls.length > 1 ? urls.map((u) => u.split('?')[0].split('/').pop()!.replace(/\.(gz|zip)$/i, '')) : [];
 
   const run = useMutation({
-    mutationFn: () => api.importFiles(r.id, files, pin),
+    mutationFn: () => api.importFiles(r.id, files, pin, merged ? mode : undefined),
     onSuccess: () => {
       notifications.show({ title: 'Import started', message: `${files.length} file(s) sent to ${r.name}`, color: 'blue' });
       qc.invalidateQueries({ queryKey: ['referential', r.id] });
@@ -32,15 +35,41 @@ export function ImportButton({ r, size = 'sm' }: { r: ReferentialDetail; size?: 
 
   return (
     <>
-      <Button variant="default" size={size} leftSection={<IconFileImport size={16} />} onClick={() => setOpened(true)} disabled={!!r.current_run}>
+      <Button
+        variant="default"
+        size={size}
+        leftSection={<IconFileImport size={16} />}
+        onClick={() => setOpened(true)}
+        disabled={!!r.current_run || !!r.federation}
+        title={r.federation ? `Replica of the peer ${r.federation.peer}: its data comes from there` : undefined}
+      >
         Import
       </Button>
       <Modal opened={opened} onClose={() => setOpened(false)} size="lg" title={<Text fw={700}>Manual import — {r.name}</Text>}>
         <Stack>
-          <Text size="sm" c="dimmed">
-            The files you send become the new version of the referential, instead of its usual source. They go through the same checks
-            (format, empty or corrupted file, validation rules): if they are refused, the current version is kept.
-          </Text>
+          {merged ? (
+            <Stack gap={6}>
+              <SegmentedControl
+                value={mode}
+                onChange={(v) => setMode(v as 'merge' | 'replace')}
+                data={[
+                  { value: 'merge', label: 'Delta: merge into the data' },
+                  { value: 'replace', label: 'New base: replace the data' },
+                ]}
+              />
+              <Text size="sm" c="dimmed">
+                {mode === 'merge'
+                  ? `The rows of the files are added to the published data${r.key ? `; a row with the same ${r.key} replaces the published one` : ', identical rows kept once'}${r.merge?.delete_column ? ` (rows with ${r.merge.delete_column} = true remove it)` : ''}. Nothing is deleted otherwise.`
+                  : 'The files alone become the published data (the next deltas are merged into them).'}{' '}
+                They go through the same checks (format, validation and quality rules): if they are refused, the current version is kept.
+              </Text>
+            </Stack>
+          ) : (
+            <Text size="sm" c="dimmed">
+              The files you send become the new version of the referential, instead of its usual source. They go through the same checks
+              (format, empty or corrupted file, validation rules): if they are refused, the current version is kept.
+            </Text>
+          )}
           {expected.length > 0 && (
             <Alert color="indigo" variant="light" p="sm">
               <Text size="sm">This referential combines {expected.length} sources: send one file per source, named:</Text>

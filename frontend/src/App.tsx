@@ -29,6 +29,9 @@ import {
   IconDownload,
   IconBell,
   IconFolderSearch,
+  IconWorldUpload,
+  IconWorldShare,
+  IconDatabase,
   IconKey,
   IconSettings,
   IconLogout,
@@ -70,6 +73,9 @@ const ReferentialEditor = lazy(() => import('./pages/admin/ReferentialEditor'));
 const SecretsPage = lazy(() => import('./pages/admin/SecretsPage'));
 const DiscoveryPage = lazy(() => import('./pages/admin/DiscoveryPage'));
 const NotificationsPage = lazy(() => import('./pages/admin/NotificationsPage'));
+const EndpointsPage = lazy(() => import('./pages/admin/EndpointsPage'));
+const PeersPage = lazy(() => import('./pages/admin/PeersPage'));
+const StoragePage = lazy(() => import('./pages/admin/StoragePage'));
 const DownloadsPage = lazy(() => import('./pages/DownloadsPage'));
 const SqlConsole = lazy(() => import('./pages/SqlConsole'));
 const SystemPage = lazy(() => import('./pages/SystemPage'));
@@ -219,18 +225,37 @@ function Shell() {
       : []),
     { to: '/help', label: 'Help', icon: IconHelp, active: path.startsWith('/help') },
   ];
+  const inError = (refs ?? []).filter((r) => r.health === 'error').length;
   const admin = [
-    { to: '/admin/referentials', label: 'Referentials', icon: IconDatabaseCog, active: path.startsWith('/admin/referentials') },
+    {
+      to: inError ? '/admin/referentials?status=error' : '/admin/referentials',
+      label: 'Referentials',
+      icon: IconDatabaseCog,
+      active: path.startsWith('/admin/referentials'),
+      badge: inError,
+      badgeColor: 'red',
+      badgeLabel: `${inError} referential(s) in error`,
+    },
     { to: '/admin/discovery', label: 'Bulk discovery', icon: IconFolderSearch, active: path.startsWith('/admin/discovery') },
+    { to: '/admin/peers', label: 'Synchronized instances', icon: IconWorldShare, active: path.startsWith('/admin/peers') },
+    { to: '/admin/storage', label: 'Disk space', icon: IconDatabase, active: path.startsWith('/admin/storage') },
+    { to: '/admin/endpoints', label: 'Outgoing connections', icon: IconWorldUpload, active: path.startsWith('/admin/endpoints') },
     { to: '/admin/secrets', label: 'Secrets', icon: IconKey, active: path.startsWith('/admin/secrets') },
     { to: '/admin/notifications', label: 'Notifications', icon: IconBell, active: path.startsWith('/admin/notifications') },
-    { to: '/admin/users', label: 'Users', icon: IconUsers, active: path.startsWith('/admin/users'), badge: me?.pending_requests },
+    {
+      to: '/admin/users',
+      label: 'Users',
+      icon: IconUsers,
+      active: path.startsWith('/admin/users'),
+      badge: me?.pending_requests,
+      badgeLabel: `${me?.pending_requests} pending access request(s)`,
+    },
     { to: '/admin/groups', label: 'Groups', icon: IconUsersGroup, active: path.startsWith('/admin/groups') },
     { to: '/admin/audit', label: 'Audit log', icon: IconClipboardList, active: path.startsWith('/admin/audit') },
     { to: '/admin/tasks', label: 'Tasks', icon: IconCalendarTime, active: path.startsWith('/admin/tasks') },
     { to: '/admin/settings', label: 'Settings', icon: IconSettings, active: path.startsWith('/admin/settings') },
     { to: '/system', label: 'System', icon: IconServer, active: path.startsWith('/system') },
-  ] as { to: string; label: string; icon: typeof IconUsers; active: boolean; badge?: number }[];
+  ] as { to: string; label: string; icon: typeof IconUsers; active: boolean; badge?: number; badgeColor?: string; badgeLabel?: string }[];
 
   return (
     <AppShell
@@ -290,8 +315,8 @@ function Shell() {
                   leftSection={<item.icon size={18} stroke={1.6} />}
                   rightSection={
                     item.badge ? (
-                      <Tooltip label={`${item.badge} pending access request(s)`}>
-                        <Badge size="sm" color="orange" circle>
+                      <Tooltip label={item.badgeLabel}>
+                        <Badge size="sm" color={item.badgeColor ?? 'orange'} circle>
                           {item.badge}
                         </Badge>
                       </Tooltip>
@@ -374,6 +399,9 @@ function Shell() {
               <Route path="/admin/secrets" element={<SecretsPage />} />
               <Route path="/admin/discovery" element={<DiscoveryPage />} />
               <Route path="/admin/notifications" element={<NotificationsPage />} />
+              <Route path="/admin/endpoints" element={<EndpointsPage />} />
+              <Route path="/admin/peers" element={<PeersPage />} />
+              <Route path="/admin/storage" element={<StoragePage />} />
               <Route path="/admin/audit" element={<AuditPage />} />
               <Route path="/admin/tasks" element={<TasksPage />} />
             </>

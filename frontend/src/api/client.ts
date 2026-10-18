@@ -13,6 +13,9 @@ import type {
   ColumnStats,
   Definition,
   ConfigImportResult,
+  EndpointInventory,
+  QualityResult,
+  QualityRule,
   DefinitionConfig,
   DiscoveryApplyResult,
   DiscoveryScan,
@@ -42,6 +45,10 @@ import type {
   SqlTable,
   SystemInfo,
   SystemTask,
+  StorageReport,
+  Peer,
+  PeerDataset,
+  SyncReport,
   TaskRun,
   TestStep,
   UploadResult,
@@ -96,7 +103,13 @@ export const api = {
   referentials: () => request<ReferentialSummary[]>('/api/referentials'),
   referential: (id: string) => request<ReferentialDetail>(`/api/referentials/${enc(id)}`),
   runs: (id: string, limit = 50) => request<Run[]>(`/api/referentials/${enc(id)}/runs?limit=${limit}`),
-  refresh: (id: string, force = false) => request<Run>(`/api/referentials/${enc(id)}/refresh?force=${force}`, json('POST')),
+  quality: (id: string) =>
+    request<{ quality: QualityResult | null; rules: QualityRule[]; key: string | null; history: { run: string; at: string; status: string; version?: number; score: number | null }[] }>(
+      `/api/referentials/${enc(id)}/quality`,
+    ),
+  checkQuality: (id: string) => request<QualityResult | null>(`/api/referentials/${enc(id)}/quality/check`, json('POST')),
+  refresh: (id: string, force = false, replace = false) =>
+    request<Run>(`/api/referentials/${enc(id)}/refresh?force=${force}${replace ? '&replace=true' : ''}`, json('POST')),
   cancel: (id: string) => request<{ cancelled: boolean }>(`/api/referentials/${enc(id)}/run`, json('DELETE')),
   rows: (id: string, params: URLSearchParams) => request<RowsResponse>(`/api/referentials/${enc(id)}/rows?${params}`),
   columnStats: (id: string, column: string) =>
@@ -162,6 +175,16 @@ export const api = {
     request<{ ok: boolean; steps: TestStep[]; redirect_uri: string; endpoints: Record<string, string | null> }>('/api/admin/settings/oidc/test', json('POST', { config })),
   createUser: (body: Record<string, unknown>) => request<AdminUser>('/api/admin/users', json('POST', body)),
   tasks: () => request<SystemTask[]>('/api/admin/tasks'),
+  storage: (refresh = false) => request<StorageReport>(`/api/system/storage${refresh ? '?refresh=true' : ''}`),
+
+  // Federation: other RefExposer instances replicated here
+  peers: () => request<{ peers: Peer[] }>('/api/admin/federation'),
+  peerCatalog: (body: { url?: string; token?: string; peer?: string }) =>
+    request<{ instance: Peer['instance']; datasets: PeerDataset[] }>('/api/admin/federation/catalog', json('POST', body)),
+  savePeer: (name: string, body: Record<string, unknown>) => request<Peer>(`/api/admin/federation/peers/${enc(name)}`, json('PUT', body)),
+  deletePeer: (name: string, removeReplicas: boolean) =>
+    request<{ ok: boolean; replicas_removed: string[] }>(`/api/admin/federation/peers/${enc(name)}?remove_replicas=${removeReplicas}`, json('DELETE')),
+  syncPeer: (name: string) => request<SyncReport>(`/api/admin/federation/peers/${enc(name)}/sync`, json('POST')),
   updateTask: (id: string, body: { enabled?: boolean; schedule?: string; params?: Record<string, unknown> }) =>
     request<SystemTask>(`/api/admin/tasks/${id}`, json('PUT', body)),
   runTask: (id: string) => request<SystemTask>(`/api/admin/tasks/${id}/run`, json('POST')),
@@ -247,6 +270,9 @@ export const api = {
   },
   importConfig: (body: object) => request<ConfigImportResult>('/api/admin/config/import', json('POST', body)),
 
+  // Outgoing connections
+  endpoints: () => request<EndpointInventory>('/api/admin/endpoints'),
+
   // Bulk discovery
   discoveryScan: (body: { source: DiscoverySource; analyse: boolean; category?: string | null; tags?: string[]; schedule?: string | null }) =>
     request<DiscoveryScan>('/api/admin/discovery/scan', json('POST', body)),
@@ -265,10 +291,11 @@ export const api = {
   },
 
   // Manual import, frozen versions
-  importFiles: (id: string, files: File[], pin: boolean) => {
+  importFiles: (id: string, files: File[], pin: boolean, mode?: 'merge' | 'replace') => {
     const form = new FormData();
     files.forEach((f) => form.append('files', f));
     form.append('pin', String(pin));
+    if (mode) form.append('mode', mode);
     return request<Run>(`/api/referentials/${enc(id)}/import`, { method: 'POST', body: form });
   },
   uploadLogo: (file: File) => {

@@ -405,6 +405,8 @@ def preview(
     timeout: float = 120,
 ) -> dict[str, Any]:
     cleanup(settings)
+    if (fmt or "sqlite") == "sqlite" and (options.get("nsrl") or _is_nsrl_page(source)):
+        return _preview_nsrl(settings, source, {"nsrl": "modern_minimal", **options})
     try:
         groups, logs, described = acquire(settings, source, ref_root, refresh)
     except TooLargeToAnalyse as e:
@@ -535,9 +537,57 @@ def preview(
     return result
 
 
+NSRL_TABLES = ["NSRLFile", "NSRLProd", "NSRLMfg", "NSRLOS", "FILE", "PKG", "OS", "MFG", "DISTINCT_HASH", "VERSION"]
+
+
+def _is_nsrl_page(source: dict[str, Any]) -> bool:
+    """URL of the NIST NSRL download page (not of a publication): the NSRL mode is chosen without asking."""
+    urls = source.get("urls") or []
+    return ((source.get("type") or "http") == "http" and len(urls) == 1
+            and bool(re.match(r"^https?://(www\.)?nist\.gov/.*nsrl", urls[0], re.I)) and not urls[0].lower().endswith(".zip"))
+
+
+def _preview_nsrl(settings: Settings, source: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
+    """NIST NSRL: the publications of the set found on the download page, without downloading them (tens of GB)."""
+    import httpx
+
+    from .nsrl import DOWNLOAD_PAGE, NsrlError, discover, plan, version_key
+
+    page = (source.get("urls") or [DOWNLOAD_PAGE])[0]
+    result: dict[str, Any] = {
+        "files": [], "logs": [], "detected_format": "sqlite", "format": "sqlite", "sniff": None,
+        "records_path_candidates": NSRL_TABLES, "sampled": False,
+        "applied_options": {"nsrl": options["nsrl"], "table": options.get("table") or "NSRLFile"},
+        "columns": [], "rows": [], "total_rows": None, "error": None, "sql": None,
+    }
+    try:
+        with http_client(settings) as client:
+            fulls, deltas = discover(client, page, str(options["nsrl"]), retries=1)
+            full, todo = plan(fulls, deltas, None)
+            assert full is not None
+            for url in [fulls[full], *(u for _, u in todo)]:
+                try:
+                    size = int(client.head(url, follow_redirects=True).headers.get("content-length") or 0)
+                except (httpx.HTTPError, ValueError):
+                    size = 0
+                result["files"].append({"name": url.rsplit("/", 1)[-1], "size": size, "url": url, "sampled": False})
+    except NsrlError as e:
+        result["error"] = str(e)
+        return result
+    result["logs"] = [f"NIST NSRL '{options['nsrl']}': {len(fulls)} full publication(s), {len(deltas)} delta(s) on {page}"]
+    result["unanalysed"] = (f"NIST NSRL: the full database {full} is downloaded at the first update, then "
+                            f"{len(todo)} delta(s) ({', '.join(v for v, _ in todo) or 'none'}) are applied to it; each new "
+                            f"quarterly delta is applied on the next updates. Latest release: "
+                            f"{max([*fulls, *deltas], key=version_key)}.")
+    return result
+
+
 def sqlite_tables(path: Path) -> list[str]:
-    """Tables and views of a SQLite database (views first: e.g. FILE, PKG of the NIST NSRL)."""
+    """Tables and views of a SQLite database (views first: e.g. FILE, PKG of the NIST NSRL), and the RDS 2.x
+    conversions (NSRLFile...) of a NIST NSRL database."""
     import sqlite3
+
+    from .nsrl import CONVERSIONS, ORIGIN_TABLE
 
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -545,7 +595,10 @@ def sqlite_tables(path: Path) -> list[str]:
                            "ORDER BY type DESC, name").fetchall()
     finally:
         con.close()
-    return [r[0] for r in rows]
+    names = [r[0] for r in rows if r[0] != ORIGIN_TABLE]  # publication of the rows (NSRL mode), not data
+    if {"FILE", "PKG", "MFG", "OS"} <= set(names):
+        names = [*CONVERSIONS, *names]
+    return names
 
 
 def adopt_upload(settings: Settings, upload_id: str, raw_dir: Path) -> list[str]:

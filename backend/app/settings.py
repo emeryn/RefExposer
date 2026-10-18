@@ -63,8 +63,21 @@ class Settings(BaseSettings):
     git_protocols: str = "https"
     git_timeout: int = 900
 
+    # New attempts of a download when the remote site fails (see SourceConfig.retries)
+    download_retries: int = 5
+
     duckdb_memory_limit: str | None = None
     duckdb_threads: int | None = None
+
+    # Disk space never used by an update (downloads, decompression, DuckDB spill files): an update needing more stops
+    # with a clear error instead of filling the disk (the database and the other referentials share it)
+    min_free_disk: str = "5GB"
+    # Source files larger than this are not kept after the build when they are not the published file itself
+    # (decompressed or rewritten): a monthly source of 90 GB would otherwise double the disk used. 0: no limit.
+    keep_raw_max: str = "10GB"
+    # A filter or a lookup that would read the whole published file, on a column neither sorted nor indexed, is refused
+    # at once above this size (with what to configure) instead of reading tens of GB until the query timeout. 0: never
+    full_scan_max: str = "20GB"
 
     cors_origins: list[str] = []
 
@@ -96,6 +109,11 @@ class Settings(BaseSettings):
     argon2_time_cost: int = 3
     argon2_memory_kib: int = 65536
     argon2_parallelism: int = 4
+
+    @field_validator("duckdb_threads", "duckdb_memory_limit", mode="before")
+    @classmethod
+    def _empty_is_automatic(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
 
     @field_validator("log_level", mode="before")
     @classmethod

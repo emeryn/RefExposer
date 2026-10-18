@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import orjson
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -21,6 +22,8 @@ from .downloads import Downloads
 from .engine import Engine
 from .ingest import Run, RunCancelled, RunRejected, SourceCorrupted, execute_run
 from .settings import Settings
+from .quality import summary as quality_summary
+from .resources import engine_limits
 from .storage import RefPaths, append_run, dir_size, iso, parse_iso, read_meta, read_runs, utcnow, write_meta
 
 log = logging.getLogger(__name__)
@@ -34,7 +37,7 @@ class Service:
     def __init__(self, settings: Settings):
         self.settings = settings
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        self.engine = Engine(settings.data_dir, settings.duckdb_memory_limit, settings.duckdb_threads, settings.query_timeout)
+        self.engine = Engine(settings.data_dir, *engine_limits(settings), settings.query_timeout)
         self.downloads = Downloads(self.engine, settings)
         self._blooms: dict[str, tuple[float, Any]] = {}
         self._mmdbs: dict[str, tuple[float, Any]] = {}
@@ -43,6 +46,10 @@ class Service:
         self.metas: dict[str, dict[str, Any]] = {}
         self.active: dict[str, Run] = {}
         self._cancel: set[str] = set()
+        # Stop asked (SIGTERM, shutdown): running updates are interrupted, not cancelled by a user, and start again
+        self.stopping = False
+        # The previous run of the service ended with a clean stop (marker written by mark_shutdown)
+        self._clean_stop = False
         self._lock = threading.RLock()
         self._inbox_seen: dict[str, tuple[int, float]] = {}
         self._pending_publish: dict[str, str | None] = {}
@@ -64,12 +71,31 @@ class Service:
         self.tasks = TaskManager(self)
 
     # ------------------------------------------------------------------ lifecycle
+    @property
+    def _stop_marker(self) -> Path:
+        return self.settings.data_dir / ".system" / "stopped.json"
+
     def start(self) -> None:
+        # An update found in progress after a clean stop was interrupted, not killed (see _crashed_run)
+        self._clean_stop = self._stop_marker.exists()
         self.reload()
+        self._clean_stop = False
+        self._stop_marker.unlink(missing_ok=True)
         if self.settings.scheduler_enabled:
             self.scheduler.start()
             # System tasks (folder scans, maintenance, monitoring, security, backups): see tasks.py
             self.tasks.schedule_all()
+        for ref in list(self.refs.values()):  # updates interrupted by the last stop: started again
+            meta = self.metas.get(ref.id) or {}
+            if meta.get("resume_after_restart"):
+                paths = RefPaths(self.settings.data_dir, ref.id)
+                stored = read_meta(paths)
+                stored.pop("resume_after_restart", None)
+                write_meta(paths, stored)
+                meta.pop("resume_after_restart", None)
+                if ref.enabled and not meta.get("pinned"):
+                    log.info("[%s] update interrupted by the last stop: started again", ref.id)
+                    self.submit(ref.id, "restart")
         mode = self.settings.refresh_on_startup
         if mode != "none":
             for ref in self.refs.values():
@@ -81,7 +107,26 @@ class Service:
                     self.submit(ref.id, "startup")
             self._save_sync_state()
 
+    def mark_shutdown(self) -> None:
+        """The service is asked to stop (SIGTERM of docker stop / a restart, then the shutdown of the application): the
+        running updates are recorded as interrupted by a stop, so that the next start does not take them for a crash
+        (out of memory) and starts them again. Called from the SIGTERM handler, before any timeout can kill the process."""
+        if self.stopping:
+            return
+        self.stopping = True
+        with self._lock:
+            runs = list(self.active.values())
+        for run in runs:
+            run.shutdown = True
+            run.save_journal()
+        try:
+            self._stop_marker.parent.mkdir(parents=True, exist_ok=True)
+            self._stop_marker.write_text(orjson.dumps({"at": iso(utcnow()), "runs": [r.ref_id for r in runs]}).decode())
+        except OSError as e:
+            log.warning("cannot record the stop: %s", e)
+
     def stop(self) -> None:
+        self.mark_shutdown()
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
         with self._lock:
@@ -92,6 +137,54 @@ class Service:
         self.notifier.stop()
         self._cancel.update(self.active)
         self.executor.shutdown(wait=False, cancel_futures=True)
+
+    def _crashed_run(self, ref: ReferentialConfig, paths: RefPaths, meta: dict[str, Any]) -> dict[str, Any]:
+        """An update was going on when the service stopped without ending it (killed when out of memory, host
+        restart...): the run is recorded as failed, with its logs, and automatic updates of the referential stop
+        until an update started by hand goes to its end, so that the same update does not kill the service again
+        and again at each restart."""
+        try:
+            run = orjson.loads(paths.running.read_bytes())
+        except (OSError, ValueError):
+            run = {"id": "unknown", "ref_id": ref.id, "trigger": "?", "phase": "?", "logs": []}
+        paths.running.unlink(missing_ok=True)
+        now = iso(utcnow())
+        if run.get("shutdown") or self._clean_stop:
+            # The service was stopped (restart, new image, docker stop), not killed: the update starts again at this start,
+            # and a large download resumes where it stopped
+            message = (f"update interrupted by a stop of the service during the '{run.get('phase')}' phase: started again "
+                       "at the next start")
+            run.update({"status": "cancelled", "message": message, "finished_at": now})
+            run["logs"] = [*run.get("logs", []), {"t": now, "level": "warn", "msg": message}]
+            append_run(paths, run, self.settings.keep_runs)
+            meta.update({"status": "cancelled", "last_error": message, "resume_after_restart": True})
+            meta["last_run"] = {k: v for k, v in run.items() if k != "logs"}
+            write_meta(paths, meta)
+            log.warning("[%s] %s", ref.id, message)
+            self._fail_processing(ref, message)
+            return meta
+        message = (f"update interrupted: the service stopped during the '{run.get('phase')}' phase without being asked to "
+                   "(killed, probably when out of memory, or host restarted). Automatic updates are suspended: give the "
+                   "service more memory, or lower REFEX_DUCKDB_MEMORY_LIMIT / REFEX_DUCKDB_THREADS, then start an update by hand")
+        run.update({"status": "error", "message": message, "finished_at": now})
+        run["logs"] = [*run.get("logs", []), {"t": now, "level": "error", "msg": message}]
+        append_run(paths, run, self.settings.keep_runs)
+        crashes = int((meta.get("crashed") or {}).get("count", 0)) + 1
+        meta.update({"status": "error", "last_error": message,
+                     "crashed": {"at": now, "phase": run.get("phase"), "run": run.get("id"), "count": crashes}})
+        meta["last_run"] = {k: v for k, v in run.items() if k != "logs"}
+        write_meta(paths, meta)
+        log.error("[%s] %s", ref.id, message)
+        self._fail_processing(ref, message)
+        return meta
+
+    def _fail_processing(self, ref: ReferentialConfig, message: str) -> None:
+        processing = self.settings.import_dir / ref.id / ".processing" if self.settings.import_dir else None
+        for batch in sorted(processing.iterdir()) if processing and processing.exists() else ():
+            try:  # files of the import folder being imported: moved to .failed/ (not picked up again)
+                self._finish_inbox(batch, ok=False, message=message)
+            except OSError as e:
+                log.warning("[%s] cannot move the imported files: %s", ref.id, e)
 
     def _load_all(self) -> tuple[dict[str, ReferentialConfig], list[ConfigError]]:
         """YAML files first, then definitions created from the UI (stored in the database)."""
@@ -188,7 +281,9 @@ class Service:
             for ref in refs.values():
                 paths = RefPaths(self.settings.data_dir, ref.id)
                 meta = read_meta(paths)
-                if meta.get("status") in ("running", "queued") and ref.id not in self.active:
+                if paths.running.exists() and ref.id not in self.active:
+                    meta = self._crashed_run(ref, paths, meta)
+                elif meta.get("status") in ("running", "queued") and ref.id not in self.active:
                     meta["status"] = "error"
                     meta["last_error"] = "update interrupted (service restart)"
                     write_meta(paths, meta)
@@ -200,12 +295,73 @@ class Service:
                         log.error("Cannot expose %s: %s", ref.id, e)
         self._schedule_all()
         self._prepare_import_dir()
+        self._recheck_quality()
         return {"loaded": len(refs), "errors": [e.model_dump() for e in errors], "removed": sorted(removed)}
+
+    # ------------------------------------------------------------------ data quality
+    def _recheck_quality(self) -> None:
+        """Rules changed (or removed) since the published version was checked: checked again in the background,
+        on the published file (no download)."""
+        from .quality import rules_hash
+
+        for ref in list(self.refs.values()):
+            if ref.is_artifact or ref.id in self.active or not RefPaths(self.settings.data_dir, ref.id).current.exists():
+                continue
+            stored = (self.metas.get(ref.id, {}).get("quality") or {}).get("rules_hash")
+            if rules_hash(ref.quality, ref.key) != stored:
+                self.executor.submit(self._quality_job, ref.id)
+
+    def _quality_job(self, ref_id: str) -> None:
+        try:
+            self.check_quality(ref_id)
+        except Exception:  # noqa: BLE001
+            log.exception("[%s] quality check failed", ref_id)
+
+    def check_quality(self, ref_id: str) -> dict[str, Any] | None:
+        """Check the quality rules on the published version (none: no rule, no key). Never rejects it."""
+        from .crypto import parquet_key
+        from .ingest import _connect
+        from .quality import SAMPLE_ROWS, evaluate
+        from .sqlbuild import parquet_reader, parquet_sample
+
+        ref = self.refs.get(ref_id)
+        paths = RefPaths(self.settings.data_dir, ref_id)
+        if ref is None or ref.is_artifact or ref_id in self.active or not paths.current.exists():
+            return None
+        meta = read_meta(paths)
+        key = parquet_key(ref.id) if meta.get("encrypted") else None
+        paths.work.mkdir(parents=True, exist_ok=True)
+        con = _connect(self.settings, paths, ref.format, key)
+        try:
+            columns = {c["name"] for c in meta.get("columns") or []}
+            rows = int(meta.get("row_count") or 0)
+            name = key[0] if key else None
+            result = evaluate(con, parquet_reader(str(paths.current), name), columns, ref.quality, ref.key,
+                              examples=not ref.confidential, large=rows > self.settings.large_rows,
+                              sample=parquet_sample(str(paths.current), name, rows, SAMPLE_ROWS, ref.storage.row_group_size))
+        finally:
+            con.close()
+        if result:
+            result["checked_at"] = iso(utcnow())
+            result["recheck"] = True  # checked on the published version, after a change of the rules
+        with self._lock:
+            if ref_id in self.active:  # an update started meanwhile: it checks the rules itself
+                return result
+            meta = read_meta(paths)
+            meta["quality"] = result
+            write_meta(paths, meta)
+            self.metas[ref_id] = self._in_memory(ref_id, meta)
+        log.info("[%s] quality checked again: %s", ref_id, (result or {}).get("score"))
+        return result
 
     def _schedule_all(self) -> None:
         for job in self.scheduler.get_jobs():
-            if not job.id.startswith("__"):  # internal jobs (session purge...) are kept
+            # Internal jobs (session purge...) and system tasks (scheduled by tasks.py) are kept
+            if not job.id.startswith(("__", "task:")):
                 job.remove()
+        from .federation import schedule_peers
+
+        schedule_peers(self)  # synchronization with the peers (federation), on their own schedules
         for ref in self.refs.values():
             if ref.enabled and ref.schedule:
                 self.scheduler.add_job(
@@ -222,7 +378,7 @@ class Service:
 
     # ------------------------------------------------------------------ jobs
     def submit(self, ref_id: str, trigger: str = "manual", force: bool = False, user: str | None = None,
-               manual: dict[str, Any] | None = None) -> Run | None:
+               manual: dict[str, Any] | None = None, replace: bool = False) -> Run | None:
         with self._lock:
             if ref_id in self.active:
                 if manual is not None:
@@ -232,8 +388,13 @@ class Service:
             if trigger in ("schedule", "startup") and meta.get("pinned"):
                 log.info("[%s] frozen version: automatic update skipped", ref_id)
                 return None
+            if trigger in ("schedule", "startup", "sync") and meta.get("crashed"):
+                log.warning("[%s] the last update stopped the service: automatic update skipped (start it by hand)", ref_id)
+                return None
             ref = self.refs[ref_id]
-            run = Run(ref.id, trigger, force, user)
+            # replace (merged referential): the data set is published alone, read again from the source
+            replace = replace or bool((manual or {}).get("replace"))
+            run = Run(ref.id, trigger, force or (replace and manual is None), user, replace)
             self.active[ref_id] = run
             meta["status"] = "queued"
         self.executor.submit(self._execute, ref, run, manual)
@@ -344,13 +505,16 @@ class Service:
                 k: v for k, v in self.metas.get(ref_id, {}).items() if k != "pinned"}
 
     # ------------------------------------------------------------------ manual imports
-    def import_files(self, ref_id: str, files_dir: Path, origin: str, user: str | None, pin: bool = False) -> Run:
+    def import_files(self, ref_id: str, files_dir: Path, origin: str, user: str | None, pin: bool = False,
+                     replace: bool = False) -> Run:
         """Import the files of `files_dir` as the new version of the referential.
-        origin: "upload" (sent from the UI / API) or "inbox" (dropped in the import folder)."""
-        files = sorted(p for p in files_dir.iterdir() if p.is_file())
+        origin: "upload" (sent from the UI / API) or "inbox" (dropped in the import folder). Merged referential: the files
+        are a delta merged into the published version, or published alone with `replace`."""
+        # Uploaded archives are already extracted, and may hold a folder (e.g. NIST NSRL: RDS_<version>_<set>_delta/...)
+        files = sorted(p for p in files_dir.rglob("*") if p.is_file())
         if not files:
             raise ValueError("no file to import")
-        manual = {"files": files, "dir": files_dir, "origin": origin, "by": user, "pin": pin}
+        manual = {"files": files, "dir": files_dir, "origin": origin, "by": user, "pin": pin, "replace": replace}
         return self.submit(ref_id, origin, False, user, manual)  # type: ignore[return-value]
 
     def _prepare_import_dir(self) -> None:
@@ -462,8 +626,13 @@ class Service:
     def _execute(self, ref: ReferentialConfig, run: Run, manual: dict[str, Any] | None = None) -> None:
         paths = RefPaths(self.settings.data_dir, ref.id)
         old_meta = dict(self.metas.get(ref.id, {}))
-        previous_status = read_meta(paths).get("status")  # last finished update (in memory: queued)
+        before = read_meta(paths)
+        previous_status = before.get("status")  # last finished update (in memory: queued)
+        quality_before = (before.get("quality") or {}).get("status")
         self.metas[ref.id] = {**old_meta, "status": "running"}
+        paths.root.mkdir(parents=True, exist_ok=True)
+        run.journal = paths.running
+        run.save_journal()
         try:
             meta = execute_run(ref, self.settings, run, cancelled=lambda: ref.id in self._cancel, manual=manual,
                                internal_rows=self._internal_rows)
@@ -487,9 +656,14 @@ class Service:
                 run.phase = "downloads"
                 self.downloads.prebuild(ref, meta)
         except RunCancelled:
-            run.status, run.message = "cancelled", "cancelled by the user"
-            run.log("Update cancelled", "warn")
-            meta = {**read_meta(paths), "status": "cancelled", "last_error": run.message}
+            if run.shutdown:  # stopped with the service: started again at the next start
+                run.status, run.message = "cancelled", "interrupted by a stop of the service: started again at the next start"
+                run.log("Update interrupted by a stop of the service", "warn")
+                meta = {**read_meta(paths), "status": "cancelled", "last_error": run.message, "resume_after_restart": True}
+            else:
+                run.status, run.message = "cancelled", "cancelled by the user"
+                run.log("Update cancelled", "warn")
+                meta = {**read_meta(paths), "status": "cancelled", "last_error": run.message}
         except SourceCorrupted as e:
             run.status, run.message = "corrupted", str(e)
             run.log(f"{e}. The published version is kept.", "error")
@@ -506,6 +680,8 @@ class Service:
         finally:
             run.finished_at = utcnow()
             run.phase = "done"
+            run.journal = None
+            paths.running.unlink(missing_ok=True)
         if manual is not None:
             ok = run.status in ("success", "unchanged")
             try:
@@ -526,13 +702,15 @@ class Service:
                 log.warning("[%s] cannot move the imported files: %s", ref.id, e)
         if run.status in ("success", "unchanged"):
             run.message = run.message or ("No change" if run.status == "unchanged" else "New version published")
+        meta.pop("crashed", None)  # the update went to its end: automatic updates resume
         meta["last_run"] = run.to_dict(with_logs=False)
         meta["last_attempt_at"] = iso(run.finished_at)
         meta["storage_size"] = dir_size(paths.root)
         write_meta(paths, meta)
         append_run(paths, run.to_dict(), self.settings.keep_runs)
         try:
-            self.notifier.run_finished(ref, run.to_dict(with_logs=False), previous_status, meta.get("status"), run.logs)
+            self.notifier.run_finished(ref, run.to_dict(with_logs=False), previous_status, meta.get("status"), run.logs,
+                                       quality_before, quality_summary(meta.get("quality")))
         except Exception:  # noqa: BLE001 (a notification never breaks an update)
             log.exception("[%s] notifications not sent", ref.id)
         with self._lock:
@@ -681,6 +859,11 @@ class Service:
             "large": self.is_large(ref.id),
             "sort_by": ref.storage.sort_by,
             "indexes": list(self.engine.index_views.get(ref.table, {})),
+            "quality": quality_summary(meta.get("quality")),
+            # Deltas merged into the published version: settings and state since the base
+            "merge": {**ref.merge.model_dump(), **(meta.get("merge") or {})} if ref.merge and ref.is_merge else None,
+            # Replica of a referential of another instance (peer)
+            "federation": ref.federation.model_dump() if ref.federation else None,
         }
 
     def detail(self, ref: ReferentialConfig, access: str | None = None) -> dict[str, Any]:
@@ -702,6 +885,7 @@ class Service:
             "bloom": meta.get("bloom"),
             "mmdb": meta.get("mmdb"),
             "index_views": self.engine.index_views.get(ref.table, {}),
+            "quality": meta.get("quality"),
             "has_previous": RefPaths(self.settings.data_dir, ref.id).previous.exists(),
             "sources": meta.get("sources") or [],
             "search_columns": ref.search_columns,

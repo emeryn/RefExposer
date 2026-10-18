@@ -136,3 +136,74 @@ def test_read_only_mode(env):
     assert err and "read-only" in data
     err, data = m.tool("run_sql", sql="SELECT 1 AS one")
     assert not err, data
+
+
+# --------------------------------------------------------------------------- data server (/api/mcp/user)
+
+class UserMcp(Mcp):
+    def raw(self, payload):
+        return self.c.post("/api/mcp/user", json=payload, headers=self.headers)
+
+
+def personal_token(client):
+    r = client.post("/api/auth/tokens", json={"name": "mcp"}, headers={"X-Requested-With": "RefExposer"})
+    assert r.status_code in (200, 201), r.text
+    return r.json()["token"]
+
+
+def test_user_data_server(env):
+    from conftest import USER_PASSWORD, create_user
+
+    bob = create_user(env, "bob")
+    assert env.post("/api/admin/grants", json={"referential_id": "countries", "user_id": bob["id"], "level": "read"}).status_code == 201
+    from conftest import refresh
+
+    assert refresh(env, "countries")["status"] == "success"
+    assert refresh(env, "words")["status"] == "success"
+    token = personal_token(new_client(env, "bob", USER_PASSWORD))
+    m = UserMcp(env, token)
+    assert m.raw({"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 404  # disabled by default
+
+    assert env.put("/api/admin/settings/mcp", json={"users_enabled": True}).status_code == 200
+    init = m.rpc("initialize", {"protocolVersion": "2025-06-18"})["result"]
+    assert init["serverInfo"]["name"] == "refexposer"
+    names = {t["name"] for t in m.rpc("tools/list")["result"]["tools"]}
+    assert {"list_referentials", "query_rows", "lookup", "lookup_many", "search", "get_quality", "whoami"} <= names
+    assert not names & {"run_sql", "sql_schema", "create_referential", "api_request", "list_users", "create_secret"}
+    assert all(t["annotations"]["readOnlyHint"] for t in m.rpc("tools/list")["result"]["tools"])
+
+    # Only what bob may read
+    err, refs = m.tool("list_referentials")
+    assert not err and [r["id"] for r in refs] == ["countries"]
+    err, row = m.tool("lookup", id="countries", value="DE")
+    assert not err and row["label"] == "Allemagne"
+    err, rows = m.tool("query_rows", id="countries", filters={"population__gt": 60000000}, sort="-population")
+    assert not err and [r["code"] for r in rows["rows"]] == ["DE", "FR"]
+    err, res = m.tool("lookup_many", id="countries", values=["FR", "XX"])
+    assert not err
+    err, data = m.tool("lookup", id="words", value="alpha")
+    assert err and data.startswith("HTTP 404")
+    assert "error" in m.rpc("tools/call", {"name": "run_sql", "arguments": {"sql": "SELECT 1"}})
+    err, me = m.tool("whoami")
+    assert not err and me["username"] == "bob"
+    assert env.get("/api/auth/me").json()["mcp_url"].endswith("/api/mcp/user")
+
+    # No administration through it: no such tool, and a forged elevation header is refused
+    assert m.rpc("tools/call", {"name": "create_referential", "arguments": {"id": "x", "config": {}}})["error"]["code"] == -32602
+    r = m.c.post("/api/mcp/user", json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                 headers={**m.headers, "X-Refexposer-Mcp": "1.forged"})
+    assert r.status_code == 401
+
+    # Restricted to some groups
+    gid = env.post("/api/admin/groups", json={"name": "Analysts"}).json()["id"]
+    assert env.put("/api/admin/settings/mcp", json={"users_enabled": True, "user_groups": ["Analysts"]}).status_code == 200
+    assert m.raw({"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 403
+    assert env.patch(f"/api/admin/groups/{gid}", json={"name": "Analysts", "member_ids": [bob["id"]]}).status_code == 200
+    assert m.raw({"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
+
+    # An administrator (personal token) gets SQL, still no administration tool
+    admin = UserMcp(env, personal_token(env))
+    names = {t["name"] for t in admin.rpc("tools/list")["result"]["tools"]}
+    assert "run_sql" in names and "create_referential" not in names
+    err, res = admin.tool("run_sql", sql="SELECT count(*) AS n FROM countries")
+    assert not err and res["row_count"] == 1 and "5" in str(res["rows"][0]), res

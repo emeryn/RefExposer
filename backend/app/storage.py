@@ -48,6 +48,7 @@ class RefPaths:
         self.previous = self.root / "previous.parquet"
         self.meta = self.root / "meta.json"
         self.runs = self.root / "runs.jsonl"
+        self.running = self.root / "running.json"  # journal of the run going on (see ingest.Run.journal)
         self.work = self.root / ".work"
         self.bloom = self.root / "current.bloom"
         self.previous_bloom = self.root / "previous.bloom"

@@ -37,9 +37,19 @@ def lit(value: Any) -> str:
 
 # --------------------------------------------------------------------------- readers
 
-def parquet_reader(path: str, key_name: str | None = None) -> str:
+def parquet_reader(path: str, key_name: str | None = None, file_row_number: bool = False) -> str:
     """read_parquet() of one published file; `key_name`: encryption key (confidential referential)."""
-    return f"read_parquet({lit(path)}" + (f", encryption_config = {{footer_key: {lit(key_name)}}})" if key_name else ")")
+    return (f"read_parquet({lit(path)}" + (", file_row_number = true" if file_row_number else "")
+            + (f", encryption_config = {{footer_key: {lit(key_name)}}})" if key_name else ")"))
+
+
+def parquet_sample(path: str, key_name: str | None, rows: int, target: int, block: int = 122_880) -> str:
+    """About `target` rows of a large Parquet file, as blocks of `block` rows spread over the whole file. With blocks
+    aligned on the row groups (storage.row_group_size), only those row groups are read: 15 to 20 times faster than a
+    full scan, where USING SAMPLE (system) still reads every row group."""
+    every = max(1, round(rows / max(target, 1)))
+    return (f"(SELECT * EXCLUDE (file_row_number) FROM {parquet_reader(path, key_name, True)} "
+            f"WHERE file_row_number % {every * block} < {block})")
 
 
 def _opts(options: dict[str, Any]) -> str:
@@ -88,7 +98,14 @@ def reader_expr(fmt: str, files: list[str], options: dict[str, Any] | None = Non
         table = options.get("table")
         if not table:
             raise ValueError("SQLite database: choose the table or view to read (option 'table')")
-        parts = [f"SELECT * FROM {qi(sqlite_alias(f))}.{qi(str(table))}" for f in files]
+        from .nsrl import read_sql
+
+        # NIST NSRL RDSv3 database: NSRLFile, NSRLProd... are the RDS 2.x text files, converted as NIST describes it.
+        # NSRL mode (kept database): the publication of each row (full database or delta) as a last column
+        parts = []
+        for f in files:
+            nsrl = read_sql(qi(sqlite_alias(f)), str(table), Path(f).name if options.get("nsrl") else None)
+            parts.append(f"({nsrl})" if nsrl else f"SELECT * FROM {qi(sqlite_alias(f))}.{qi(str(table))}")
         return "(" + " UNION ALL BY NAME ".join(parts) + ")"
     if fmt in ("json", "xml"):
         from .convert import needs_conversion, needs_split, split_records, to_jsonl
@@ -322,6 +339,14 @@ def _condition(col: str, ctype: str, op: str, value: str, fast: bool = False) ->
     raise QueryError(f"unknown operator: {op}")
 
 
+def full_scan_message(size: str, columns: str, fast: list[str]) -> str:
+    """Why a filter is refused on a referential too large to be read whole (see TableQuery.huge)."""
+    where = f"filter on {', '.join(fast)} (sorted or indexed), or " if fast else ""
+    return (f"this referential is too large ({size}) to be read whole for a filter on {columns}, which is neither sorted nor "
+            f"indexed: {where}set storage.sort_by (or storage.indexes) on {columns} so that the lookup only reads the "
+            "relevant blocks (see Large volumes in the documentation)")
+
+
 @dataclass
 class TableQuery:
     table: str
@@ -335,6 +360,9 @@ class TableQuery:
     indexes: dict[str, str] | None = None
     sorted_by: list[str] | None = None
     large: bool = False
+    # Size of the published file when it is too large to be read whole (REFEX_FULL_SCAN_MAX): a filter that cannot use a
+    # sorted or indexed column is refused at once, with what to configure, instead of reading it until the timeout
+    huge: str | None = None
 
     @property
     def fast_columns(self) -> list[str]:
@@ -375,12 +403,16 @@ class TableQuery:
             if f.op not in OPERATORS:
                 raise QueryError(f"unknown operator: '{f.op}' (available: {', '.join(OPERATORS)})")
             conds.append(_condition(f.column, self.columns[f.column], f.op, f.value, fast=f.column in self.fast_columns))
+        if self.huge and self.filters and not self.fast_filter and exclude_column is None:
+            used = ", ".join(dict.fromkeys(f.column for f in self.filters))
+            raise QueryError(full_scan_message(self.huge, used, self.fast_columns))
         if self.search and self.search.strip() and self.large:
             # Full-text "contains" would scan everything: prefix search on sorted columns only
             cols = [c for c in (self.search_columns or []) if c in self.fast_columns and type_kind(self.columns.get(c, "")) == "text"]
             if not cols:
                 fast = ", ".join(self.fast_columns) or "none"
-                raise QueryError(f"full-text search is not available on this volume: filter on an indexed column ({fast})")
+                raise QueryError(f"full-text search is not available on this volume: filter on a sorted or indexed column ({fast}), "
+                                 "or set storage.sort_by / storage.indexes on the column to search (prefix search)")
             conds.append("(" + " OR ".join(prefix_range(c, self.search.strip()) for c in cols) + ")")
         elif self.search and self.search.strip():
             cols = [c for c in (self.search_columns or []) if c in self.columns]

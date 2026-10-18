@@ -66,6 +66,10 @@ services:
     image: emeryn/refexposer-backend:latest
     restart: unless-stopped
     <<: *hardening
+    # Processors and memory of the backend (0: no limit). On a workstation, keep some for the host, e.g.
+    # REFEX_CPUS=6 and REFEX_MEMORY=16g: the imports of large sources then work on disk instead of starving the machine
+    cpus: ${REFEX_CPUS:-0}
+    mem_limit: ${REFEX_MEMORY:-0}
     depends_on:
       db:
         condition: service_healthy
@@ -102,7 +106,15 @@ services:
       REFEX_TIMEZONE: ${REFEX_TIMEZONE:-Europe/Paris}
       REFEX_MAX_CONCURRENT_JOBS: ${REFEX_MAX_CONCURRENT_JOBS:-2}
       REFEX_HTTP_VERIFY: ${REFEX_HTTP_VERIFY:-true}
+      # New attempts of a download when the remote site fails (like curl --retry; per source: source.retries)
+      REFEX_DOWNLOAD_RETRIES: ${REFEX_DOWNLOAD_RETRIES:-5}
+      # Memory / threads of DuckDB. Empty: sized on the container (an update gets 60 % of the memory shared between
+      # REFEX_MAX_CONCURRENT_JOBS, and half of the processors; the query engine 25 %), beyond which it works on disk
       REFEX_DUCKDB_MEMORY_LIMIT: ${REFEX_DUCKDB_MEMORY_LIMIT:-}
+      REFEX_DUCKDB_THREADS: ${REFEX_DUCKDB_THREADS:-}
+      REFEX_MIN_FREE_DISK: ${REFEX_MIN_FREE_DISK:-5GB}
+      REFEX_KEEP_RAW_MAX: ${REFEX_KEEP_RAW_MAX:-10GB}
+      REFEX_FULL_SCAN_MAX: ${REFEX_FULL_SCAN_MAX:-20GB}
       REFEX_SQL_TIMEOUT: ${REFEX_SQL_TIMEOUT:-30}
       REFEX_SQL_MAX_ROWS: ${REFEX_SQL_MAX_ROWS:-10000}
       REFEX_API_MAX_LIMIT: ${REFEX_API_MAX_LIMIT:-1000}

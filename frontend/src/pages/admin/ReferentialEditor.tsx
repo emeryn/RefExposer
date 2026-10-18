@@ -51,6 +51,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
 import type { DefinitionConfig, PreviewResult, Row, UploadResult } from '../../api/types';
 import { DataGrid } from '../../components/DataGrid';
+import { QualityRulesEditor } from '../../components/Quality';
 import { SecretInput } from '../../components/SecretInput';
 import { describeCron, fmtBytes, fmtNumber } from '../../lib/format';
 
@@ -74,6 +75,7 @@ const EMPTY: DefinitionConfig = {
   schedule: '0 6 * * *',
   max_age: null,
   validation: { min_rows: 1, max_drop_pct: null, unique_key: false },
+  quality: { rules: [] },
   enabled: true,
   downloads: [],
   storage: {
@@ -101,6 +103,22 @@ const FORMATS = [
   { value: 'mmdb', label: 'MaxMind DB (.mmdb: GeoIP2 / GeoLite2, DB-IP, IPinfo…)' },
   { value: 'sqlite', label: 'SQLite database (e.g. NIST NSRL)' },
 ];
+
+// NIST NSRL RDSv3 publication sets (minimal: distinct files only, much smaller)
+const NSRL_SETS = [
+  { value: '', label: 'No (any SQLite database)' },
+  { value: 'modern_minimal', label: 'Modern, minimal (2015 onwards)' },
+  { value: 'legacy_minimal', label: 'Legacy, minimal (2014 and earlier)' },
+  { value: 'android_minimal', label: 'Android, minimal' },
+  { value: 'ios_minimal', label: 'iOS, minimal' },
+  { value: 'modern', label: 'Modern, full' },
+  { value: 'legacy', label: 'Legacy, full' },
+  { value: 'android', label: 'Android, full' },
+  { value: 'ios', label: 'iOS, full' },
+];
+const NSRL_PAGE = 'https://www.nist.gov/itl/csd/secure-systems-and-applications/national-software-reference-library-nsrl/nsrl-download-0';
+// A publication of that page (full database or delta), not the page itself
+const NSRL_PUBLICATION = /\/RDS_\d{4}\.\d{2}\.\d+_[a-z_]+\.zip([?#].*)?$/i;
 
 const SCHEDULES = [
   { value: '', label: 'Manual only' },
@@ -146,6 +164,7 @@ function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig>
           headers: c.source.headers,
           basic_auth: c.source.basic_auth || null,
           extract: c.source.extract || null,
+          retries: c.source.retries ?? null,
         }
       : mode === 'git'
         ? {
@@ -171,9 +190,15 @@ function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig>
     category: c.category || 'General',
     source,
     // Deltas: Bloom filters and SQLite databases downloaded from a URL only
+    // NIST NSRL: the deltas are found on the NIST page
     incremental:
-      c.incremental && mode === 'http' && (c.format === 'bloom' || c.format === 'sqlite')
+      c.incremental && mode === 'http' && (c.format === 'bloom' || c.format === 'sqlite') && !c.options.nsrl
         ? { ...c.incremental, urls: c.incremental.urls.map((u) => u.trim()).filter(Boolean) }
+        : null,
+    // Merged deltas: tables fed by files only
+    merge:
+      c.merge?.enabled && c.format !== 'bloom' && c.format !== 'mmdb' && !c.options.nsrl
+        ? { enabled: true, delete_column: (c.key && c.merge.delete_column?.trim()) || null }
         : null,
   };
 }
@@ -203,6 +228,8 @@ export default function ReferentialEditor() {
 
   const { data: existing, isLoading: loadingExisting } = useQuery({ queryKey: ['definition', id], queryFn: () => api.definition(id!), enabled: editing });
   const { data: meta } = useQuery({ queryKey: ['definition-meta'], queryFn: api.definitionMeta });
+  // Columns of the published version: offered to the quality rules before any new preview
+  const { data: current } = useQuery({ queryKey: ['referential', id], queryFn: () => api.referential(id!), enabled: editing });
 
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<DefinitionConfig>(EMPTY);
@@ -481,6 +508,17 @@ export default function ReferentialEditor() {
                             onChange={(e) => set('source', { ...draft.source, extract: e.currentTarget.value || null })}
                             w={300}
                           />
+                          <NumberInput
+                            size="xs"
+                            label="New attempts when the site fails"
+                            description="Connection error, timeout, HTTP 408 / 429 / 5xx: tried again after 1, 2, 4… s (or the Retry-After of the site), like curl --retry. An interrupted transfer resumes where it stopped. Empty: 5."
+                            placeholder="5"
+                            min={0}
+                            max={50}
+                            value={draft.source.retries ?? ''}
+                            onChange={(v) => set('source', { ...draft.source, retries: v === '' ? null : Number(v) })}
+                            w={300}
+                          />
                         </Stack>
                       </Accordion.Panel>
                     </Accordion.Item>
@@ -726,6 +764,30 @@ export default function ReferentialEditor() {
                       the published one (unless forced).
                     </Text>
                   )}
+                  {fmt === 'sqlite' && mode === 'http' && (
+                    <OptionField
+                      label="NIST NSRL publication"
+                      description="The latest full database of the set is downloaded from the NIST page, then each quarterly delta (SQL) is replayed into it automatically. NSRLFile, NSRLProd, NSRLMfg and NSRLOS are the RDS 2.x conversions."
+                    >
+                      <Select
+                        size="xs"
+                        data={NSRL_SETS}
+                        value={String(draft.options.nsrl ?? '')}
+                        onChange={(v) => {
+                          const next = { ...draft.options };
+                          if (v) {
+                            next.nsrl = v;
+                            next.table = next.table || 'NSRLFile';
+                            // The publications are found on the NIST page: a publication URL given by hand is replaced
+                            const urls = draft.source.urls.filter((u) => u.trim());
+                            if (urls.every((u) => NSRL_PUBLICATION.test(u.trim()))) set('source', { ...draft.source, urls: [NSRL_PAGE] });
+                            set('incremental', null);
+                          } else delete next.nsrl;
+                          setOptions(next);
+                        }}
+                      />
+                    </OptionField>
+                  )}
                   {fmt === 'sqlite' && (
                     <OptionField
                       label="Table or view"
@@ -740,7 +802,7 @@ export default function ReferentialEditor() {
                       />
                     </OptionField>
                   )}
-                  {(fmt === 'sqlite' || fmt === 'bloom') && mode === 'http' && (
+                  {(fmt === 'sqlite' || fmt === 'bloom') && mode === 'http' && !draft.options.nsrl && (
                     <OptionField
                       label="Deltas (optional, one URL per line)"
                       description={
@@ -766,6 +828,32 @@ export default function ReferentialEditor() {
                           set('incremental', kept.length || (fmt === 'sqlite' && draft.incremental) ? { ...(draft.incremental ?? {}), urls: kept } : null);
                         }}
                       />
+                    </OptionField>
+                  )}
+                  {fmt !== 'bloom' && fmt !== 'mmdb' && !draft.options.nsrl && !draft.incremental?.urls.length && (
+                    <OptionField
+                      label="Deltas"
+                      description={`Each new data set (download of the URL, import, import folder) is merged into the published data instead of replacing it${draft.key ? `: a row with the same ${draft.key} replaces the published one` : ': its rows are added (identical rows kept once); set a key to replace rows'}. A new base can still be imported (Import › New base, or Update › Replace).`}
+                    >
+                      <Stack gap={6}>
+                        <Switch
+                          size="xs"
+                          label="Merge each new data set into the published data"
+                          checked={!!draft.merge?.enabled}
+                          onChange={(e) => set('merge', e.currentTarget.checked ? { enabled: true, delete_column: draft.merge?.delete_column ?? null } : null)}
+                        />
+                        {draft.merge?.enabled && (
+                          <TextInput
+                            size="xs"
+                            label="Deletion column (optional)"
+                            description={draft.key ? `Rows of a delta with true in this column remove the published row of the same ${draft.key}; the column is not published.` : 'Needs a key.'}
+                            placeholder="_deleted"
+                            disabled={!draft.key}
+                            value={draft.merge.delete_column ?? ''}
+                            onChange={(e) => set('merge', { enabled: true, delete_column: e.currentTarget.value })}
+                          />
+                        )}
+                      </Stack>
                     </OptionField>
                   )}
                   {fmt === 'xlsx' && (
@@ -1054,6 +1142,13 @@ export default function ReferentialEditor() {
                     />
                   </SimpleGrid>
                   <Switch label="Reject a version whose key is not unique" checked={draft.validation.unique_key} onChange={(e) => set('validation', { ...draft.validation, unique_key: e.currentTarget.checked })} />
+                  {fmt !== 'bloom' && fmt !== 'mmdb' && (
+                    <QualityRulesEditor
+                      rules={draft.quality?.rules ?? []}
+                      columns={(columns.length ? columns : current?.columns ?? []).map((c) => c.name)}
+                      onChange={(rules) => set('quality', { rules })}
+                    />
+                  )}
                   <Switch label="Referential enabled" checked={draft.enabled} onChange={(e) => set('enabled', e.currentTarget.checked)} />
                   {fmt !== 'bloom' && fmt !== 'mmdb' && (
                     <Switch

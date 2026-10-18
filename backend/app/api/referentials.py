@@ -90,7 +90,32 @@ def _layout(service: Service, ref: ReferentialConfig) -> dict[str, Any]:
         "indexes": service.engine.index_views.get(ref.table, {}),
         "sorted_by": ref.storage.sort_by,
         "large": service.is_large(ref.id),
+        "huge": _huge(service, ref),
     }
+
+
+def _huge(service: Service, ref: ReferentialConfig) -> str | None:
+    """Size of the published file when it is too large to be read whole (REFEX_FULL_SCAN_MAX), else None."""
+    from ..resources import fmt_gb, parse_size
+
+    limit = parse_size(service.settings.full_scan_max) or 0
+    size = int((service.metas.get(ref.id) or {}).get("parquet_size") or 0)
+    return fmt_gb(size) if limit and size > limit else None
+
+
+def _fast_columns(service: Service, ref: ReferentialConfig) -> list[str]:
+    cols = list(ref.storage.sort_by[:1])
+    return cols + [c for c in service.engine.index_views.get(ref.table, {}) if c not in cols]
+
+
+def _refuse_full_scan(service: Service, ref: ReferentialConfig, column: str) -> None:
+    """A lookup on `column` would read the whole file: refused at once on a referential too large for that."""
+    from ..sqlbuild import full_scan_message
+
+    huge = _huge(service, ref)
+    fast = _fast_columns(service, ref)
+    if huge and column not in fast:
+        raise HTTPException(400, full_scan_message(huge, column, fast))
 
 
 def _key_source(service: Service, ref: ReferentialConfig) -> tuple[str, str]:
@@ -132,11 +157,40 @@ def get_runs(ref_id: str, limit: int = Query(50, ge=1, le=500), service: Service
     return service.runs(ref_id, limit)
 
 
+@router.get("/referentials/{ref_id}/quality", summary="Data quality: rules of the published version and score history")
+def get_quality(ref_id: str, limit: int = Query(30, ge=1, le=500), service: Service = Depends(get_service),
+                user: CurrentUser = Depends(require_user)):
+    ref = get_ref(service, ref_id, user)
+    history = [{"run": r.get("id"), "at": r.get("finished_at"), "status": r.get("status"), "version": r.get("version"),
+                **(r.get("quality") or {})}
+               for r in service.runs(ref_id, 200) if r.get("quality")][:limit]
+    return {"quality": service.metas.get(ref_id, {}).get("quality"), "rules": [r.model_dump() for r in ref.quality.rules],
+            "key": ref.key, "history": history}
+
+
+@router.post("/referentials/{ref_id}/quality/check", summary="Check the quality rules again on the published version")
+def check_quality(ref_id: str, request: Request, service: Service = Depends(get_service), user: CurrentUser = Depends(require_user),
+                  db: Session = Depends(get_db)):
+    get_ref(service, ref_id, user, "manage")
+    if ref_id in service.active:
+        raise HTTPException(409, "an update is running: it checks the rules itself")
+    if not service.has_data(ref_id):
+        raise HTTPException(409, "no published version to check")
+    try:
+        result = service.check_quality(ref_id)
+    except duckdb.Error as e:
+        raise HTTPException(400, f"quality check failed: {e}") from e
+    audit(db, "referential.quality_check", user=user, target=f"ref:{ref_id}", request=request,
+          detail={"score": (result or {}).get("score"), "status": (result or {}).get("status")})
+    return result
+
+
 @router.post("/referentials/{ref_id}/refresh", summary="Start an update")
 def refresh(
     ref_id: str,
     request: Request,
     force: bool = Query(False, description="Rebuild even if the source has not changed"),
+    replace: bool = Query(False, description="Merged referential (deltas): publish the data set of the source alone, as a new base"),
     service: Service = Depends(get_service),
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
@@ -144,17 +198,19 @@ def refresh(
     get_ref(service, ref_id, user, "manage")
     if service.is_pinned(ref_id):
         raise HTTPException(409, "version frozen after a manual import: resume automatic updates before starting one")
-    run = service.submit(ref_id, "manual", force, user.username)
-    audit(db, "referential.refresh", user=user, target=f"ref:{ref_id}", request=request, detail={"force": force, "run": run.id})
+    run = service.submit(ref_id, "manual", force, user.username, replace=replace and service.refs[ref_id].is_merge)
+    audit(db, "referential.refresh", user=user, target=f"ref:{ref_id}", request=request, detail={"force": force, "replace": run.replace, "run": run.id})
     return run.to_dict()
 
 
-@router.post("/referentials/{ref_id}/import", summary="Manual import: new version from uploaded files")
+@router.post("/referentials/{ref_id}/import", summary="Manual import: new version (or delta) from uploaded files")
 def manual_import(
     ref_id: str,
     request: Request,
     files: list[UploadFile] = File(...),
     pin: bool = Form(False, description="Freeze this version (suspends automatic updates)"),
+    mode: Literal["merge", "replace"] | None = Form(None, description="Merged referential (deltas): `merge` (default) adds the "
+                                                    "files to the published version, `replace` publishes them alone (new base)"),
     service: Service = Depends(get_service),
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
@@ -173,12 +229,12 @@ def manual_import(
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(staging), str(target))
     try:
-        run = service.import_files(ref_id, target, "upload", user.username, pin)
+        run = service.import_files(ref_id, target, "upload", user.username, pin, replace=ref.is_merge and mode == "replace")
     except BusyError as e:
         shutil.rmtree(target, ignore_errors=True)
         raise HTTPException(409, str(e)) from e
     audit(db, "referential.import", user=user, target=f"ref:{ref_id}", request=request,
-          detail={"files": [f["name"] for f in stored["files"]], "pin": pin, "run": run.id})
+          detail={"files": [f["name"] for f in stored["files"]], "pin": pin, "replace": run.replace, "run": run.id})
     return run.to_dict()
 
 
@@ -302,6 +358,7 @@ def lookup(ref_id: str, value: str, all: bool = False, enrich: bool = False,
         return [rec] if all else rec
     if not ref.key:
         raise HTTPException(400, f"the referential '{ref_id}' has no key")
+    _refuse_full_scan(service, ref, ref.key)
     view, cond = _key_source(service, ref)
     sql = f"SELECT * FROM {qi(view)} WHERE {cond} = {lit(value)} LIMIT 100"
     cols, rows = _run_query(lambda: service.engine.fetch(sql))
@@ -335,6 +392,7 @@ def lookup_batch(
         raise HTTPException(400, f"the referential '{ref_id}' has no key: give the column")
     if column not in _columns(service, ref):
         raise HTTPException(400, f"unknown column: '{column}'")
+    _refuse_full_scan(service, ref, column)
     wanted = list(dict.fromkeys(str(v).strip() for v in values if str(v).strip()))
     if not wanted:
         return {"found": 0, "missing": [], "results": {}, "column": column}

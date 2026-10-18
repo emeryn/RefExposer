@@ -48,6 +48,7 @@ def get_settings_all(request: Request, db: Session = Depends(get_db), service: S
         "mcp": appsettings.public("mcp", appsettings.load(db, "mcp")),
         "smtp": appsettings.public("smtp", appsettings.load(db, "smtp")),
         "mcp_url": public_base(request).rstrip("/") + "/api/mcp",
+        "mcp_user_url": public_base(request).rstrip("/") + "/api/mcp/user",
         "local_login": service.settings.local_login,
         "log_level": logsetup.stdout_level_name(),
         "public_url": service.settings.public_url,

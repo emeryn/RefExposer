@@ -4,7 +4,9 @@ Events, decided from the state before and after an update:
 - failure    the update ended in error, with a corrupted source or a rejected version (the published version is kept).
              Sent when the referential starts failing; again at every failed update only with `repeat_failures`;
 - recovered  first successful update after a failure;
-- published  a new version was published.
+- published  a new version was published;
+- quality    a new version was published with quality rules failing (severity warning), the previous one passing
+             them. A failing rule of severity error rejects the version: that is a failure.
 
 Channels (Administration › Notifications) choose their events and referentials (ids and / or categories). E-mails go
 through the SMTP server of the settings; webhooks POST a JSON document (generic payload, or a template with
@@ -43,17 +45,21 @@ FAILED = {"error", "corrupted", "rejected"}
 ATTEMPTS = 3
 KEEP_DELIVERIES = 500
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z0-9_.]+)\s*\}\}")
-ICONS = {"failure": "❌", "recovered": "✅", "published": "🆕", "test": "🔔"}
-LABELS = {"failure": "failed", "recovered": "recovered", "published": "new version published", "test": "test notification"}
+ICONS = {"failure": "❌", "recovered": "✅", "published": "🆕", "quality": "⚠️", "test": "🔔"}
+LABELS = {"failure": "failed", "recovered": "recovered", "published": "new version published", "quality": "quality warning",
+          "test": "test notification"}
 
 
-def event_of(previous: str | None, status: str, run_status: str) -> tuple[list[str], bool]:
+def event_of(previous: str | None, status: str, run_status: str, quality_before: str | None = None,
+             quality_after: str | None = None) -> tuple[list[str], bool]:
     """(candidate events, failing already) of an update ending with the referential `status` (ok, error...)."""
     if status in FAILED:
         return ["failure"], previous in FAILED
     events = []
     if status == "ok" and previous in FAILED:
         events.append("recovered")
+    if run_status == "success" and quality_after == "warning" and quality_before != "warning":
+        events.append("quality")
     if run_status == "success":
         events.append("published")
     return events, False
@@ -65,7 +71,8 @@ def concerns(ch: NotificationChannel, ref_id: str, category: str | None) -> bool
     return not ch.categories or category in ch.categories
 
 
-def payload(event: str, ref: dict[str, Any], run: dict[str, Any], previous: str | None, base_url: str | None) -> dict[str, Any]:
+def payload(event: str, ref: dict[str, Any], run: dict[str, Any], previous: str | None, base_url: str | None,
+            quality: dict[str, Any] | None = None) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/r/{ref['id']}" if base_url else None
     message = run.get("message") or ""
     text = f"{ICONS.get(event, '')} RefExposer: {ref['name']} ({ref['id']}) {LABELS.get(event, event)}"
@@ -73,6 +80,8 @@ def payload(event: str, ref: dict[str, Any], run: dict[str, Any], previous: str 
         text += f": {message}"
     elif event == "published" and run.get("rows") is not None:
         text += f" ({run['rows']:,} rows)"
+    elif event == "quality" and quality:
+        text += f" (score {quality.get('score')}/100): {', '.join(quality.get('failed') or [])}"
     if url:
         text += f" {url}"
     return {
@@ -81,6 +90,7 @@ def payload(event: str, ref: dict[str, Any], run: dict[str, Any], previous: str 
         "referential": {**ref, "url": url},
         "run": run,
         "previous_status": previous,
+        "quality": quality,
         "instance": base_url,
         "sent_at": iso(utcnow()),
     }
@@ -163,6 +173,11 @@ def mail_text(data: dict[str, Any], logs: list[dict[str, Any]]) -> tuple[str, st
         lines.append(f"Message: {run['message']}")
     if data.get("previous_status"):
         lines.append(f"Previous state: {data['previous_status']}")
+    if data.get("quality"):
+        q = data["quality"]
+        lines.append(f"Quality: score {q.get('score')}/100 ({q.get('status')})")
+        for name in q.get("failed") or []:
+            lines.append(f"  rule not met: {name}")
     for k, label in (("trigger", "Trigger"), ("started_at", "Started"), ("finished_at", "Finished"), ("rows", "Rows")):
         if run.get(k) is not None:
             lines.append(f"{label}: {run[k]}")
@@ -209,9 +224,10 @@ class Notifier:
             ca = appsettings.load(db, "proxy").ca_bundle  # type: ignore[attr-defined]
         return channels, smtp, ca  # type: ignore[return-value]
 
-    def run_finished(self, ref: Any, run: dict[str, Any], previous: str | None, status: str, logs: list[dict[str, Any]]) -> None:
+    def run_finished(self, ref: Any, run: dict[str, Any], previous: str | None, status: str, logs: list[dict[str, Any]],
+                     quality_before: str | None = None, quality: dict[str, Any] | None = None) -> None:
         """Called at the end of every update: sends the matching notifications in the background."""
-        events, failing = event_of(previous, status, run.get("status", ""))
+        events, failing = event_of(previous, status, run.get("status", ""), quality_before, (quality or {}).get("status"))
         if not events:
             return
         try:
@@ -226,7 +242,7 @@ class Notifier:
             event = next((e for e in events if e in ch.events), None)
             if event is None or (event == "failure" and failing and not ch.repeat_failures):
                 continue
-            data = payload(event, info, run, previous, self.settings.public_url)
+            data = payload(event, info, run, previous, self.settings.public_url, quality)
             self.executor.submit(self._deliver, ch, data, logs, smtp, ca)
 
     def send_now(self, ch: NotificationChannel, data: dict[str, Any], logs: list[dict[str, Any]] | None = None) -> dict[str, Any]:

@@ -1,4 +1,5 @@
 import { Badge, Card, Code, Group, SimpleGrid, Stack, Text, Title } from '@mantine/core';
+import { CodeSnippet, CopyIcon } from '../components/Common';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { ChangePasswordForm } from '../auth/PasswordChange';
@@ -103,6 +104,22 @@ export default function AccountPage() {
           hint="The token gives exactly your current rights on the referentials."
         />
       </Card>
+
+      {me.mcp_url && (
+        <Card>
+          <Title order={5}>AI assistant (MCP)</Title>
+          <Text size="sm" c="dimmed" mb="sm">
+            Claude Code, Claude Desktop or any MCP client can query the referentials you may read: lookups, filters, search, changes,
+            quality{me.can_use_sql ? ', SQL' : ''}. It reads only, with the rights of the API token you give it (create one above).
+          </Text>
+          <Group gap={4} mb="xs">
+            <Text size="sm">Server URL:</Text>
+            <Code>{me.mcp_url}</Code>
+            <CopyIcon value={me.mcp_url} />
+          </Group>
+          <CodeSnippet title="Claude Code" code={`claude mcp add --transport http refexposer ${me.mcp_url} --header "Authorization: Bearer $REFEX_TOKEN"`} />
+        </Card>
+      )}
     </Stack>
   );
 }

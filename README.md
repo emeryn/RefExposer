@@ -17,6 +17,7 @@ Beyond downloaded sources:
 - **Sync folder**: files pushed into a folder (scp / rsync over ssh, every week for instance) become referentials by themselves, imported again when they change.
 - **Manual imports**: a version can be uploaded from the referential page or dropped in an import folder, for example when the source is unreachable or only sent by e-mail.
 - **Corrupted sources are refused**: an empty file, an HTML error page or a broken archive never replaces the current version; the error is shown on the referential.
+- **Data quality**: rules checked on every new version (filled, unique, IP / domain / hash / CVE formats, allowed values, ranges, SQL conditions), a score per version, and a quality gate that rejects a bad version.
 - **Notifications**: e-mails and generic webhooks (Slack, Teams, Discord, incident tools…) when a referential fails, recovers or publishes a new version.
 
 Access is protected:
@@ -26,7 +27,7 @@ Access is protected:
 - **Roles** (administrator, advanced user, user), **rights per referential**, API tokens, **service accounts** for tools (API only) and an audit log.
 - **Secret manager**: API keys, tokens and passwords of the sources are stored encrypted and referenced as `${secret:<name>}`, never returned by the API, optionally restricted to their hosts.
 - **Bulk discovery**: every data file of a Git repository (e.g. [cybref](https://github.com/emeryn/cybref)) or of an HTTP folder becomes a referential in a few clicks.
-- **Administration MCP server** (optional): an AI agent drives RefExposer through the Model Context Protocol, with the API token of a service account.
+- **MCP servers** (optional): every user queries the referentials it may read from an AI assistant, with its own API token; an administration server lets an agent drive RefExposer with the token of a service account.
 - **Storage**: accounts, settings, definitions and internal rows in PostgreSQL. **Confidential referentials** are encrypted at rest (data files, internal rows and their keys).
 
 The security mechanisms are summarized in [Enterprise security](#enterprise-security).
@@ -620,6 +621,8 @@ Credentials of a private repository or folder must be `${secret:…}` references
 
 API: `GET /api/admin/config/export?ids=&grants=&credentials=masked|included&format=yaml|json`, `POST /api/admin/config/import` (`apply: false` for the plan). MCP tools: `export_configuration`, `import_configuration`.
 
+**Ready-made example**: [`examples/cybref/cybref-referentials.yaml`](examples/cybref/cybref-referentials.yaml) imports 124 cybersecurity referentials of [CybrefV2](https://github.com/emeryn/CybrefV2) (threat intelligence, vulnerabilities, ATT&CK, IP ranges, registries…), with keys, quality rules and merged rolling feeds. See its [README](examples/cybref/README.md).
+
 ### With a YAML file
 
 Add a `config/<name>.yml` file (or complete an existing one), then click **System › Reload the configuration**, or call `POST /api/system/reload`. No restart is needed.
@@ -674,7 +677,7 @@ referentials:
 | `xml` | converted to JSON Lines, then `read_json` | `records_path`: name of the repeated record element (default: the likeliest one, frequent and rich) |
 | `bloom` | DCSO Bloom filter (published as is) | `normalize`, `pattern`, `enrich_bulk_url`, `enrich_key` |
 | `mmdb` | MaxMind DB (published as is, IP lookups) | |
-| `sqlite` | SQLite database, attached read-only (sqlite extension) | `table`: table or view to read (see [SQLite databases](#sqlite-databases-nist-nsrl-and-sql-deltas)) |
+| `sqlite` | SQLite database, attached read-only (sqlite extension) | `table`: table or view to read; `nsrl`: NIST NSRL set, publications and deltas found automatically (see [SQLite databases](#sqlite-databases-nist-nsrl-and-sql-deltas)) |
 
 ### SQL transformations
 
@@ -843,39 +846,94 @@ wget -N --user=x --password="$REFEX_TOKEN" https://refexposer.example.com/api/re
 
 The `sqlite` format reads one **table or view** of a SQLite database (`options.table`), possibly inside an archive with other files (readme, schema…), which are ignored. The database is attached read-only, so views keep their column types. The usual SQL transformation applies on top (`{source}` is the chosen table).
 
-When the publisher provides **SQL deltas**, as the [NIST NSRL](https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl) does with its RDSv3 publications (a full database once a year, then a SQL file of `INSERT`, `UPDATE` and `DELETE` statements each quarter), declare them in `incremental`. The full database is then **kept** in `data/<id>/base/`, and each delta is applied **once, in the order of the list**:
+#### NIST NSRL: nothing to maintain
+
+For the [NIST NSRL](https://www.nist.gov/itl/csd/secure-systems-and-applications/national-software-reference-library-nsrl/nsrl-download-0), give the **set** in `options.nsrl`. RefExposer reads the NIST download page, downloads the latest full database of the set once, then **replays each quarterly delta into it** (each delta is a SQL file of `INSERT` / `DELETE` statements). No URL to list: a new delta published by NIST is found and applied at the next update.
 
 ```yaml
 id: nsrl-modern
 name: NIST NSRL (modern, minimal)
 format: sqlite
 source:
+  urls: []                     # optional: the NIST download page by default
+options:
+  nsrl: modern_minimal         # modern, legacy, android, ios, with or without _minimal
+  table: NSRLFile              # default: RDS 2.x conversion (see below)
+key: SHA-1
+storage:
+  sort_by: [SHA-1]             # hundreds of millions of rows: fast lookups by hash
+  indexes: [MD5]
+  keep_raw: false
+  track_changes: false
+schedule: "0 6 * * *"
+```
+
+In the interface: **New referential**, paste the URL of the NIST download page. The NSRL mode is detected (set *modern, minimal* by default, can be changed in *NIST NSRL publication*). The preview lists what will be downloaded, without downloading it (tens of GB). If the URL of a publication (`RDS_2026.03.1_modern_minimal.zip`) is given in NSRL mode, the download page is read instead: the latest publications are always used.
+
+**Publication of each row**: in NSRL mode, a last column gives the file each row comes from: the full database (`RDS_2026.03.1_modern_minimal.db`) or the quarterly delta that added it (`RDS_2026.09.1_modern_minimal_delta.sql`). It is `SourceFile` in the RDS 2.x tables below and `source_file` in the RDSv3 tables `FILE`, `PKG`, `OS` and `MFG`. RefExposer records it in the kept database (table `REFEX_ORIGIN`) while it applies each delta. A row that a delta inserts again (already in the database) is skipped and keeps its publication.
+
+**Conversion to RDS 2.x**: NIST no longer publishes the `NSRL*.txt` text files, only a SQLite database, and [describes how to convert it](https://s3.amazonaws.com/rds.nsrl.nist.gov/RDS/RDSv3_Docs/RDSv3_to_RDSv2_text_files_LINUX-OSX.pdf). This conversion is built in. Choose one of these tables:
+
+| Table | Columns |
+|---|---|
+| `NSRLFile` | `SHA-1`, `MD5`, `CRC32`, `FileName`, `FileSize`, `ProductCode`, `OpSystemCode` (`0`), `SpecialCode` (empty), `SourceFile` (NSRL mode) |
+| `NSRLProd` | `ProductCode`, `ProductName`, `ProductVersion`, `OpSystemCode`, `MfgCode`, `Language`, `ApplicationType`, `SourceFile` (NSRL mode) |
+| `NSRLMfg` | `MfgCode`, `MfgName`, `SourceFile` (NSRL mode) |
+| `NSRLOS` | `OpSystemCode`, `OpSystemName`, `OpSystemVersion`, `MfgCode`, `SourceFile` (NSRL mode) |
+
+The CSV download of `NSRLFile` gives the former `NSRLFile.txt`. The RDSv3 tables (`FILE` with `sha256`, `PKG`, `OS`, `MFG`, `DISTINCT_HASH`) can also be published as they are. Create one referential per table you need.
+
+How the deltas are chained: a NIST delta only applies to the **previous release**. Each one ends with `DELETE FROM VERSION WHERE version='<previous>'` then `INSERT INTO VERSION … VALUES('<new>', …)`. RefExposer reads the release of the kept database (`VERSION` table) and:
+
+- applies the deltas **newer** than the database, in order. The delta published with a full database (e.g. `2026.03.1`) is already in that database: it is not applied again.
+- **skips** a delta the database already holds (imported twice, listed by mistake).
+- **refuses** a delta made for another release (a gap in the chain), without changing anything: *delta … updates release 2026.06.1 to 2026.09.1, but the database is at release 2026.03.1*. When NIST publishes a newer full database, the full database is loaded again.
+
+The kept database is never downloaded again while the chain holds: after the first import (one full database of several GB), each update only downloads the new delta (tens to hundreds of MB).
+
+Orders of magnitude, measured on the *iOS minimal* set (Docker Desktop, data on a Windows disk):
+
+| Step | Measure |
+|---|---|
+| Full database 2026.03.1 | 5.9 GB zip downloaded (~15 MB/s), **38 GB** once extracted and kept |
+| Deltas 2026.06.1 + 2026.09.1 | 0.4 M + 3 M SQL statements, replayed at about 8,500 statements/s |
+| `NSRLFile` table (97.5 M rows, sorted on `SHA-1`) | built in 5 min, 2.4 GB of Parquet |
+| Next update without a new delta | 1 s (the NIST page is read, nothing is downloaded) |
+
+Each delta is replayed in WAL mode: the changed pages are written once to a `-wal` file (a few GB for a large delta) instead of copying every page to a rollback journal first, which is 4 to 5 times faster on a database of tens of GB. It stays atomic, even when the service is killed. Plan the disk accordingly: the *modern minimal* database takes about three times the space of the *iOS minimal* one.
+
+#### Other SQLite databases with SQL deltas
+
+When another publisher provides **SQL deltas**, declare them in `incremental`. The full database is then **kept** in `data/<id>/base/`, and each delta is applied **once, in the order of the list**:
+
+```yaml
+id: nsrl-modern-pinned
+name: NIST NSRL (modern, minimal, deltas listed by hand)
+format: sqlite
+source:
   urls: [https://s3.amazonaws.com/rds.nsrl.nist.gov/RDS/rds_2026.03.1/RDS_2026.03.1_modern_minimal.zip]
 options:
   table: FILE                  # FILE (sha256, sha1, md5, crc32, file_name, file_size, package_id)
 key: sha1
-search_columns: [sha1, sha256, md5, file_name]
 incremental:
   urls:                        # deltas published after the full database, oldest first
     - https://s3.amazonaws.com/rds.nsrl.nist.gov/RDS/rds_2026.06.1/RDS_2026.06.1_modern_minimal_delta.zip
     - https://s3.amazonaws.com/rds.nsrl.nist.gov/RDS/rds_2026.09.1/RDS_2026.09.1_modern_minimal_delta.zip
 storage:
-  sort_by: [sha1]              # hundreds of millions of rows: fast lookups by hash
-  indexes: [sha256, md5]
-  keep_raw: false
+  sort_by: [sha1]
 schedule: "0 6 * * *"
 ```
 
-In the interface: **New referential**, source URL, format **SQLite database**, table, and the deltas in the *Deltas* field. A source too large to be analysed (the full NSRL archives weigh tens of GB) is not downloaded by the preview: choose the format and the table by hand, and the import does the rest in the background.
+In the interface: **New referential**, source URL, format **SQLite database**, table, and the deltas in the *Deltas* field. A source too large to be analysed is not downloaded by the preview: choose the format and the table by hand, and the import does the rest in the background.
 
-How it works:
+How it works (both modes):
 
-- **First import**: the full database is downloaded and unpacked (the archive is then deleted), kept, and the listed deltas are applied on top. The referential is then built from the database (sort, indexes, profile…).
-- **New delta**: add its URL **at the end** of the list. At the next update, only this delta is downloaded and applied; the others are not downloaded again. Nothing new: no download, no new version.
+- **First import**: the full database is downloaded and unpacked (the archive is then deleted), kept, and the deltas are applied on top. The referential is then built from the database (sort, indexes, profile…).
+- **New delta** (listed mode): add its URL **at the end** of the list. At the next update, only this delta is downloaded and applied. Nothing new: no download, no new version.
 - **Each delta runs in a transaction**: a broken or truncated delta is rejected without changing anything (the database and the published version stay as they were), and can be applied again once fixed. The transaction statements of the file (`BEGIN TRANSACTION` / `COMMIT`) are replaced by RefExposer's own.
-- **Deltas imported by hand**: drop the delta (`.sql`, or the NIST zip) with the **Import** button of the referential or in `import/<id>/`. It is applied once to the kept database; the same file is refused the second time. A full database (`.db`) imported by hand replaces the kept one, and the listed deltas are applied on top.
-- **Full database loaded again** when the source URL changes, when an already applied delta is removed from the list or moved, or on a forced update. The whole list is then applied again: when NIST publishes a new full database, change `source.urls` and empty the list of deltas at the same time.
-- **Disk space**: the kept database, the archive during the download of the full database, and the published Parquet files. For the NSRL *modern* set, prefer the **minimal** database (distinct hashes, the equivalent of the former `NSRLFile.txt`): it is much smaller than the full one, which also holds paths and metadata.
+- **Deltas imported by hand**: drop the delta (`.sql`, or the NIST zip as downloaded, with its folder) with the **Import** button of the referential or in `import/<id>/`. It is replayed once into the kept database; the same file is refused the second time. A full database (`.db`) imported by hand replaces the kept one. The deltas are then applied on top (listed ones, or in NSRL mode the ones published after it).
+- **Full database loaded again** (listed mode) when the source URL changes, when an already applied delta is removed from the list or moved, or on a forced update. A forced update in NSRL mode also loads the latest full database again.
+- **Disk space**: the kept database, the archive during the download of the full database, and the published Parquet files. Prefer the **minimal** sets (distinct files only): they are much smaller than the full ones, which also hold paths and metadata.
 - An incremental SQLite database cannot be confidential (the database is kept on disk unencrypted).
 
 ### Large volumes (passive DNS, hundreds of millions of rows and more)
@@ -902,14 +960,28 @@ storage:
 - total not computed when the filter is not on an indexed column;
 - downloads limited to Parquet;
 - every API query is stopped after `REFEX_QUERY_TIMEOUT` seconds (60 by default).
+- above `REFEX_FULL_SCAN_MAX` (20 GB published), a filter or a lookup that could only read the whole file (column neither sorted nor indexed) is **refused at once**, with what to configure: 6 billion rows of passive DNS without sort take about 2 hours per lookup on a workstation disk.
 
 **Parquet sources of tens of GB** (e.g. the passive DNS of [ip.thc.org](https://ip.thc.org/docs/bulk-data-access), 6 billion rows):
 
 - A **single Parquet file** without `transform`, `options` or confidentiality is **published as is**: no rewrite of the rows. A downloaded or imported file is hard-linked (no copy); a file of `sync/` or of a local source is copied. With `sort_by`, the file is published as is when its row groups already follow each other on the first sort column. The footer statistics tell this without a scan. Otherwise it is rewritten sorted, which is the long step.
-- An **interrupted download is resumed** where it stopped (HTTP `Range` + `If-Range`), up to 5 times within a run, then by the next run. When the source changed meanwhile, it is downloaded again from the start.
+- An **interrupted download is resumed** where it stopped (HTTP `Range` + `If-Range`), within the run (see [Downloads and retries](#downloads-and-retries)), then by the next run. When the source changed meanwhile, it is downloaded again from the start.
 - The fingerprint of a download is computed **while receiving it**; a file above 1 GB of another source is fingerprinted from its size and date. Files are not read a second time.
 - The sampled profile reads **blocks of rows** at random instead of the whole file.
-- A `.parquet.gz` costs a decompression pass and twice the disk space. Point to the `.parquet` file when the source offers it, or decompress it beforehand and drop it into `import/<id>/`.
+- A **`.parquet.gz` (or `.json.gz`, `.db.gz`…) is decompressed while it is downloaded**: the compressed file never sits on the disk next to the decompressed one. For the THC passive DNS (`rdns-sept.parquet.gz`: 53 GB, about 91 GB decompressed) the disk holds 91 GB at the peak instead of 144. A connection cut is resumed (HTTP `Range`) by the attempts of the same run. **After a restart of the service**, the transfer resumes too, from the last *resume point*: many compressors (pigz, Python `gzip.flush()`, the THC dump) regularly write sync points where the decompression can start again from the last 32 KB already written. RefExposer keeps one every 64 MB of compressed data. It checks the regenerated bytes against the ones already on disk, then the CRC32 of the whole file against the gzip trailer. At most about 64 MB is downloaded again instead of 53 GB. A gzip without sync points starts again from zero.
+- A large Parquet source **barely compressed** (uncompressed, or a codec saving less than 25 %) is **rewritten with zstd** instead of being published as is, when the disk can hold the copy. The size of the copy is measured on a sample of one million rows first. Uncompressed text such as DNS names and IP addresses typically shrinks 3 to 10 times, and queries read that much less. Otherwise it is published as is, with a warning in the log.
+- A source above `REFEX_KEEP_RAW_MAX` (10 GB) that is **not** the published file itself (decompressed, rewritten, transformed) is **not kept** after the build, whatever `keep_raw` says: keeping it would double the disk used, and triple it during the next update. The next check still answers `304 Not Modified` when the remote file did not change.
+
+**The disk is never filled.** The disk of `data/` is shared with the database and the other referentials: an update that fills it takes them down. An update therefore keeps `REFEX_MIN_FREE_DISK` (5 GB) free:
+
+- a download is **not started** when the announced size does not fit, and **stopped** when the free space reaches the reserve while it is written (download, decompression, archive extraction);
+- the work files of DuckDB (spill of a sort or an index) are limited to the free space minus the reserve (`max_temp_directory_size`), and the file written by the build is watched the same way;
+- when the free space cannot hold a new source and a new version of the sizes of the last ones, the **previous version** (kept for rollback) is removed first;
+- a failed or cancelled update leaves nothing in `work/`.
+
+**Administration › Disk space** shows the free space of each volume (data, import, sync, temporary files) and what takes the space in `data/`: per referential and per kind of file (published version, indexes, previous version, kept database, source files kept, interrupted downloads, build in progress, generated downloads), the largest files, and the folders left by deleted referentials. Each line says what can free it (`storage.keep_raw: false`…). This view is for administrators only and is read only: nothing can be deleted from it. It never follows a symbolic link, counts a hard-linked file once, shows paths relative to `data/`, and walks the folders at most once every 5 s (cached 30 s). About 1 s for 140 referentials (`GET /api/system/storage`).
+
+The update then ends as *rejected* with the reason and the figures (*disk almost full while writing the new version (4.8 GB free, reserve 5.0 GB)*); the published version stays online.
 
 To find every sub-domain of a domain (`*.example.com`), add a reversed column in the transformation (`reverse(rrname) AS rrname_rev`), index it, and search the reversed form by prefix (`rrname_rev__startswith=moc.elpmaxe.`).
 
@@ -924,9 +996,29 @@ To find every sub-domain of a domain (`*.example.com`), add a reversed column in
 | SQL `LIKE 'prefix%'` on the sort column | ~110 ms |
 | Same lookups without sorting (full scan) | 4.7–7.8 s |
 
-For 200 GB of raw passive DNS (about 2.5 to 3 billion rows), expect a 3 to 4 hour import, about 300 GB of disk with two indexes, and lookups that stay around 200–300 ms. Plan enough RAM for the sort (or set `REFEX_DUCKDB_MEMORY_LIMIT`, DuckDB then spills to disk) and fast local storage for `data/`.
+For 200 GB of raw passive DNS (about 2.5 to 3 billion rows), expect a 3 to 4 hour import, about 300 GB of disk with two indexes, and lookups that stay around 200–300 ms. Plan fast local storage for `data/`: the sort works on disk beyond the memory given to DuckDB.
+
+**Memory and processors.** Above 2 GB of source, the update runs in low memory mode (the order of the rows is not kept, the sort orders them anyway). The run log shows the limits applied (e.g. *DuckDB limited to 9.3 GiB of memory and 8 thread(s)*). Without settings, DuckDB gets a share of the memory of the container and half of its processors: the import of a 75 GB Parquet file then takes longer, working on disk, instead of taking all the memory of the machine until the service is killed. On a workstation (Docker Desktop, WSL), also limit the container (`REFEX_CPUS=6`, `REFEX_MEMORY=16g` in `.env`) so that the host stays usable. On a dedicated server, give more (`REFEX_DUCKDB_MEMORY_LIMIT=48GB`, `REFEX_DUCKDB_THREADS=16`) for faster imports.
+
+**A stop of the service is not a crash.** `docker stop`, a restart or a new image send `SIGTERM`: the running updates are recorded at once as *interrupted by a stop of the service* and **start again by themselves at the next start** (a large download resumes where it stopped, see above). Automatic updates are not suspended.
+
+**An update that kills the service is not started again by itself.** When the service dies during an update without being asked to stop (killed when out of memory, host power cut), the next start finds the update in progress (`data/<id>/running.json`). It records it as failed, with its logs and the phase reached (*update interrupted: the service stopped during the 'transform' phase, probably killed when out of memory*). It then suspends the automatic updates of this referential (startup, schedule, sync folder), and moves the files of the import folder being imported to `.failed/`. The service no longer dies at each restart. Fix the cause (memory), then start an update by hand: once it goes to its end, the automatic updates resume.
 
 > A column whose name is also an API parameter (`count`, `sort`, `limit`, `offset`, `q`, `columns`) is filtered with the explicit operator: `?count__eq=3`. The interface does this automatically.
+
+### Downloads and retries
+
+A remote site that fails does not end the update at once. As `curl --retry` does, the download is tried again on a connection error, a timeout, a connection cut, or an HTTP `408`, `425`, `429`, `500`, `502`, `503` or `504` answer. It waits 1, 2, 4… seconds (up to 60 s), or the time asked by the server (`Retry-After`, up to 5 min). Other errors (`401`, `403`, `404`…) are not tried again. A transfer whose response carries a strong validator (`ETag` or date) **is resumed where it stopped** (HTTP `Range`), otherwise it starts again from zero. **Only the failures in a row count**: an attempt that brought data (a cut after 14 GB, as HuggingFace does on long transfers) starts the count again, so a large file always ends up downloaded. Each attempt is in the run log (*Download of … failed (HTTP 503): started again in 2s, attempt 3/6*).
+
+5 new attempts by default (`REFEX_DOWNLOAD_RETRIES`), or per source:
+
+```yaml
+source:
+  urls: [https://flaky.example.org/feed.csv]
+  retries: 10                       # 0: no new attempt
+```
+
+In the interface: **Source › Advanced options › New attempts when the site fails**.
 
 ### Local referentials
 
@@ -994,6 +1086,16 @@ A referential marked **confidential** (`confidential: true`, or the switch in it
   - SQL queries logged at the `trace` level;
   - Bloom filters and MaxMind databases, which are served as is to tools and cannot be confidential.
 - **Searching** an internal referential decrypts its rows in the application, because the database only holds ciphertexts. This stays fast up to a few hundred thousand rows.
+
+## Outgoing connections
+
+**Administration › Outgoing connections** lists every URL the referentials contact, **grouped by host**: an API called by several referentials appears once, with all of them.
+
+- **Per host**: referentials, URLs, estimated **calls per day** (from the schedules), authentication used (header names, Basic, Git token, `${secret:…}` names: never the values), last contact and volume downloaded, referentials in error. Hosts reached in plain `http` are flagged.
+- **Per URL**: every referential that uses it, its role (source, delta of an incremental update, Git repository, online enrichment of a Bloom filter at lookup time), its schedule and its last contact (`HTTP 304` when unchanged). A URL **downloaded by several referentials** is marked *shared*.
+- **Safe to show**: credentials in URLs are masked (`user:password@`, query parameters such as `api_key`, `token`, `secret`…).
+- **Other connections of the instance**: notification webhooks, SMTP, syslog, LDAP, OpenID Connect, outgoing proxy.
+- **Export CSV**: one line per host (allowlist of a firewall or a proxy), or one line per URL and referential. API: `GET /api/admin/endpoints`, `GET /api/admin/endpoints/export?hosts_only=true`; MCP tool `list_endpoints`.
 
 ## Secret manager
 
@@ -1083,6 +1185,59 @@ Sometimes the remote source is unreachable, wrong, or the file arrives another w
 ```bash
 curl -X POST -H "$H" -F files=@known_exploited_vulnerabilities.csv -F pin=true \
   "http://localhost:8080/api/referentials/cisa-kev/import"
+```
+
+---
+
+## Deltas: merging new data into a referential
+
+By default each new data set **replaces** the published version. With `merge`, a table referential accumulates instead: every new data set is a **delta merged into the published data**. It applies to every way data arrives: the download of the source URL (a feed of the last 48 hours, a daily export of the changes…), the **Import** button or `POST /import` (push), the import folder and the sync folder.
+
+```yaml
+id: iocs
+format: csv
+key: ioc                    # upsert key: a row of the delta replaces the published row with the same ioc
+source:
+  urls: [https://feeds.example.com/iocs-last-48h.csv]
+merge:
+  delete_column: _deleted   # optional: rows with _deleted = true remove the published row (column not published)
+```
+
+- **With a key**: a row of the delta replaces the published row of the same key (upsert), the others are kept. **Without key**: the rows are added, identical rows kept once.
+- **New columns** of a delta are added (empty for the older rows). The same delta received twice changes nothing; an **empty delta** keeps the published version.
+- Validation and **quality rules** run on the merged result; the history shows the changes (+added / ~modified / -removed), and the referential page the number of deltas merged since the base (*deltas* badge).
+- **New base**: the first data set is the base. To start again from a full data set, import it with **Import › New base** (`-F mode=replace`), or start an update with **Update › Replace with the source** (`POST /refresh?replace=true`).
+
+```bash
+# Push a delta (merged), then a full data set that becomes the new base
+curl -X POST -H "$H" -F files=@delta.csv "http://localhost:8080/api/referentials/iocs/import"
+curl -X POST -H "$H" -F files=@full.csv -F mode=replace "http://localhost:8080/api/referentials/iocs/import"
+```
+
+Bloom filters and SQLite databases have their own deltas (`incremental`, see above). Internal referentials are edited row by row.
+
+---
+
+## Synchronization between instances
+
+A RefExposer instance can **replicate the referentials of another one** (a central instance feeding regional or isolated ones, production feeding pre-production…), with their definitions: name, description, category, key, search columns, **quality rules**, **SQL transformation**, indexes, generated downloads, confidentiality.
+
+**On the instance that shares (the peer)**: create a **service account**, give it (or its group) the **read** right on the referentials to share, and create an API token for it. Nothing else: it exposes `GET /api/federation/catalog`, which lists what this account may read.
+
+**On the replica**: **Administration › Synchronized instances › Add a peer**: URL of the peer, token, then **Test the connection** to choose the referentials (or all of them, including the ones shared later), the prefix of the local identifiers (`prod-` gives `prod-iocs`), the schedule and the groups given the read right on the replicas. Each synchronization:
+
+1. reads the catalog of the peer and creates or updates the definition of each replica;
+2. starts the update of the replicas whose published version changed over there. The replica downloads the **published file of the peer** (Parquet, Bloom filter or MaxMind DB) with a conditional request. The SQL transformation already ran upstream and stays visible on the replica, and the quality rules are checked again here.
+
+- The token is kept in the **secret manager** (`peer-<name>`), restricted to the host of the peer: it is never sent elsewhere.
+- Replicas are **read-only** here (their definition follows the peer); they show a *peer* badge.
+- A referential **no longer shared** (removed, or right withdrawn) stays on the replica with its last data, marked *missing over there*. Removing the peer keeps the replicas (no longer updated), or deletes them with their data and the token.
+- An identifier already used on the replica is reported as a conflict: give the peer a prefix.
+
+```bash
+curl -X PUT -H "$H" -H "Content-Type: application/json" "http://replica:8080/api/admin/federation/peers/prod" \
+  -d '{"url": "https://refexposer.example.com", "token": "rfx_…", "prefix": "prod-", "schedule": "0 * * * *"}'
+curl -X POST -H "$H" "http://replica:8080/api/admin/federation/peers/prod/sync"
 ```
 
 ---
@@ -1333,6 +1488,42 @@ SQL queries run in an isolated DuckDB connection, specific to the rights of the 
 
 ---
 
+## Data quality
+
+Each referential can declare **quality rules**, checked on every new version in one scan of the data:
+
+```yaml
+quality:
+  rules:
+    - {column: ip, check: format, format: ipv4, threshold: 99.9}        # 99.9 % of the rows at least
+    - {column: sha256, check: format, format: sha256, severity: error}  # error: the version is rejected
+    - {column: cve, check: unique}
+    - {column: severity, check: values, values: [low, medium, high, critical]}
+    - {column: score, check: range, min: 0, max: 10}
+    - {column: label, check: length, max_length: 255}
+    - {column: code, check: pattern, pattern: "[A-Z]{3}-[0-9]+"}
+    - {check: expression, expression: "first_seen <= last_seen", name: "consistent dates"}
+```
+
+| Check | A row passes when |
+|---|---|
+| `not_null` | the value is present (not NULL, not blank) |
+| `unique` | its value appears only once |
+| `format` | the value is a valid `ipv4`, `ipv6`, `ip`, `cidr`, `domain`, `email`, `url`, `md5`, `sha1`, `sha256`, `sha512`, `cve`, `uuid`, `mac`, `asn` or `country` (ISO 3166 alpha-2) |
+| `pattern` | the whole value matches the regular expression (RE2) |
+| `values` | the value is among the allowed ones |
+| `range` | the value is between `min` and `max` (numbers, or ISO dates / text) |
+| `length` | the value has between `min_length` and `max_length` characters |
+| `expression` | the SQL condition is true |
+
+- **Empty values** only fail `not_null`: the other checks ignore them. The completeness of the **key** is checked automatically.
+- **Threshold** (100 % by default): the share of rows that must pass. **Severity**: `warning` publishes the version and marks it; `error` rejects it, and the published version is kept (a *quality gate*, like `validation`). Internal referentials are never rejected, only marked.
+- **Score**: the mean of the pass rates (0–100). **Status**: *ok*, *warning* (a warning rule is not met) or *failed*.
+- **Where**: the **Quality** tab of the referential (score, history of the last versions, pass rate of each rule, failing rows and up to 5 failing values; never shown for a confidential referential); a badge and the *Quality issues* filter in **Administration › Referentials**; `quality` in the API answers (`GET /api/referentials/<id>/quality`).
+- **Changing the rules** does not download anything again: the published version is checked again in the background (or with **Check again**, `POST /api/referentials/<id>/quality/check`).
+- **Notifications**: the `quality` event warns when a version is published with rules not met while the previous one met them. A failing `error` rule rejects the version, which is a `failure`.
+- The rules are edited in the referential editor (step *Description*). They take one scan of the data: on billions of rows, keep them few.
+
 ## Notifications (e-mail, webhooks)
 
 **Administration › Notifications** sends the events of the referentials to channels:
@@ -1342,6 +1533,7 @@ SQL queries run in an isolated DuckDB connection, specific to the rights of the 
 | `failure` | an update ends in error, with a corrupted source or a rejected version (the published version is kept) |
 | `recovered` | first successful update after a failure |
 | `published` | a new version is published |
+| `quality` | a new version is published with quality rules not met (severity `warning`), the previous one meeting them |
 
 - **No flood**: a referential failing at every scheduled update is notified once, when it starts failing, then at its recovery. Tick *Every failed update* to be told each time.
 - **Filters**: every channel chooses its events and its referentials (ids and / or categories; all when empty).
@@ -1350,6 +1542,19 @@ SQL queries run in an isolated DuckDB connection, specific to the rights of the 
 - **Credentials and signature**: header values may be `${secret:…}` references (restricted to their hosts, see [Secret manager](#secret-manager)). Literal values are masked by the API. With a signing secret, the body is signed: `X-RefExposer-Signature: sha256=<HMAC-SHA256 of the body>`. `X-RefExposer-Event` gives the event.
 - **Reliability**: deliveries run in the background (an update never waits for them), with 3 attempts (after 2 s, then 8 s). The 500 last deliveries and their result are listed on the page (`data/.notifications.jsonl`). The send button of a channel sends a test at once.
 - API: `/api/admin/notifications` (channels, `POST /{id}/test`, `GET /deliveries`), `PUT /api/admin/settings/smtp`, `POST /api/admin/settings/smtp/test`.
+
+## MCP data server (every user)
+
+Each user, or service account, can connect an AI assistant (Claude Code, Claude Desktop, any [MCP](https://modelcontextprotocol.io) client) to the referentials **it may read**, with **its own API token** (**My account › API tokens**):
+
+```bash
+claude mcp add --transport http refexposer https://refexposer.example.com/api/mcp/user --header "Authorization: Bearer $REFEX_TOKEN"
+```
+
+- **Enabled by an administrator** in **Settings › MCP server › Data server**, for every account or for some groups only (administrators always). Disabled by default. The URL is then shown in **My account**.
+- **The rights of the token, nothing more**: no elevation. The tools call the REST API with the token, so a referential the account may not read stays invisible (listed nowhere, `404` on a lookup), and SQL is offered to advanced users and administrators only.
+- **Reading only**: `whoami`, `list_referentials`, `get_referential` (columns, profile, state), `query_rows` (filters `column__op`, text search, sort), `lookup`, `lookup_many` (up to 10,000 values), `search` (every referential), `column_stats`, `get_changes`, `get_quality`, `list_runs`, plus `run_sql` and `sql_schema` when the role allows it.
+- SQL queries are recorded in the audit log, as from the console.
 
 ## Administration MCP server
 
@@ -1366,7 +1571,7 @@ claude mcp add --transport http refexposer https://refexposer.example.com/api/mc
 - **Disabled by default.** It answers only to the API tokens of the chosen service accounts. Any other token, a session cookie or a disabled server is refused.
 - **Admin powers through the server only**: the token alone keeps the usual rights of the account on the REST API (role *user*). Through `/api/mcp`, its calls are signed by the server and run as an administrator. Disabling the server, or removing the account from the list, withdraws these powers at once.
 - **Same rules as the interface**: every tool calls the REST API in-process, as the service account. Validations and rights apply, and every change is recorded in the audit log with `via: mcp`.
-- **Tools**: `list_referentials`, `get_referential`, `get_definition`, `list_runs`, `query_rows`, `lookup`, `search`, `run_sql`, `sql_schema`, `preview_source`, `create_referential`, `update_referential`, `delete_referential`, `refresh_referential`, `cancel_run`, `list_secrets`, `create_secret`, `update_secret`, `delete_secret`, `discovery_scan`, `discovery_apply`, `export_configuration`, `import_configuration`, `list_users`, `list_groups`, `list_grants`, `grant_access`, `get_audit_log`, `list_tasks`, `run_task`, `get_settings`, `reload_configuration`, plus `api_endpoints` and `api_request` for the rest of the API (sign-in and personal tokens excluded).
+- **Tools**: `list_referentials`, `get_referential`, `get_definition`, `list_runs`, `query_rows`, `lookup`, `search`, `run_sql`, `sql_schema`, `preview_source`, `create_referential`, `update_referential`, `delete_referential`, `refresh_referential`, `cancel_run`, `list_secrets`, `create_secret`, `update_secret`, `delete_secret`, `discovery_scan`, `discovery_apply`, `export_configuration`, `import_configuration`, `list_endpoints`, `list_users`, `list_groups`, `list_grants`, `grant_access`, `get_audit_log`, `list_tasks`, `run_task`, `get_settings`, `reload_configuration`, plus `api_endpoints` and `api_request` for the rest of the API (sign-in and personal tokens excluded).
 - **Read-only mode**: only the reading tools are offered (state, data, SQL, preview, scan), and the API refuses any change made through the server.
 - **Secrets stay write-only**: an agent can create or replace a secret, never read one back. With allowed hosts, a secret cannot be sent elsewhere, even by an agent.
 
@@ -1565,7 +1770,13 @@ Put them in a `.env` file at the root (see `.env.example`):
 | `REFEX_MAX_CONCURRENT_JOBS` | `2` | concurrent updates |
 | `REFEX_HTTP_VERIFY` | `true` | `true`, `false` or path of a CA bundle (company TLS proxy) |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | | outgoing proxy (downloads and build) |
-| `REFEX_DUCKDB_MEMORY_LIMIT` | 80% of the RAM | e.g. `4GB` |
+| `REFEX_DUCKDB_MEMORY_LIMIT` | automatic | memory of DuckDB, e.g. `8GB`. Empty: each update gets 60 % of the container memory shared between `REFEX_MAX_CONCURRENT_JOBS`, the query engine 25 %; beyond it, DuckDB works on disk |
+| `REFEX_DUCKDB_THREADS` | automatic | threads of DuckDB. Empty: half of the container processors for an update |
+| `REFEX_DOWNLOAD_RETRIES` | `5` | new attempts of a download when the remote site fails (see [Downloads and retries](#downloads-and-retries)) |
+| `REFEX_MIN_FREE_DISK` | `5GB` | disk space an update never uses (download, decompression, DuckDB work files): it stops with a clear error instead of filling the disk shared with the database |
+| `REFEX_KEEP_RAW_MAX` | `10GB` | source files above this size are not kept after the build when they are not the published file itself (decompressed, rewritten); `0`: no limit |
+| `REFEX_FULL_SCAN_MAX` | `20GB` | above this published size, a filter or a lookup on a column neither sorted nor indexed is refused at once with what to configure, instead of reading the whole file until `REFEX_QUERY_TIMEOUT`; `0`: never |
+| `REFEX_CPUS`, `REFEX_MEMORY` | `0` (no limit) | processors and memory of the backend container (docker compose), e.g. `6` and `16g` |
 | `REFEX_SQL_TIMEOUT` | `30` | max. duration of an SQL query (s) |
 | `REFEX_SQL_MAX_ROWS` | `10000` | max. rows returned by the console |
 | `REFEX_API_MAX_LIMIT` | `1000` | max. rows per API page |

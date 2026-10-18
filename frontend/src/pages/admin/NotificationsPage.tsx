@@ -39,6 +39,7 @@ const EVENTS: { value: NotificationEvent; label: string; description: string }[]
   { value: 'failure', label: 'Failure', description: 'update in error, corrupted source or rejected version' },
   { value: 'recovered', label: 'Recovery', description: 'first success after a failure' },
   { value: 'published', label: 'New version', description: 'every published version' },
+  { value: 'quality', label: 'Quality warning', description: 'a version published with quality rules not met' },
 ];
 
 const TEMPLATES = [
@@ -302,7 +303,7 @@ export default function NotificationsPage() {
               </Text>
               <Group gap={4} mt="sm">
                 {c.events.map((e) => (
-                  <Badge key={e} size="sm" variant="light" color={e === 'failure' ? 'red' : e === 'recovered' ? 'teal' : 'indigo'}>
+                  <Badge key={e} size="sm" variant="light" color={e === 'failure' ? 'red' : e === 'recovered' ? 'teal' : e === 'quality' ? 'orange' : 'indigo'}>
                     {EVENTS.find((x) => x.value === e)?.label}
                   </Badge>
                 ))}

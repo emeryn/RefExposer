@@ -73,6 +73,17 @@ def system(service: Service = Depends(get_service), _: CurrentUser = Depends(req
     return service.system()
 
 
+@router.get("/system/storage", tags=["system"], summary="Disk space: free space of the volumes, what takes the space")
+def storage(refresh: bool = Query(False, description="Walk the folders again (at most every 5 s; cached 30 s otherwise)"),
+            service: Service = Depends(get_service), _: CurrentUser = Depends(require_admin)) -> dict[str, Any]:
+    """Administrators only, read only: sizes per volume, per referential and per kind of file (published version,
+    indexes, previous version, sources kept, interrupted downloads...), the largest files, and folders left by deleted
+    referentials. Nothing is deleted from here."""
+    from ..diskusage import report
+
+    return report(service, refresh)
+
+
 @router.post("/system/reload", tags=["system"], summary="Reload the referentials configuration")
 def reload(request: Request, service: Service = Depends(get_service), user: CurrentUser = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
     result = service.reload()

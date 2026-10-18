@@ -61,7 +61,11 @@ def _clean(config: dict[str, Any]) -> dict[str, Any]:
     for k, v in config.items():
         if v is None or v == "" or v == [] or v == {}:
             continue
-        out[k] = _clean(v) if isinstance(v, dict) and k not in ("options", "headers") else v
+        if isinstance(v, dict) and k not in ("options", "headers"):
+            v = _clean(v)
+            if not v:  # e.g. quality: {rules: []}
+                continue
+        out[k] = v
     return out
 
 
@@ -205,6 +209,10 @@ def update_definition(ref_id: str, body: DefinitionIn, request: Request, db: Ses
         raise HTTPException(404, f"unknown referential: '{ref_id}'")
     if ref_id in service.active:
         raise HTTPException(409, "an update is running, retry when it is finished")
+    peer = ((d.config or {}).get("federation") or {}).get("peer")
+    if peer:
+        raise HTTPException(409, f"replica of a referential of the peer '{peer}': its definition comes from there "
+                                 "(change it on the peer, or remove the peer to manage it here)")
     config = {k: v for k, v in body.config.items() if k != "id"}
     if body.upload_id:
         config["source"] = {"type": "local", "path": "raw/**/*"}

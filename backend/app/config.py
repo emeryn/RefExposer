@@ -16,6 +16,8 @@ import yaml
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from .quality import QualityConfig
+
 log = logging.getLogger(__name__)
 
 _ENV_REF = re.compile(r"\$\{(REFEX_SOURCE_[A-Z0-9_]+)\}")
@@ -90,6 +92,9 @@ class SourceConfig(BaseModel):
     basic_auth: str | None = None
     # Glob applied to archive members (zip / tar); all files are kept when omitted.
     extract: str | None = None
+    # New attempts when the remote site fails (connection error, timeout, HTTP 408 / 429 / 5xx), like curl --retry,
+    # waiting 1, 2, 4... s (or the Retry-After of the server). Empty: REFEX_DOWNLOAD_RETRIES (5); 0: no new attempt.
+    retries: int | None = Field(default=None, ge=0, le=50)
 
     def request_headers(self, url: str | None = None) -> dict[str, str]:
         """Headers actually sent to `url`: ${REFEX_SOURCE_*} variables and ${secret:*} expanded, Basic
@@ -199,6 +204,35 @@ class IncrementalConfig(BaseModel):
         return v
 
 
+class MergeConfig(BaseModel):
+    """Deltas merged into the published version: each new data set (download of the source URL, file upload, import
+    folder, sync folder) adds to the referential instead of replacing it. With a key, a row of the delta replaces the
+    published row of the same key (upsert); without key, the rows are added (identical rows kept once). An import with
+    mode=replace, or an update started with replace=true, publishes the data set alone (new base)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # Rows of a delta whose value in this column is true remove the published row of the same key (key required);
+    # the column itself is not published
+    delete_column: str | None = None
+
+
+class FederationInfo(BaseModel):
+    """Referential replicated from another RefExposer instance (federation.py): managed by the synchronization of the
+    peer, which rewrites its definition. Kept for display: where it comes from and the SQL applied over there."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    peer: str
+    remote_id: str
+    remote_url: str | None = None
+    # SQL transformation of the source referential, applied on the peer (the replica receives its result)
+    transform: str | None = None
+    remote_format: str | None = None
+    remote_source: str | None = None  # type of source over there (http, git, internal...)
+
+
 class ReferentialConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -224,6 +258,8 @@ class ReferentialConfig(BaseModel):
     schedule: str | None = None  # crontab expression
     max_age: str | None = None  # data considered stale after this duration
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    # Data quality rules checked on every new version (quality.py); not part of the configuration hash
+    quality: QualityConfig = Field(default_factory=QualityConfig)
     enabled: bool = True
     # Confidential: the data is encrypted at rest (Parquet AES-GCM, internal rows in the database), the source
     # files and the generated downloads are not kept on disk
@@ -233,6 +269,10 @@ class ReferentialConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     # Bloom filters only: deltas applied between two full downloads
     incremental: IncrementalConfig | None = None
+    # Tables: each new data set is merged into the published version (deltas) instead of replacing it
+    merge: MergeConfig | None = None
+    # Replica of a referential of another RefExposer instance (set by the synchronization of the peer)
+    federation: FederationInfo | None = None
 
     # Filled by the loader
     config_file: str | None = Field(default=None, exclude=True)
@@ -243,6 +283,17 @@ class ReferentialConfig(BaseModel):
     def _internal_defaults(cls, data: Any) -> Any:
         if isinstance(data, dict) and (data.get("source") or {}).get("type") == "internal":
             data = {**data, "format": data.get("format") or "jsonl"}
+        if isinstance(data, dict) and data.get("format") == "sqlite" and (data.get("options") or {}).get("nsrl"):
+            # NIST NSRL: publications found on the NIST download page, deltas applied automatically, RDS 2.x
+            # NSRLFile table by default
+            from .nsrl import DOWNLOAD_PAGE, is_publication
+
+            source = dict(data.get("source") or {})
+            urls = [u for u in source.get("urls") or [] if u and u.strip()]
+            # A publication (RDS_2026.03.1_modern_minimal.zip) is not the page listing them: the NIST page is read
+            source["urls"] = [DOWNLOAD_PAGE] if not urls or all(is_publication(u) for u in urls) else urls
+            data = {**data, "source": source, "options": {"table": "NSRLFile", **data["options"]},
+                    "incremental": data.get("incremental") or {"urls": []}}
         return data
 
     @model_validator(mode="after")
@@ -275,6 +326,19 @@ class ReferentialConfig(BaseModel):
             if self.format == "sqlite" and (inc.format != "sql" or inc.full_every or inc.max_fp_rate):
                 raise ValueError("incremental SQLite database: the deltas are SQL files ('full_every' and 'max_fp_rate' "
                                  "only apply to Bloom filters)")
+        if self.options.get("nsrl") is not None:
+            from .nsrl import SETS
+
+            if self.format != "sqlite" or self.options["nsrl"] not in SETS:
+                raise ValueError(f"'nsrl' (NIST NSRL publication set) applies to the sqlite format: one of {', '.join(SETS)}")
+            if self.incremental and self.incremental.urls:
+                raise ValueError("NIST NSRL: the deltas are found on the NIST download page, do not list them")
+        if self.merge and self.merge.enabled:
+            if self.is_internal or self.format in ("bloom", "mmdb") or self.incremental:
+                raise ValueError("'merge' applies to tables fed by files (Bloom filters and SQLite databases have 'incremental', "
+                                 "internal referentials are edited row by row)")
+            if self.merge.delete_column and not self.key:
+                raise ValueError("merge.delete_column removes rows by key: set the key of the referential")
         if self.format in ("bloom", "mmdb"):  # published as is: no table to transform, sort or export
             label = "a Bloom filter" if self.format == "bloom" else "a MaxMind DB"
             if self.confidential:
@@ -283,6 +347,8 @@ class ReferentialConfig(BaseModel):
                 raise ValueError(f"no SQL transformation for {label}")
             if self.downloads or self.storage.sort_by or self.storage.indexes:
                 raise ValueError(f"no generated downloads, sort or indexes for {label}: the file is published as is")
+            if self.quality.rules:
+                raise ValueError(f"no quality rules for {label}: they check the rows of a table")
         return self
 
     @property
@@ -314,6 +380,11 @@ class ReferentialConfig(BaseModel):
             if not re.fullmatch(r"[a-z_][a-z0-9_]*", k):
                 raise ValueError(f"invalid option name: {k}")
         return v
+
+    @property
+    def is_merge(self) -> bool:
+        """Deltas: new data sets are merged into the published version."""
+        return bool(self.merge and self.merge.enabled)
 
     @property
     def is_bloom(self) -> bool:
@@ -351,13 +422,15 @@ class ReferentialConfig(BaseModel):
             "columns": [c.model_dump() for c in self.columns],
         }
         # Fields added later only count when set: the hash of existing definitions stays the same (no rebuild)
-        for f in ("basic_auth", "repository", "ref", "token", "username"):
+        for f in ("basic_auth", "repository", "ref", "token", "username", "retries"):
             if payload["source"].get(f) is None:
                 payload["source"].pop(f, None)
         if self.confidential:  # encrypted output
             payload["confidential"] = True
         if self.incremental and self.is_bloom:  # deltas: another set of values (full download again when they change)
             payload["incremental"] = {"urls": self.incremental.urls, "format": self.incremental.format}
+        if self.merge and self.merge.enabled:  # the same data set merges into another result (key, deletions)
+            payload["merge"] = {"key": self.key, "delete_column": self.merge.delete_column}
         # SQLite: the deltas are not part of the hash, the kept database records which ones were applied
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 

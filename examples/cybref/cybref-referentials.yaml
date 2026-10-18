@@ -1,0 +1,3296 @@
+# CybrefV2 referentials for RefExposer (https://github.com/emeryn/CybrefV2)
+#
+# 124 cybersecurity referentials (threat intelligence, LOL binaries, vulnerabilities, ATT&CK and other frameworks,
+# cloud / VPN / Tor IP ranges, registries, detection lists), read from the daily mirror of CybrefV2 on GitHub.
+#
+# Import: Administration › Referentials › Import (the plan shows what is created), or
+#         POST /api/admin/config/import, or drop this file into config/ (read like any definition file).
+# Every definition was built and checked with RefExposer before being written here (see README.md).
+#
+# - Each referential is checked every day at 07:xx (minute spread to avoid a burst); unchanged files answer HTTP 304.
+# - Rolling feeds (ThreatFox, MalwareBazaar, ransomware.live victims) use merge: each download is a delta added to the
+#   published data, so the referential keeps the history beyond the window of the feed.
+# - nvd_cve (27 yearly files, 2.7 GB of JSON) needs about 8 GB of memory for the backend: remove it on a small host.
+# - Not included: mitre_atlas and bluetooth_company_ids (YAML), curl_ca_bundle (PEM): not tables.
+refexposer_export:
+  format: refexposer-config
+  version: 1
+  exported_at: '2026-10-17T00:00:00+00:00'
+  exported_by: examples/cybref
+  instance: https://github.com/emeryn/CybrefV2
+  credentials: masked
+  referentials: 124
+referentials:
+- id: abusech_feodotracker_c2_ips
+  name: Feodo Tracker
+  description: Botnet C2 servers (Dridex, Emotet, QakBot, Pikabot...).
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://feodotracker.abuse.ch/
+  owner: CybrefV2 (from feodotracker.abuse.ch)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/abusech_feodotracker_c2_ips.json
+  format: json
+  key: ip_address
+  schedule: 47 7 * * *
+  quality:
+    rules:
+    - column: ip_address
+      check: not_null
+      severity: error
+    - column: ip_address
+      check: unique
+      severity: warning
+- id: abusech_malwarebazaar_recent
+  name: MalwareBazaar
+  description: Malware samples of the last 48h (hashes, signature, file type, tags).
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://bazaar.abuse.ch/
+  owner: CybrefV2 (from bazaar.abuse.ch)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/abusech_malwarebazaar_recent.csv
+  format: csv
+  options:
+    comment: '#'
+    header: false
+    delim: ', '
+    quote: '"'
+    names:
+    - first_seen_utc
+    - sha256_hash
+    - md5_hash
+    - sha1_hash
+    - reporter
+    - file_name
+    - file_type_guess
+    - mime_type
+    - signature
+    - clamav
+    - vtpercent
+    - imphash
+    - ssdeep
+    - tlsh
+  key: sha256_hash
+  schedule: 44 7 * * *
+  quality:
+    rules:
+    - column: sha256_hash
+      check: not_null
+      severity: error
+    - column: sha256_hash
+      check: unique
+      severity: warning
+  merge:
+    enabled: true
+- id: abusech_sslbl_certificates
+  name: SSL Blacklist
+  description: SHA1 fingerprints of TLS certificates used by botnet C2 servers.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://sslbl.abuse.ch/
+  owner: CybrefV2 (from sslbl.abuse.ch)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/abusech_sslbl_certificates.csv
+  format: csv
+  options:
+    comment: '#'
+    header: false
+    names:
+    - listing_date
+    - sha1
+    - listing_reason
+  key: sha1
+  schedule: 34 7 * * *
+  quality:
+    rules:
+    - column: sha1
+      check: not_null
+      severity: error
+    - column: sha1
+      check: unique
+      severity: warning
+- id: abusech_threatfox_recent
+  name: ThreatFox
+  description: IOCs of the last 48h (IP:port, domains, URLs, hashes) tagged by malware family.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://threatfox.abuse.ch/
+  owner: CybrefV2 (from threatfox.abuse.ch)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/abusech_threatfox_recent.json
+  format: json
+  options:
+    records_path: '*'
+  key: _key
+  schedule: 18 7 * * *
+  quality:
+    rules:
+    - column: _key
+      check: not_null
+      severity: error
+    - column: _key
+      check: unique
+      severity: warning
+  merge:
+    enabled: true
+- id: abusech_urlhaus_online
+  name: URLhaus
+  description: Malware distribution URLs currently online.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://urlhaus.abuse.ch/
+  owner: CybrefV2 (from urlhaus.abuse.ch)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/abusech_urlhaus_online.csv
+  format: csv
+  key: url
+  schedule: 41 7 * * *
+  quality:
+    rules:
+    - column: url
+      check: not_null
+      severity: error
+    - column: url
+      check: unique
+      severity: warning
+- id: apple_applebot_ips
+  name: Applebot IPs
+  description: IP ranges of Applebot.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://support.apple.com/en-us/119829
+  owner: CybrefV2 (from search.developer.apple.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/apple_applebot_ips.json
+  format: json
+  options:
+    records_path: prefixes
+  key: ipv4Prefix
+  schedule: 10 7 * * *
+  quality:
+    rules:
+    - column: ipv4Prefix
+      check: not_null
+      severity: error
+    - column: ipv4Prefix
+      check: unique
+      severity: warning
+- id: apple_private_relay_ranges
+  name: iCloud Private Relay
+  description: Egress IP ranges of iCloud Private Relay with their geolocation.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://developer.apple.com/support/prepare-your-network-for-icloud-private-relay/
+  owner: CybrefV2 (from mask-api.icloud.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/apple_private_relay_ranges.csv
+  format: csv
+  options:
+    header: false
+    names:
+    - ip_prefix
+    - country
+    - region
+    - city
+    - postal_code
+  key: ip_prefix
+  schedule: 41 7 * * *
+  quality:
+    rules:
+    - column: ip_prefix
+      check: not_null
+      severity: error
+    - column: ip_prefix
+      check: unique
+      severity: warning
+  search_columns:
+  - ip_prefix
+  - city
+  - country
+- id: aws_ip_ranges
+  name: AWS IP ranges
+  description: Amazon Web Services public IP ranges by service and region.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://docs.aws.amazon.com/vpc/latest/userguide/aws-ip-ranges.html
+  owner: CybrefV2 (from ip-ranges.amazonaws.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/aws_ip_ranges.json
+  format: json
+  options:
+    records_path: prefixes
+  schedule: 33 7 * * *
+  key: ip_prefix
+  quality:
+    rules:
+    - column: ip_prefix
+      check: not_null
+      severity: warning
+    - column: ip_prefix
+      check: unique
+      severity: warning
+- id: azure_ip_ranges
+  name: Azure IP ranges
+  description: Microsoft Azure service tags and IP ranges (stable URL mirror).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://github.com/enzo-g/azureIPranges
+  owner: CybrefV2 (from enzo-g.github.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/azure_ip_ranges.json
+  format: json
+  options:
+    records_path: values
+  key: name
+  schedule: 38 7 * * *
+  quality:
+    rules:
+    - column: name
+      check: not_null
+      severity: error
+    - column: name
+      check: unique
+      severity: warning
+- id: badbot_fake_googlebots
+  name: Bad Bot Blocker - fake Googlebots
+  description: IPs pretending to be Googlebot.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/badbot_fake_googlebots.txt
+  format: txt
+  key: value
+  schedule: 33 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: badbot_referrers
+  name: Bad Bot Blocker - referrers
+  description: Spam referrer domains.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/badbot_referrers.txt
+  format: txt
+  key: value
+  schedule: 15 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: badbot_user_agents
+  name: Bad Bot Blocker - user agents
+  description: Bad bots and scrapers User-Agents.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/badbot_user_agents.txt
+  format: txt
+  key: value
+  schedule: 38 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: bing_bingbot_ips
+  name: Bingbot IPs
+  description: IP ranges of Bingbot.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://www.bing.com/webmasters/help/how-to-verify-bingbot-3905dc26
+  owner: CybrefV2 (from www.bing.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/bing_bingbot_ips.json
+  format: json
+  options:
+    records_path: prefixes
+  key: ipv4Prefix
+  schedule: 48 7 * * *
+  quality:
+    rules:
+    - column: ipv4Prefix
+      check: not_null
+      severity: error
+    - column: ipv4Prefix
+      check: unique
+      severity: warning
+- id: blocklistde_all
+  name: blocklist.de
+  description: IPs reported for attacks (SSH, mail, web, FTP brute force) in the last 48h.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://www.blocklist.de/
+  owner: CybrefV2 (from lists.blocklist.de)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/blocklistde_all.txt
+  format: txt
+  key: value
+  schedule: 41 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: bootloaders
+  name: Bootloaders.io
+  description: Known vulnerable or malicious bootloaders.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://www.bootloaders.io/
+  owner: CybrefV2 (from www.bootloaders.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/bootloaders.json
+  format: json
+  key: Id
+  schedule: 23 7 * * *
+  quality:
+    rules:
+    - column: Id
+      check: not_null
+      severity: error
+    - column: Id
+      check: unique
+      severity: warning
+- id: certfr_alertes
+  name: CERT-FR alertes
+  description: ANSSI CERT-FR security alerts (RSS, latest entries).
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - daily
+  homepage: https://www.cert.ssi.gouv.fr/alerte/
+  owner: CybrefV2 (from www.cert.ssi.gouv.fr)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/certfr_alertes.xml
+  format: xml
+  key: link
+  schedule: 44 7 * * *
+  quality:
+    rules:
+    - column: link
+      check: not_null
+      severity: warning
+    - column: link
+      check: unique
+      severity: warning
+- id: certfr_avis
+  name: CERT-FR avis
+  description: ANSSI CERT-FR security advisories (RSS, latest entries).
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - daily
+  homepage: https://www.cert.ssi.gouv.fr/avis/
+  owner: CybrefV2 (from www.cert.ssi.gouv.fr)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/certfr_avis.xml
+  format: xml
+  key: link
+  schedule: 33 7 * * *
+  quality:
+    rules:
+    - column: link
+      check: not_null
+      severity: warning
+    - column: link
+      check: unique
+      severity: warning
+- id: cinsscore_badguys
+  name: CINS Army
+  description: IPs with poor reputation seen by the Sentinel IPS network.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://cinsscore.com/
+  owner: CybrefV2 (from cinsscore.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/cinsscore_badguys.txt
+  format: txt
+  key: value
+  schedule: 33 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: cisa_kev
+  name: CISA KEV
+  description: Known Exploited Vulnerabilities catalog (US).
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - daily
+  homepage: https://www.cisa.gov/known-exploited-vulnerabilities-catalog
+  owner: CybrefV2 (from www.cisa.gov)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/cisa_kev.json
+  format: json
+  options:
+    records_path: vulnerabilities
+  key: cveID
+  schedule: 10 7 * * *
+  quality:
+    rules:
+    - column: cveID
+      check: not_null
+      severity: error
+    - column: cveID
+      check: unique
+      severity: warning
+- id: cloudflare_ip_ranges
+  name: Cloudflare IP ranges
+  description: Cloudflare edge IPv4/IPv6 ranges.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://www.cloudflare.com/ips/
+  owner: CybrefV2 (from api.cloudflare.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/cloudflare_ip_ranges.json
+  format: json
+  transform: SELECT unnest(result.ipv4_cidrs || result.ipv6_cidrs) AS cidr FROM {source}
+  key: cidr
+  schedule: 45 7 * * *
+  quality:
+    rules:
+    - column: cidr
+      check: not_null
+      severity: error
+    - column: cidr
+      check: unique
+      severity: warning
+- id: dbip_asn_lite
+  name: DB-IP ASN Lite
+  description: IP range -> ASN and organisation (IPv4 + IPv6). CC BY 4.0, attribution to DB-IP.com required.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://db-ip.com/db/download/ip-to-asn-lite
+  owner: CybrefV2 (from download.db-ip.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/dbip_asn_lite.csv
+  format: csv
+  options:
+    header: false
+    names:
+    - ip_start
+    - ip_end
+    - asn
+    - as_name
+  key: ip_start
+  schedule: 24 7 * * *
+  quality:
+    rules:
+    - column: ip_start
+      check: not_null
+      severity: error
+    - column: ip_start
+      check: unique
+      severity: warning
+  search_columns:
+  - as_name
+- id: dbip_country_lite
+  name: DB-IP Country Lite
+  description: IP range -> country (IPv4 + IPv6). CC BY 4.0, attribution to DB-IP.com required.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://db-ip.com/db/download/ip-to-country-lite
+  owner: CybrefV2 (from download.db-ip.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/dbip_country_lite.csv
+  format: csv
+  options:
+    header: false
+    names:
+    - ip_start
+    - ip_end
+    - country
+  key: ip_start
+  schedule: 53 7 * * *
+  quality:
+    rules:
+    - column: ip_start
+      check: not_null
+      severity: error
+    - column: ip_start
+      check: unique
+      severity: warning
+  search_columns:
+  - country
+- id: digitalocean_ip_ranges
+  name: DigitalOcean IP ranges
+  description: DigitalOcean IP ranges with location (geofeed CSV).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://docs.digitalocean.com/platform/
+  owner: CybrefV2 (from digitalocean.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/digitalocean_ip_ranges.csv
+  format: csv
+  key: 5.101.96.0/21
+  schedule: 53 7 * * *
+  quality:
+    rules:
+    - column: 5.101.96.0/21
+      check: not_null
+      severity: error
+    - column: 5.101.96.0/21
+      check: unique
+      severity: warning
+- id: disposable_email_domains
+  name: Disposable email domains
+  description: Throw-away email providers.
+  category: Domains & Email
+  tags:
+  - cybref
+  - domains
+  - weekly
+  homepage: https://github.com/disposable-email-domains/disposable-email-domains
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/domains/disposable_email_domains.txt
+  format: txt
+  key: value
+  schedule: 55 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: dshield_block
+  name: DShield block list
+  description: SANS ISC top 20 attacking /24 subnets of the last 3 days.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://isc.sans.edu/block.html
+  owner: CybrefV2 (from feeds.dshield.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/dshield_block.txt
+  format: txt
+  key: value
+  schedule: 49 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: enisa_euvd_exploited
+  name: EUVD exploited
+  description: European Vulnerability Database entries flagged as exploited (ENISA) - the EU counterpart of KEV.
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - daily
+  homepage: https://euvd.enisa.europa.eu/
+  owner: CybrefV2
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/enisa_euvd_exploited.json
+  format: json
+  key: id
+  schedule: 28 7 * * *
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: error
+    - column: id
+      check: unique
+      severity: warning
+- id: exploitdb_exploits
+  name: Exploit-DB
+  description: Exploit index with CVE mapping.
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - weekly
+  homepage: https://www.exploit-db.com/
+  owner: CybrefV2 (from gitlab.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/exploitdb_exploits.csv
+  format: csv
+  schedule: 30 7 * * *
+  key: id
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: warning
+    - column: id
+      check: unique
+      severity: warning
+- id: fastly_ip_ranges
+  name: Fastly IP ranges
+  description: Fastly CDN public IP ranges.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://www.fastly.com/documentation/reference/api/utils/public-ip-list/
+  owner: CybrefV2 (from api.fastly.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/fastly_ip_ranges.json
+  format: json
+  transform: SELECT unnest(addresses || ipv6_addresses) AS cidr FROM {source}
+  key: cidr
+  schedule: 5 7 * * *
+  quality:
+    rules:
+    - column: cidr
+      check: not_null
+      severity: error
+    - column: cidr
+      check: unique
+      severity: warning
+- id: filesec_extensions
+  name: FileSec
+  description: File extensions abused by attackers.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://filesec.io/
+  owner: CybrefV2 (from filesec.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/filesec_extensions.csv
+  format: csv
+  key: Extension
+  schedule: 33 7 * * *
+  quality:
+    rules:
+    - column: Extension
+      check: not_null
+      severity: error
+    - column: Extension
+      check: unique
+      severity: warning
+- id: firehol_level1
+  name: FireHOL Level 1
+  description: Aggregated "safe to block" networks (fullbogons, DROP, Feodo, DShield...).
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://iplists.firehol.org/
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/firehol_level1.txt
+  format: txt
+  key: value
+  schedule: 49 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: first_epss
+  name: EPSS
+  description: Exploit Prediction Scoring System - daily probability of exploitation for every CVE.
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - daily
+  homepage: https://www.first.org/epss/
+  owner: CybrefV2 (from epss.cyentia.com, epss.empiricalsecurity.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/first_epss.csv
+  format: csv
+  key: cve
+  schedule: 54 7 * * *
+  quality:
+    rules:
+    - column: cve
+      check: not_null
+      severity: error
+    - column: cve
+      check: unique
+      severity: warning
+- id: free_email_domains
+  name: Free email domains
+  description: Free webmail providers (gmail.com, gmx.fr...) - not corporate addresses.
+  category: Domains & Email
+  tags:
+  - cybref
+  - domains
+  - weekly
+  homepage: https://github.com/Kikobeats/free-email-domains
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/domains/free_email_domains.json
+  format: json
+  key: json
+  schedule: 15 7 * * *
+  quality:
+    rules:
+    - column: json
+      check: not_null
+      severity: error
+    - column: json
+      check: unique
+      severity: warning
+- id: gcp_ip_ranges
+  name: Google Cloud IP ranges
+  description: Google Cloud customer IP ranges.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://cloud.google.com/compute/docs/faq#find_ip_range
+  owner: CybrefV2 (from www.gstatic.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/gcp_ip_ranges.json
+  format: json
+  options:
+    records_path: prefixes
+  schedule: 22 7 * * *
+- id: github_advisories
+  name: GitHub Advisories
+  description: All GitHub-reviewed security advisories (OSV format) in one JSON array.
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - weekly
+  homepage: https://github.com/advisories
+  owner: CybrefV2
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/github_advisories.json.gz
+  format: json
+  key: id
+  schedule: 51 7 * * *
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: error
+    - column: id
+      check: unique
+      severity: warning
+- id: github_ip_ranges
+  name: GitHub IP ranges
+  description: GitHub service IP ranges (actions, hooks, git, pages...).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://docs.github.com/en/rest/meta/meta
+  owner: CybrefV2 (from api.github.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/github_ip_ranges.json
+  format: json
+  transform: SELECT service, unnest(cidrs) AS cidr FROM (UNPIVOT (SELECT hooks, web, api, git, github_enterprise_importer,
+    packages, pages, importer, actions, actions_macos, codespaces, copilot FROM {source}) ON COLUMNS(*) INTO NAME
+    service VALUE cidrs)
+  schedule: 58 7 * * *
+  key: cidr
+  quality:
+    rules:
+    - column: cidr
+      check: not_null
+      severity: warning
+    - column: cidr
+      check: unique
+      severity: warning
+- id: google_googlebot_ips
+  name: Googlebot IPs
+  description: IP ranges of Googlebot (verify that a "Googlebot" user agent is genuine).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://developers.google.com/search/docs/crawling-indexing/verifying-googlebot
+  owner: CybrefV2 (from developers.google.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/google_googlebot_ips.json
+  format: json
+  options:
+    records_path: prefixes
+  schedule: 17 7 * * *
+- id: google_ip_ranges
+  name: Google IP ranges
+  description: IP ranges of Google services (Gmail, APIs...) outside Google Cloud.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://support.google.com/a/answer/10026322
+  owner: CybrefV2 (from www.gstatic.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/google_ip_ranges.json
+  format: json
+  options:
+    records_path: prefixes
+  schedule: 16 7 * * *
+- id: google_play_devices
+  name: Android devices (Google Play)
+  description: Every Google Play certified Android device - brand, marketing name, device and model codes (re-encoded
+    to UTF-8).
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://support.google.com/googleplay/answer/1727131
+  owner: CybrefV2 (from storage.googleapis.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/google_play_devices.csv
+  format: csv
+  schedule: 52 7 * * *
+  key: Model
+  quality:
+    rules:
+    - column: Model
+      check: not_null
+      severity: warning
+    - column: Model
+      check: unique
+      severity: warning
+- id: google_special_crawlers_ips
+  name: Google special crawlers IPs
+  description: IP ranges of Google special-case crawlers (AdsBot...).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://developers.google.com/search/docs/crawling-indexing/verifying-googlebot
+  owner: CybrefV2 (from developers.google.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/google_special_crawlers_ips.json
+  format: json
+  options:
+    records_path: prefixes
+  schedule: 35 7 * * *
+- id: gtfobins
+  name: GTFOBins
+  description: Unix binaries usable to bypass local security restrictions.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://gtfobins.github.io/
+  owner: CybrefV2 (from gtfobins.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/gtfobins.json
+  format: json
+  options:
+    records_path: executables.*
+  key: _key
+  schedule: 42 7 * * *
+  quality:
+    rules:
+    - column: _key
+      check: not_null
+      severity: error
+    - column: _key
+      check: unique
+      severity: warning
+- id: hijacklibs
+  name: HijackLibs
+  description: DLL hijacking candidates (DLL, vulnerable executables, expected paths).
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://hijacklibs.net/
+  owner: CybrefV2 (from hijacklibs.net)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/hijacklibs.json
+  format: json
+  key: url
+  schedule: 53 7 * * *
+  quality:
+    rules:
+    - column: url
+      check: not_null
+      severity: error
+    - column: url
+      check: unique
+      severity: warning
+- id: iana_service_ports
+  name: IANA ports
+  description: Service name and transport protocol port number registry.
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://www.iana.org/assignments/service-names-port-numbers/
+  owner: CybrefV2 (from www.iana.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/iana_service_ports.csv
+  format: csv
+  schedule: 49 7 * * *
+- id: iana_tlds
+  name: IANA TLDs
+  description: Official list of top-level domains in the root zone.
+  category: Domains & Email
+  tags:
+  - cybref
+  - domains
+  - weekly
+  homepage: https://www.iana.org/domains/root/db
+  owner: CybrefV2 (from data.iana.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/domains/iana_tlds.txt
+  format: txt
+  key: value
+  schedule: 23 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: ieee_cid
+  name: IEEE CID
+  description: Company IDs.
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://standards.ieee.org/products-programs/regauth/
+  owner: CybrefV2 (from standards-oui.ieee.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/ieee_cid.csv
+  format: csv
+  key: Assignment
+  schedule: 5 7 * * *
+  quality:
+    rules:
+    - column: Assignment
+      check: not_null
+      severity: error
+    - column: Assignment
+      check: unique
+      severity: warning
+- id: ieee_iab
+  name: IEEE IAB
+  description: Individual Address Blocks (legacy).
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://standards.ieee.org/products-programs/regauth/
+  owner: CybrefV2 (from standards-oui.ieee.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/ieee_iab.csv
+  format: csv
+  key: Assignment
+  schedule: 39 7 * * *
+  quality:
+    rules:
+    - column: Assignment
+      check: not_null
+      severity: error
+    - column: Assignment
+      check: unique
+      severity: warning
+- id: ieee_manid
+  name: IEEE MANID
+  description: Manufacturer IDs.
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://standards.ieee.org/products-programs/regauth/
+  owner: CybrefV2 (from standards-oui.ieee.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/ieee_manid.csv
+  format: csv
+  key: Assignment
+  schedule: 50 7 * * *
+  quality:
+    rules:
+    - column: Assignment
+      check: not_null
+      severity: error
+    - column: Assignment
+      check: unique
+      severity: warning
+- id: ieee_oui
+  name: IEEE MA-L (OUI)
+  description: MAC address large-block assignments.
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://standards.ieee.org/products-programs/regauth/
+  owner: CybrefV2 (from standards-oui.ieee.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/ieee_oui.csv
+  format: csv
+  schedule: 41 7 * * *
+  key: Assignment
+  quality:
+    rules:
+    - column: Assignment
+      check: not_null
+      severity: warning
+    - column: Assignment
+      check: unique
+      severity: warning
+- id: ieee_oui36
+  name: IEEE MA-S (OUI-36)
+  description: MAC address small-block assignments.
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://standards.ieee.org/products-programs/regauth/
+  owner: CybrefV2 (from standards-oui.ieee.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/ieee_oui36.csv
+  format: csv
+  key: Assignment
+  schedule: 26 7 * * *
+  quality:
+    rules:
+    - column: Assignment
+      check: not_null
+      severity: error
+    - column: Assignment
+      check: unique
+      severity: warning
+- id: ihebski_default_credentials
+  name: Default credentials cheat sheet
+  description: 3,500+ vendor default credentials (product, username, password).
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/ihebski/DefaultCreds-cheat-sheet
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/ihebski_default_credentials.csv
+  format: csv
+  schedule: 21 7 * * *
+- id: iptoasn_ipv4
+  name: IPtoASN (IPv4)
+  description: IPv4 range -> ASN, country, AS name.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://iptoasn.com/
+  owner: CybrefV2 (from iptoasn.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/iptoasn_ipv4.tsv
+  format: tsv
+  options:
+    header: false
+    names:
+    - range_start
+    - range_end
+    - as_number
+    - country_code
+    - as_description
+  key: range_start
+  schedule: 6 7 * * *
+  quality:
+    rules:
+    - column: range_start
+      check: not_null
+      severity: error
+    - column: range_start
+      check: unique
+      severity: warning
+  search_columns:
+  - as_description
+  - country_code
+- id: iptoasn_ipv6
+  name: IPtoASN (IPv6)
+  description: IPv6 range -> ASN, country, AS name.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://iptoasn.com/
+  owner: CybrefV2 (from iptoasn.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/iptoasn_ipv6.tsv
+  format: tsv
+  options:
+    header: false
+    names:
+    - range_start
+    - range_end
+    - as_number
+    - country_code
+    - as_description
+  key: range_start
+  schedule: 39 7 * * *
+  quality:
+    rules:
+    - column: range_start
+      check: not_null
+      severity: error
+    - column: range_start
+      check: unique
+      severity: warning
+  search_columns:
+  - as_description
+  - country_code
+- id: lofl
+  name: LOFL
+  description: Living Off the Foreign Land cmdlets and binaries.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lofl-project.github.io/
+  owner: CybrefV2 (from lofl-project.github.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lofl.json
+  format: json
+  key: Name
+  schedule: 51 7 * * *
+  quality:
+    rules:
+    - column: Name
+      check: not_null
+      severity: error
+    - column: Name
+      check: unique
+      severity: warning
+- id: lolapps
+  name: LOLApps
+  description: Legitimate applications (Greenshot, Notepad++, Teams...) abusable for persistence or execution.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lolapps-project.github.io/
+  owner: CybrefV2 (from lolapps-project.github.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lolapps.json
+  format: json
+  key: Name
+  schedule: 47 7 * * *
+  quality:
+    rules:
+    - column: Name
+      check: not_null
+      severity: error
+    - column: Name
+      check: unique
+      severity: warning
+- id: lolbas
+  name: LOLBAS
+  description: Windows Living Off The Land binaries, scripts and libraries.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lolbas-project.github.io/
+  owner: CybrefV2 (from lolbas-project.github.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lolbas.json
+  format: json
+  key: Name
+  schedule: 44 7 * * *
+  quality:
+    rules:
+    - column: Name
+      check: not_null
+      severity: error
+    - column: Name
+      check: unique
+      severity: warning
+- id: lolc2
+  name: LOLC2
+  description: C2 frameworks hiding in legitimate services.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lolc2.github.io/
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lolc2.json
+  format: json
+  options:
+    records_path: '*'
+  key: _key
+  schedule: 57 7 * * *
+  quality:
+    rules:
+    - column: _key
+      check: not_null
+      severity: error
+    - column: _key
+      check: unique
+      severity: warning
+- id: loldrivers
+  name: LOLDrivers
+  description: Vulnerable and malicious Windows drivers (hashes, metadata).
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://www.loldrivers.io/
+  owner: CybrefV2 (from www.loldrivers.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/loldrivers.json
+  format: json
+  key: Id
+  schedule: 34 7 * * *
+  quality:
+    rules:
+    - column: Id
+      check: not_null
+      severity: error
+    - column: Id
+      check: unique
+      severity: warning
+- id: lolesxi
+  name: LOLESXi
+  description: VMware ESXi native binaries used by adversaries.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lolesxi-project.github.io/LOLESXi/
+  owner: CybrefV2 (from lolesxi-project.github.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lolesxi.json
+  format: json
+  key: Name
+  schedule: 16 7 * * *
+  quality:
+    rules:
+    - column: Name
+      check: not_null
+      severity: error
+    - column: Name
+      check: unique
+      severity: warning
+- id: lolrmm
+  name: LOLRMM
+  description: Remote Monitoring & Management tools abused by attackers (artifacts, domains).
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lolrmm.io/
+  owner: CybrefV2 (from lolrmm.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lolrmm.json
+  format: json
+  options:
+    maximum_depth: 3
+  schedule: 0 7 * * *
+  key: Name
+  quality:
+    rules:
+    - column: Name
+      check: not_null
+      severity: warning
+    - column: Name
+      check: unique
+      severity: warning
+- id: loobins
+  name: LOOBins
+  description: macOS Living Off the Orchard binaries.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://www.loobins.io/
+  owner: CybrefV2 (from www.loobins.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/loobins.json
+  format: json
+  key: name
+  schedule: 19 7 * * *
+  quality:
+    rules:
+    - column: name
+      check: not_null
+      severity: error
+    - column: name
+      check: unique
+      severity: warning
+- id: lothardware
+  name: LOTHardware
+  description: Hardware implants and malicious devices (USB, network, RF...).
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://github.com/enesilhaydin/lothardware
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lothardware.json
+  format: json
+  options:
+    records_path: products
+  key: title
+  schedule: 56 7 * * *
+  quality:
+    rules:
+    - column: title
+      check: not_null
+      severity: error
+    - column: title
+      check: unique
+      severity: warning
+- id: lots
+  name: LOTS Project
+  description: Legitimate trusted sites abused for C2, phishing or exfiltration.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lots-project.com/
+  owner: CybrefV2 (from lots-project.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lots.csv
+  format: csv
+  key: Website
+  schedule: 16 7 * * *
+  quality:
+    rules:
+    - column: Website
+      check: not_null
+      severity: error
+    - column: Website
+      check: unique
+      severity: warning
+- id: lottunnels_binaries
+  name: LoTtunnels
+  description: Tunneling binaries usable for proxying or exfiltration.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lottunnels.github.io/
+  owner: CybrefV2
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lottunnels_binaries.json
+  format: json
+  key: Name
+  schedule: 55 7 * * *
+  quality:
+    rules:
+    - column: Name
+      check: not_null
+      severity: error
+    - column: Name
+      check: unique
+      severity: warning
+- id: lottunnels_domains
+  name: LoTtunnels domains
+  description: Domains used by tunneling services.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://lottunnels.github.io/
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/lottunnels_domains.csv
+  format: csv
+  schedule: 35 7 * * *
+  key: domain
+  quality:
+    rules:
+    - column: domain
+      check: not_null
+      severity: warning
+    - column: domain
+      check: unique
+      severity: warning
+- id: malapi_winapi
+  name: MalAPI.io
+  description: Windows APIs abused by malware, by technique.
+  category: Living Off The Land
+  tags:
+  - cybref
+  - lol
+  - weekly
+  homepage: https://malapi.io/
+  owner: CybrefV2 (from malapi.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/lol/malapi_winapi.csv
+  format: csv
+  schedule: 45 7 * * *
+  key: API
+  quality:
+    rules:
+    - column: API
+      check: not_null
+      severity: warning
+    - column: API
+      check: unique
+      severity: warning
+- id: malwarefilter_phishing_domains
+  name: Phishing Filter
+  description: Phishing domains aggregated from OpenPhish, PhishTank and others, with false positives (top sites)
+    removed.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://gitlab.com/malware-filter/phishing-filter
+  owner: CybrefV2 (from malware-filter.gitlab.io)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/malwarefilter_phishing_domains.txt
+  format: txt
+  key: value
+  schedule: 42 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: metasploit_modules
+  name: Metasploit modules
+  description: Metadata of every Metasploit module (CVE / references, targets, rank) - "is there a weaponized exploit?".
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - weekly
+  homepage: https://github.com/rapid7/metasploit-framework
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/metasploit_modules.json
+  format: json
+  options:
+    records_path: '*'
+    records_key: module_key
+  key: module_key
+  schedule: 55 7 * * *
+  quality:
+    rules:
+    - column: module_key
+      check: not_null
+      severity: error
+    - column: module_key
+      check: unique
+      severity: warning
+- id: microsoft365_endpoints
+  name: Microsoft 365 endpoints
+  description: URLs and IP ranges used by Microsoft 365 (worldwide instance).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://learn.microsoft.com/en-us/microsoft-365/enterprise/microsoft-365-ip-web-service
+  owner: CybrefV2 (from endpoints.office.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/microsoft365_endpoints.json
+  format: json
+  key: id
+  schedule: 41 7 * * *
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: error
+    - column: id
+      check: unique
+      severity: warning
+- id: misp_warninglists
+  name: MISP warninglists
+  description: Known-benign indicators (public DNS, CDNs, cloud ranges, known-good Windows hashes...) to cut false
+    positives. One object per list (popularity rankings excluded).
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/MISP/misp-warninglists
+  owner: CybrefV2
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/misp_warninglists.json.gz
+  format: json
+  options:
+    records_path: '*'
+    records_key: list_id
+    maximum_object_size: 268435456
+  transform: SELECT * EXCLUDE (list), unnest(list) AS value FROM {source}
+  schedule: 2 7 * * *
+  key: value
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: warning
+    - column: value
+      check: unique
+      severity: warning
+- id: mitre_attack_enterprise
+  name: MITRE ATT&CK Enterprise
+  description: ATT&CK Enterprise matrix (STIX 2.1).
+  category: Frameworks & Knowledge Bases
+  tags:
+  - cybref
+  - frameworks
+  - weekly
+  homepage: https://attack.mitre.org/
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/frameworks/mitre_attack_enterprise.json
+  format: json
+  options:
+    records_path: objects
+  key: id
+  schedule: 18 7 * * *
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: error
+    - column: id
+      check: unique
+      severity: warning
+- id: mitre_attack_ics
+  name: MITRE ATT&CK ICS
+  description: ATT&CK for Industrial Control Systems (STIX 2.1).
+  category: Frameworks & Knowledge Bases
+  tags:
+  - cybref
+  - frameworks
+  - weekly
+  homepage: https://attack.mitre.org/matrices/ics/
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/frameworks/mitre_attack_ics.json
+  format: json
+  options:
+    records_path: objects
+  key: id
+  schedule: 37 7 * * *
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: error
+    - column: id
+      check: unique
+      severity: warning
+- id: mitre_attack_mobile
+  name: MITRE ATT&CK Mobile
+  description: ATT&CK Mobile matrix (STIX 2.1).
+  category: Frameworks & Knowledge Bases
+  tags:
+  - cybref
+  - frameworks
+  - weekly
+  homepage: https://attack.mitre.org/matrices/mobile/
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/frameworks/mitre_attack_mobile.json
+  format: json
+  options:
+    records_path: objects
+  key: id
+  schedule: 22 7 * * *
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: error
+    - column: id
+      check: unique
+      severity: warning
+- id: mitre_capec
+  name: MITRE CAPEC
+  description: Common Attack Pattern Enumeration and Classification.
+  category: Frameworks & Knowledge Bases
+  tags:
+  - cybref
+  - frameworks
+  - weekly
+  homepage: https://capec.mitre.org/
+  owner: CybrefV2 (from capec.mitre.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/frameworks/mitre_capec.xml
+  format: xml
+  key: ID
+  schedule: 42 7 * * *
+  quality:
+    rules:
+    - column: ID
+      check: not_null
+      severity: error
+    - column: ID
+      check: unique
+      severity: warning
+- id: mitre_cwe
+  name: MITRE CWE
+  description: Common Weakness Enumeration catalog.
+  category: Frameworks & Knowledge Bases
+  tags:
+  - cybref
+  - frameworks
+  - weekly
+  homepage: https://cwe.mitre.org/
+  owner: CybrefV2 (from cwe.mitre.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/frameworks/mitre_cwe.xml
+  format: xml
+  key: ID
+  schedule: 31 7 * * *
+  quality:
+    rules:
+    - column: ID
+      check: not_null
+      severity: error
+    - column: ID
+      check: unique
+      severity: warning
+- id: mitre_d3fend
+  name: MITRE D3FEND
+  description: Defensive countermeasures knowledge graph, mapped to ATT&CK (JSON-LD).
+  category: Frameworks & Knowledge Bases
+  tags:
+  - cybref
+  - frameworks
+  - weekly
+  homepage: https://d3fend.mitre.org/
+  owner: CybrefV2 (from d3fend.mitre.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/frameworks/mitre_d3fend.json
+  format: json
+  options:
+    records_path: '@graph'
+    map_inference_threshold: -1
+  key: '@id'
+  schedule: 0 7 * * *
+  quality:
+    rules:
+    - column: '@id'
+      check: not_null
+      severity: error
+    - column: '@id'
+      check: unique
+      severity: warning
+- id: mobile_cve
+  name: Mobile CVE
+  description: Samsung / Pixel / iPhone devices with their patch level, and the CVEs of every mobile bulletin (NVD-enriched).
+    Index + per-year CVE details.
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - weekly
+  homepage: https://github.com/emeryn/CybrefV2/tree/download/src/mcb
+  owner: CybrefV2
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2010.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2011.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2012.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2013.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2014.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2015.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2016.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2017.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2018.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2019.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2020.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2021.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2022.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2023.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2024.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2025.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/cves/2026.json
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/mobile/index.json
+  format: json
+  options:
+    records_path: '*'
+  schedule: 6 7 * * *
+  key: cve_id
+  quality:
+    rules:
+    - column: cve_id
+      check: not_null
+      severity: warning
+    - column: cve_id
+      check: unique
+      severity: warning
+- id: mthcht_blockchain_rpc
+  name: Blockchain RPC endpoints
+  description: Public blockchain RPC endpoints (abused for C2 resolution, e.g. EtherHiding).
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_blockchain_rpc.csv
+  format: csv
+  key: dest
+  schedule: 40 7 * * *
+  quality:
+    rules:
+    - column: dest
+      check: not_null
+      severity: error
+    - column: dest
+      check: unique
+      severity: warning
+- id: mthcht_doh_servers
+  name: DNS-over-HTTPS servers
+  description: Public DoH resolvers (DNS bypass and covert channel detection).
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_doh_servers.csv
+  format: csv
+  schedule: 50 7 * * *
+  key: dest_host
+  quality:
+    rules:
+    - column: dest_host
+      check: not_null
+      severity: warning
+    - column: dest_host
+      check: unique
+      severity: warning
+- id: mthcht_ransomware_extensions
+  name: Ransomware extensions
+  description: File extensions appended by ransomware families.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_ransomware_extensions.csv
+  format: csv
+  schedule: 2 7 * * *
+  key: file_path
+  quality:
+    rules:
+    - column: file_path
+      check: not_null
+      severity: warning
+    - column: file_path
+      check: unique
+      severity: warning
+- id: mthcht_ransomware_notes
+  name: Ransomware notes
+  description: Ransom note file names by ransomware family.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_ransomware_notes.csv
+  format: csv
+  schedule: 57 7 * * *
+  key: file_name
+  quality:
+    rules:
+    - column: file_name
+      check: not_null
+      severity: warning
+    - column: file_name
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_double_extensions
+  name: Suspicious double extensions
+  description: Deceptive double file extensions (invoice.pdf.exe...).
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_double_extensions.csv
+  format: csv
+  schedule: 32 7 * * *
+  key: file_name
+  quality:
+    rules:
+    - column: file_name
+      check: not_null
+      severity: warning
+    - column: file_name
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_firewall_rules
+  name: Suspicious firewall rules
+  description: Windows firewall rule names added by malware and offensive tools.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_firewall_rules.csv
+  format: csv
+  schedule: 53 7 * * *
+  key: rule_name
+  quality:
+    rules:
+    - column: rule_name
+      check: not_null
+      severity: warning
+    - column: rule_name
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_hostnames
+  name: Suspicious hostnames
+  description: Default hostnames of attacker machines (Kali, VPS images...).
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_hostnames.csv
+  format: csv
+  key: src_nt_host
+  schedule: 56 7 * * *
+  quality:
+    rules:
+    - column: src_nt_host
+      check: not_null
+      severity: error
+    - column: src_nt_host
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_mac_addresses
+  name: Suspicious MAC addresses
+  description: MAC prefixes of attack hardware, VMs and spoofed devices.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_mac_addresses.csv
+  format: csv
+  key: src_mac
+  schedule: 21 7 * * *
+  quality:
+    rules:
+    - column: src_mac
+      check: not_null
+      severity: error
+    - column: src_mac
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_mutexes
+  name: Suspicious mutexes
+  description: Mutex names created by malware families.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_mutexes.csv
+  format: csv
+  schedule: 29 7 * * *
+  key: mutex
+  quality:
+    rules:
+    - column: mutex
+      check: not_null
+      severity: warning
+    - column: mutex
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_named_pipes
+  name: Suspicious named pipes
+  description: Named pipes used by C2 frameworks and offensive tools.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_named_pipes.csv
+  format: csv
+  schedule: 48 7 * * *
+  key: pipe_name
+  quality:
+    rules:
+    - column: pipe_name
+      check: not_null
+      severity: warning
+    - column: pipe_name
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_ports
+  name: Suspicious ports
+  description: Network ports associated with malware and offensive tooling.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_ports.csv
+  format: csv
+  schedule: 42 7 * * *
+  key: dest_port
+  quality:
+    rules:
+    - column: dest_port
+      check: not_null
+      severity: warning
+    - column: dest_port
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_scheduled_tasks
+  name: Suspicious scheduled tasks
+  description: Scheduled task names used by malware for persistence.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_scheduled_tasks.csv
+  format: csv
+  schedule: 12 7 * * *
+  key: TaskName
+  quality:
+    rules:
+    - column: TaskName
+      check: not_null
+      severity: warning
+    - column: TaskName
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_services
+  name: Suspicious Windows services
+  description: Windows service names created by malware and offensive tools.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_services.csv
+  format: csv
+  schedule: 1 7 * * *
+  key: service_name
+  quality:
+    rules:
+    - column: service_name
+      check: not_null
+      severity: warning
+    - column: service_name
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_tlds
+  name: Suspicious TLDs
+  description: Top-level domains over-represented in malicious activity.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_tlds.csv
+  format: csv
+  schedule: 10 7 * * *
+  key: url_domain
+  quality:
+    rules:
+    - column: url_domain
+      check: not_null
+      severity: warning
+    - column: url_domain
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_usb_ids
+  name: Suspicious USB IDs
+  description: USB IDs of attack devices (Rubber Ducky, O.MG, Flipper...).
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_usb_ids.csv
+  format: csv
+  schedule: 11 7 * * *
+  key: device_id
+  quality:
+    rules:
+    - column: device_id
+      check: not_null
+      severity: warning
+    - column: device_id
+      check: unique
+      severity: warning
+- id: mthcht_suspicious_user_agents
+  name: Suspicious User-Agents
+  description: HTTP User-Agents of offensive tools, scanners and malware.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_suspicious_user_agents.csv
+  format: csv
+  schedule: 4 7 * * *
+  key: http_user_agent
+  quality:
+    rules:
+    - column: http_user_agent
+      check: not_null
+      severity: warning
+    - column: http_user_agent
+      check: unique
+      severity: warning
+- id: mthcht_windows_asr_rules
+  name: Windows ASR rules
+  description: Microsoft Defender Attack Surface Reduction rule names and GUIDs.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/mthcht/awesome-lists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/mthcht_windows_asr_rules.csv
+  format: csv
+  key: id
+  schedule: 18 7 * * *
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: error
+    - column: id
+      check: unique
+      severity: warning
+- id: mullvad_relays
+  name: Mullvad relays
+  description: Mullvad VPN servers with their IPv4/IPv6 addresses.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://mullvad.net/en/servers
+  owner: CybrefV2 (from api.mullvad.net)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/mullvad_relays.json
+  format: json
+  key: hostname
+  schedule: 31 7 * * *
+  quality:
+    rules:
+    - column: hostname
+      check: not_null
+      severity: error
+    - column: hostname
+      check: unique
+      severity: warning
+- id: nuclei_cve_templates
+  name: Nuclei CVE templates
+  description: CVEs with a Nuclei detection template (severity, CVSS, EPSS, template path).
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - weekly
+  homepage: https://github.com/projectdiscovery/nuclei-templates
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nuclei_cve_templates.jsonl
+  format: jsonl
+  key: ID
+  schedule: 37 7 * * *
+  quality:
+    rules:
+    - column: ID
+      check: not_null
+      severity: error
+    - column: ID
+      check: unique
+      severity: warning
+- id: nvd_cpe
+  name: NVD CPE dictionary
+  description: CPE 2.0 dictionary split by vendor initial (a.json.gz ... z, 0-9, other) - a single file would exceed
+    GitHub's 100 MB limit.
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - weekly
+  homepage: https://nvd.nist.gov/products/cpe
+  owner: CybrefV2
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/0-9.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/a.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/b.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/c.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/d.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/e.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/f.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/g.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/h.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/i.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/j.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/k.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/l.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/m.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/n.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/o.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/other.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/p.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/q.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/r.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/s.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/t.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/u.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/v.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/w.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/x.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/y.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/cpe/z.json.gz
+  format: json
+  options:
+    records_path: products
+  schedule: 51 7 * * *
+  key: cpeNameId
+  quality:
+    rules:
+    - column: cpeNameId
+      check: not_null
+      severity: warning
+    - column: cpeNameId
+      check: unique
+      severity: warning
+- id: nvd_cve
+  name: NVD CVE
+  description: Full NVD CVE JSON 2.0 feeds per year + recent + modified (original gzip, re-downloaded only when
+    NVD's sha256 changes).
+  category: Vulnerabilities & Exploits
+  tags:
+  - cybref
+  - vulnerabilities
+  - weekly
+  homepage: https://nvd.nist.gov/vuln/data-feeds
+  owner: CybrefV2
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2002.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2003.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2004.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2005.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2006.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2007.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2008.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2009.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2010.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2011.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2012.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2013.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2014.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2015.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2016.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2017.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2018.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2019.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2020.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2021.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2022.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2023.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2024.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2025.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-2026.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-modified.json.gz
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/vulnerabilities/nvd/nvdcve-2.0-recent.json.gz
+  format: json
+  options:
+    records_path: vulnerabilities
+  schedule: 43 7 * * *
+  key: id
+  quality:
+    rules:
+    - column: id
+      check: not_null
+      severity: warning
+    - column: id
+      check: unique
+      severity: warning
+- id: openai_chatgpt_user_ips
+  name: OpenAI ChatGPT-User IPs
+  description: IP ranges used when ChatGPT browses on behalf of a user.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://platform.openai.com/docs/bots
+  owner: CybrefV2 (from openai.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/openai_chatgpt_user_ips.json
+  format: json
+  options:
+    records_path: prefixes
+  key: ipv4Prefix
+  schedule: 50 7 * * *
+  quality:
+    rules:
+    - column: ipv4Prefix
+      check: not_null
+      severity: error
+    - column: ipv4Prefix
+      check: unique
+      severity: warning
+- id: openai_gptbot_ips
+  name: OpenAI GPTBot IPs
+  description: IP ranges of OpenAI's training crawler.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://platform.openai.com/docs/bots
+  owner: CybrefV2 (from openai.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/openai_gptbot_ips.json
+  format: json
+  options:
+    records_path: prefixes
+  key: ipv4Prefix
+  schedule: 33 7 * * *
+  quality:
+    rules:
+    - column: ipv4Prefix
+      check: not_null
+      severity: error
+    - column: ipv4Prefix
+      check: unique
+      severity: warning
+- id: openphish_urls
+  name: OpenPhish
+  description: Community feed of currently active phishing URLs.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://openphish.com/
+  owner: CybrefV2 (from openphish.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/openphish_urls.txt
+  format: txt
+  key: value
+  schedule: 9 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: oracle_ip_ranges
+  name: Oracle Cloud IP ranges
+  description: Oracle Cloud Infrastructure public IP ranges.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://docs.oracle.com/en-us/iaas/Content/General/Concepts/addressranges.htm
+  owner: CybrefV2 (from docs.oracle.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/oracle_ip_ranges.json
+  format: json
+  options:
+    records_path: regions
+  key: region
+  schedule: 56 7 * * *
+  quality:
+    rules:
+    - column: region
+      check: not_null
+      severity: error
+    - column: region
+      check: unique
+      severity: warning
+- id: pci_ids
+  name: PCI IDs
+  description: PCI vendors and devices (raw pci.ids format).
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://pci-ids.ucw.cz/
+  owner: CybrefV2 (from pci-ids.ucw.cz)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/pci_ids.txt
+  format: txt
+  schedule: 27 7 * * *
+  key: value
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: warning
+    - column: value
+      check: unique
+      severity: warning
+- id: proofpoint_et_compromised_ips
+  name: ET Compromised IPs
+  description: Proofpoint Emerging Threats list of known compromised hosts.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://rules.emergingthreats.net/
+  owner: CybrefV2 (from rules.emergingthreats.net)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/proofpoint_et_compromised_ips.txt
+  format: txt
+  key: value
+  schedule: 54 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: publicsuffix_list
+  name: Public Suffix List
+  description: Effective TLDs, needed to compute registrable domains.
+  category: Domains & Email
+  tags:
+  - cybref
+  - domains
+  - weekly
+  homepage: https://publicsuffix.org/
+  owner: CybrefV2 (from publicsuffix.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/domains/publicsuffix_list.txt
+  format: txt
+  schedule: 34 7 * * *
+  key: value
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: warning
+    - column: value
+      check: unique
+      severity: warning
+- id: ransomwarelive_groups
+  name: Ransomware.live groups
+  description: Ransomware groups with their leak sites, aliases and activity.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://www.ransomware.live/
+  owner: CybrefV2 (from api.ransomware.live)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/ransomwarelive_groups.json
+  format: json
+  key: name
+  schedule: 56 7 * * *
+  quality:
+    rules:
+    - column: name
+      check: not_null
+      severity: error
+    - column: name
+      check: unique
+      severity: warning
+- id: ransomwarelive_victims_recent
+  name: Ransomware.live victims
+  description: Latest victims claimed on ransomware leak sites (group, sector, country, dates).
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://www.ransomware.live/
+  owner: CybrefV2 (from api.ransomware.live)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/ransomwarelive_victims_recent.json
+  format: json
+  key: url
+  schedule: 54 7 * * *
+  quality:
+    rules:
+    - column: url
+      check: not_null
+      severity: error
+    - column: url
+      check: unique
+      severity: warning
+  merge:
+    enabled: true
+- id: redcanary_atomic_tests
+  name: Atomic Red Team
+  description: Index of Atomic Red Team tests (ATT&CK technique, test name, GUID, platform) to validate detections.
+  category: Frameworks & Knowledge Bases
+  tags:
+  - cybref
+  - frameworks
+  - weekly
+  homepage: https://atomicredteam.io/
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/frameworks/redcanary_atomic_tests.csv
+  format: csv
+  schedule: 44 7 * * *
+  key: Test GUID
+  quality:
+    rules:
+    - column: Test GUID
+      check: not_null
+      severity: warning
+    - column: Test GUID
+      check: unique
+      severity: warning
+- id: seclists_default_passwords
+  name: SecLists default credentials
+  description: Vendor default usernames and passwords.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/danielmiessler/SecLists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/seclists_default_passwords.csv
+  format: csv
+  schedule: 14 7 * * *
+- id: seclists_secret_keywords
+  name: SecLists secret keywords
+  description: Variable names that usually hold secrets.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/danielmiessler/SecLists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/seclists_secret_keywords.txt
+  format: txt
+  schedule: 3 7 * * *
+  key: value
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: warning
+    - column: value
+      check: unique
+      severity: warning
+- id: seclists_webshells
+  name: SecLists web shells
+  description: Known web shell and backdoor file names.
+  category: Detection Lists & Allowlists
+  tags:
+  - cybref
+  - detection
+  - weekly
+  homepage: https://github.com/danielmiessler/SecLists
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/detection/seclists_webshells.txt
+  format: txt
+  key: value
+  schedule: 15 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: spamhaus_asndrop
+  name: Spamhaus ASN-DROP
+  description: Autonomous systems operated by cybercriminals.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://www.spamhaus.org/blocklists/do-not-route-or-peer/
+  owner: CybrefV2 (from www.spamhaus.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/spamhaus_asndrop.jsonl
+  format: jsonl
+  schedule: 16 7 * * *
+  key: asn
+  quality:
+    rules:
+    - column: asn
+      check: not_null
+      severity: warning
+    - column: asn
+      check: unique
+      severity: warning
+- id: spamhaus_drop_ipv4
+  name: Spamhaus DROP (IPv4)
+  description: Do Not Route Or Peer - hijacked or criminal netblocks.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://www.spamhaus.org/blocklists/do-not-route-or-peer/
+  owner: CybrefV2 (from www.spamhaus.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/spamhaus_drop_ipv4.jsonl
+  format: jsonl
+  schedule: 37 7 * * *
+  key: cidr
+  quality:
+    rules:
+    - column: cidr
+      check: not_null
+      severity: warning
+    - column: cidr
+      check: unique
+      severity: warning
+- id: spamhaus_drop_ipv6
+  name: Spamhaus DROP (IPv6)
+  description: IPv6 counterpart of the DROP list.
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://www.spamhaus.org/blocklists/do-not-route-or-peer/
+  owner: CybrefV2 (from www.spamhaus.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/spamhaus_drop_ipv6.jsonl
+  format: jsonl
+  schedule: 36 7 * * *
+  key: cidr
+  quality:
+    rules:
+    - column: cidr
+      check: not_null
+      severity: warning
+    - column: cidr
+      check: unique
+      severity: warning
+- id: stamparm_ipsum
+  name: IPsum
+  description: Malicious IPs aggregated from 30+ blocklists, with the number of lists each IP appears on (filter
+    on >= 3 for a reliable set).
+  category: Threat Intelligence & IOCs
+  tags:
+  - cybref
+  - threat_intel
+  - daily
+  homepage: https://github.com/stamparm/ipsum
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/threat_intel/stamparm_ipsum.txt
+  format: txt
+  key: value
+  schedule: 42 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: teamcymru_fullbogons_ipv4
+  name: Team Cymru fullbogons (IPv4)
+  description: Unallocated and reserved IPv4 space - traffic from there is spoofed or hijacked.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://www.team-cymru.com/bogon-networks
+  owner: CybrefV2 (from www.team-cymru.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/teamcymru_fullbogons_ipv4.txt
+  format: txt
+  key: value
+  schedule: 28 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: teamcymru_fullbogons_ipv6
+  name: Team Cymru fullbogons (IPv6)
+  description: Unallocated and reserved IPv6 space.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://www.team-cymru.com/bogon-networks
+  owner: CybrefV2 (from www.team-cymru.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/teamcymru_fullbogons_ipv6.txt
+  format: txt
+  key: value
+  schedule: 25 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: tor_exit_ips
+  name: Tor exit IPs
+  description: Plain list of Tor exit IPs (TorDNSEL), ideal for quick matching.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - daily
+  homepage: https://check.torproject.org/
+  owner: CybrefV2 (from check.torproject.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/tor_exit_ips.txt
+  format: txt
+  key: value
+  schedule: 37 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: tor_exit_relays
+  name: Tor exit relays
+  description: Details of Tor exit relays (Onionoo).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - daily
+  homepage: https://metrics.torproject.org/onionoo.html
+  owner: CybrefV2 (from onionoo.torproject.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/tor_exit_relays.json
+  format: json
+  options:
+    records_path: relays
+  key: fingerprint
+  schedule: 43 7 * * *
+  quality:
+    rules:
+    - column: fingerprint
+      check: not_null
+      severity: error
+    - column: fingerprint
+      check: unique
+      severity: warning
+- id: tor_relays
+  name: Tor relays
+  description: Details of every running Tor relay (Onionoo).
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - daily
+  homepage: https://metrics.torproject.org/onionoo.html
+  owner: CybrefV2 (from onionoo.torproject.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/tor_relays.json
+  format: json
+  options:
+    records_path: relays
+  key: fingerprint
+  schedule: 9 7 * * *
+  quality:
+    rules:
+    - column: fingerprint
+      check: not_null
+      severity: error
+    - column: fingerprint
+      check: unique
+      severity: warning
+- id: tranco_top1m
+  name: Tranco Top 1M
+  description: Research-grade ranking of the top 1M domains (rank,domain).
+  category: Domains & Email
+  tags:
+  - cybref
+  - domains
+  - weekly
+  homepage: https://tranco-list.eu/
+  owner: CybrefV2 (from tranco-list.eu)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/domains/tranco_top1m.csv
+  format: csv
+  options:
+    header: false
+    names:
+    - rank
+    - domain
+  key: domain
+  schedule: 24 7 * * *
+  quality:
+    rules:
+    - column: domain
+      check: not_null
+      severity: error
+    - column: domain
+      check: unique
+      severity: warning
+  search_columns:
+  - domain
+- id: url_shorteners
+  name: URL shorteners
+  description: URL shortener domains (often used to hide phishing or malware links).
+  category: Domains & Email
+  tags:
+  - cybref
+  - domains
+  - weekly
+  homepage: https://github.com/PeterDaveHello/url-shorteners
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/domains/url_shorteners.txt
+  format: txt
+  key: value
+  schedule: 18 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: usb_ids
+  name: USB IDs
+  description: USB vendors and products as JSON ({vendor_id - name, products}).
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: http://www.linux-usb.org/usb-ids.html
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/usb_ids.json
+  format: json
+  options:
+    records_path: '*'
+  key: _key
+  schedule: 51 7 * * *
+  quality:
+    rules:
+    - column: _key
+      check: not_null
+      severity: error
+    - column: _key
+      check: unique
+      severity: warning
+- id: wireshark_manuf
+  name: Wireshark manuf
+  description: All IEEE MAC registries merged with short vendor names - the easiest MAC vendor lookup.
+  category: Standards & Hardware Registries
+  tags:
+  - cybref
+  - registries
+  - weekly
+  homepage: https://www.wireshark.org/tools/oui-lookup.html
+  owner: CybrefV2 (from www.wireshark.org)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/registries/wireshark_manuf.txt
+  format: txt
+  key: value
+  schedule: 31 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: x4bnet_datacenter_ipv4
+  name: X4BNet datacenter ranges
+  description: Datacenter and hosting IPv4 ranges.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://github.com/X4BNet/lists_vpn
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/x4bnet_datacenter_ipv4.txt
+  format: txt
+  key: value
+  schedule: 20 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning
+- id: x4bnet_vpn_ipv4
+  name: X4BNet VPN ranges
+  description: Commercial VPN provider IPv4 ranges.
+  category: 'Network: Cloud, ASN, Geo, Anonymizers, Crawlers'
+  tags:
+  - cybref
+  - network
+  - weekly
+  homepage: https://github.com/X4BNet/lists_vpn
+  owner: CybrefV2 (from raw.githubusercontent.com)
+  source:
+    type: http
+    urls:
+    - https://raw.githubusercontent.com/emeryn/CybrefV2/main/network/x4bnet_vpn_ipv4.txt
+  format: txt
+  key: value
+  schedule: 50 7 * * *
+  quality:
+    rules:
+    - column: value
+      check: not_null
+      severity: error
+    - column: value
+      check: unique
+      severity: warning

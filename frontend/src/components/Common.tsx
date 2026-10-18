@@ -70,7 +70,7 @@ export function CodeSnippet({ code, title }: { code: string; title?: string }) {
   );
 }
 
-export function RefreshButton({ id, running, size = 'sm' }: { id: string; running: boolean; size?: 'xs' | 'sm' }) {
+export function RefreshButton({ id, running, size = 'sm', merged = false }: { id: string; running: boolean; size?: 'xs' | 'sm'; merged?: boolean }) {
   const refresh = useRefresh();
   const cancel = useCancel();
   if (running)
@@ -115,6 +115,14 @@ export function RefreshButton({ id, running, size = 'sm' }: { id: string; runnin
               Downloads and processes the source again, even if unchanged
             </Text>
           </Menu.Item>
+          {merged && (
+            <Menu.Item leftSection={<IconRefresh size={14} />} onClick={() => refresh.mutate({ id, replace: true })}>
+              Replace with the source (new base)
+              <Text size="xs" c="dimmed">
+                Publishes the data of the source alone, instead of merging it as a delta
+              </Text>
+            </Menu.Item>
+          )}
         </Menu.Dropdown>
       </Menu>
     </Group>

@@ -26,9 +26,10 @@ export function useReferential(id: string, opts: { enabled?: boolean } = {}) {
 export function useRefresh() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, force }: { id: string; force?: boolean }) => api.refresh(id, force),
+    mutationFn: ({ id, force, replace }: { id: string; force?: boolean; replace?: boolean }) => api.refresh(id, force, replace),
     onSuccess: (run) => {
-      notifications.show({ title: 'Update started', message: `${run.ref_id}${run.force ? ' (forced rebuild)' : ''}`, color: 'blue' });
+      const how = run.replace ? ' (new base)' : run.force ? ' (forced rebuild)' : '';
+      notifications.show({ title: 'Update started', message: `${run.ref_id}${how}`, color: 'blue' });
       qc.invalidateQueries({ queryKey: ['referentials'] });
       qc.invalidateQueries({ queryKey: ['referential', run.ref_id] });
       qc.invalidateQueries({ queryKey: ['runs', run.ref_id] });

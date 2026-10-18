@@ -16,10 +16,13 @@ import {
   Tooltip,
 } from '@mantine/core';
 import {
+  IconShieldCheck,
   IconAlertTriangle,
   IconDatabaseEdit,
   IconFileImport,
   IconFolderShare,
+  IconGitMerge,
+  IconWorldShare,
   IconPencil,
   IconPin,
   IconApi,
@@ -53,6 +56,7 @@ import ChangesTab from './ref/ChangesTab';
 import DataTab from './ref/DataTab';
 import EditTab from './ref/EditTab';
 import HistoryTab from './ref/HistoryTab';
+import QualityTab from './ref/QualityTab';
 import SchemaTab from './ref/SchemaTab';
 import SearchTab from './ref/SearchTab';
 import SourceTab from './ref/SourceTab';
@@ -118,6 +122,24 @@ function Header({ r }: { r: ReferentialDetail }) {
                   </Badge>
                 </Tooltip>
               )}
+              {r.merge?.enabled && (
+                <Tooltip
+                  multiline
+                  maw={380}
+                  label={`Each new data set is a delta merged into the published data${r.key ? ` (same ${r.key}: replaced)` : ''}. ${r.merge.deltas ?? 0} delta(s) merged since the base${r.merge.base_at ? ` of ${fmtDate(r.merge.base_at)}` : ''}.`}
+                >
+                  <Badge variant="light" color="teal" leftSection={<IconGitMerge size={10} />}>
+                    deltas · {r.merge.deltas ?? 0}
+                  </Badge>
+                </Tooltip>
+              )}
+              {r.federation && (
+                <Tooltip multiline maw={380} label={`Replica of “${r.federation.remote_id}” of the RefExposer peer ${r.federation.peer}: definition and data come from there.`}>
+                  <Badge variant="light" color="blue" leftSection={<IconWorldShare size={10} />} tt="none">
+                    peer {r.federation.peer}
+                  </Badge>
+                </Tooltip>
+              )}
               {r.large && (
                 <Badge variant="light" color="indigo">
                   large volume
@@ -163,14 +185,14 @@ function Header({ r }: { r: ReferentialDetail }) {
                 Columns
               </Button>
             )}
-            {me?.is_admin && r.origin === 'database' && !internal && (
+            {me?.is_admin && r.origin === 'database' && !internal && !r.federation && (
               <Button component={Link} to={`/admin/referentials/${r.id}/edit`} variant="default" leftSection={<IconSettings size={16} />}>
                 Configure
               </Button>
             )}
             {r.has_data && <DownloadMenu refId={r.id} />}
             {r.access === 'manage' && !internal && !r.sync_path && <ImportButton r={r} />}
-            {r.access === 'manage' && !internal && <RefreshButton id={r.id} running={!!r.current_run} />}
+            {r.access === 'manage' && !internal && <RefreshButton id={r.id} running={!!r.current_run} merged={!!r.merge?.enabled} />}
           </Group>
         </Group>
 
@@ -202,7 +224,15 @@ function Header({ r }: { r: ReferentialDetail }) {
             {fmtRelative(r.last_checked_at)}
           </Info>
           <Info label="Schedule" hint={r.schedule ?? undefined}>
-            {internal ? 'On every edit' : r.sync_path ? 'When its files change' : pinned ? 'Suspended (frozen)' : describeCron(r.schedule)}
+            {internal
+              ? 'On every edit'
+              : r.sync_path
+                ? 'When its files change'
+                : pinned
+                  ? 'Suspended (frozen)'
+                  : r.federation && !r.schedule
+                    ? `With the peer ${r.federation.peer}`
+                    : describeCron(r.schedule)}
             {r.next_run_at && !internal && !pinned && (
               <Text size="xs" c="dimmed" fw={400}>
                 next {fmtRelative(r.next_run_at)}
@@ -349,6 +379,7 @@ const TABS: { value: string; label: string; icon: typeof IconTable; admin?: bool
   { value: 'edit', label: 'Edit', icon: IconDatabaseEdit, internal: true },
   { value: 'search', label: 'Search', icon: IconSearch },
   { value: 'schema', label: 'Schema & profile', icon: IconListDetails },
+  { value: 'quality', label: 'Quality', icon: IconShieldCheck },
   { value: 'changes', label: 'Changes', icon: IconGitCompare },
   { value: 'history', label: 'History', icon: IconHistory },
   { value: 'api', label: 'API', icon: IconApi },
@@ -423,6 +454,9 @@ export default function ReferentialPage() {
             </Tabs.Panel>
             <Tabs.Panel value="schema">
               <SchemaTab r={r} />
+            </Tabs.Panel>
+            <Tabs.Panel value="quality">
+              <QualityTab r={r} />
             </Tabs.Panel>
             <Tabs.Panel value="changes">
               <ChangesTab r={r} />

@@ -41,7 +41,18 @@ const theme = createTheme({
 });
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { staleTime: 5_000, refetchOnWindowFocus: false } },
+  defaultOptions: {
+    queries: {
+      staleTime: 5_000,
+      refetchOnWindowFocus: false,
+      // Only a network failure or a server error is worth asking again: a refused request (400, 403, 404...) or a
+      // query stopped by the timeout (408) gives the same answer, after the same wait
+      retry: (count, err) => {
+        const status = (err as { status?: number }).status;
+        return count < 2 && (status === undefined || (status >= 500 && status !== 504));
+      },
+    },
+  },
 });
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

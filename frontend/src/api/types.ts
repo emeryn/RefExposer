@@ -27,6 +27,8 @@ export interface Run {
   trigger: 'manual' | 'schedule' | 'startup' | 'upload' | 'inbox' | 'edit' | 'sync';
   user?: string | null;
   force: boolean;
+  /** merged referential: data set published alone (new base) */
+  replace?: boolean;
   status: RunStatus;
   phase: string;
   queued_at: string;
@@ -40,7 +42,62 @@ export interface Run {
   changes?: Changes | null;
   version?: number;
   downloaded_bytes?: number;
+  quality?: { score: number | null; status: 'ok' | 'warning' | 'failed' };
   logs?: RunLog[];
+}
+
+export type QualityCheckType = 'not_null' | 'unique' | 'format' | 'pattern' | 'values' | 'range' | 'length' | 'expression';
+
+export interface QualityRule {
+  name?: string | null;
+  column?: string | null;
+  check: QualityCheckType;
+  format?: string | null;
+  pattern?: string | null;
+  values?: (string | number)[];
+  min?: number | string | null;
+  max?: number | string | null;
+  min_length?: number | null;
+  max_length?: number | null;
+  expression?: string | null;
+  threshold?: number;
+  severity?: 'warning' | 'error';
+}
+
+export interface QualityCheckResult {
+  name: string;
+  column: string | null;
+  check: QualityCheckType;
+  severity: 'warning' | 'error';
+  threshold: number;
+  automatic: boolean;
+  ok: boolean;
+  pass_pct: number;
+  checked?: number;
+  failing?: number;
+  examples?: string[];
+  error?: string;
+  /** Not checked (uniqueness on a large referential) */
+  skipped?: boolean;
+}
+
+export interface QualityResult {
+  score: number | null;
+  status: 'ok' | 'warning' | 'failed';
+  rows: number | null;
+  checks: QualityCheckResult[];
+  checked_at: string;
+  duration: number;
+  recheck?: boolean;
+  /** Large referential: rules checked on a sample of blocks of rows */
+  sampled?: boolean;
+}
+
+export interface QualitySummary {
+  score: number | null;
+  status: 'ok' | 'warning' | 'failed';
+  failed: string[];
+  checked_at: string | null;
 }
 
 export interface ReferentialSummary {
@@ -84,6 +141,7 @@ export interface ReferentialSummary {
   data_updated_at: string | null;
   last_run: Run | null;
   current_run: Run | null;
+  quality?: QualitySummary | null;
   access: Access | null;
   pinned: { by: string | null; at: string; reason?: string } | null;
   /** data encrypted at rest; `encrypted`: state of the published version (until the next publication) */
@@ -92,6 +150,93 @@ export interface ReferentialSummary {
   manual_import: { origin: 'upload' | 'inbox'; by: string | null; at: string; files: string[]; run: string } | null;
   import_folder: string | null;
   sync_path: string | null;
+  /** deltas merged into the published version (settings and state since the base) */
+  merge?: MergeState | null;
+  /** replica of a referential of another RefExposer instance */
+  federation?: FederationInfo | null;
+}
+
+export interface MergeState {
+  enabled: boolean;
+  delete_column: string | null;
+  base_at?: string | null;
+  deltas?: number;
+  last_delta_rows?: number;
+  last_delta_deleted?: number;
+  last_merged_at?: string | null;
+}
+
+export interface FederationInfo {
+  peer: string;
+  remote_id: string;
+  remote_url: string | null;
+  transform: string | null;
+  remote_format: string | null;
+  remote_source: string | null;
+}
+
+export interface PeerReplica {
+  remote_id: string;
+  local_id: string | null;
+  name: string | null;
+  exists: boolean;
+  missing: boolean;
+  remote_version: number | null;
+  replicated_version: number | null;
+  remote_rows: number | null;
+  rows: number | null;
+  status: string | null;
+  last_success_at: string | null;
+}
+
+export interface SyncReport {
+  peer: string;
+  status: 'success' | 'warning' | 'error';
+  message: string;
+  created: string[];
+  updated: string[];
+  unchanged: string[];
+  updates_started: string[];
+  conflicts: { id: string; local_id: string; error: string }[];
+  errors: { id: string; local_id: string; error: string }[];
+  missing: string[];
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface Peer {
+  name: string;
+  url: string;
+  secret: string;
+  prefix: string;
+  datasets: string[];
+  schedule: string;
+  enabled: boolean;
+  category: string;
+  grant_groups: string[];
+  last_sync_at: string | null;
+  next_sync_at: string | null;
+  status: 'success' | 'warning' | 'error' | null;
+  message: string | null;
+  instance: { url: string | null; refexposer: string; account: string } | null;
+  replicas: PeerReplica[];
+  last_report: SyncReport | null;
+}
+
+export interface PeerDataset {
+  id: string;
+  name: string;
+  category: string;
+  kind: string;
+  format: string;
+  row_count: number | null;
+  version: number | null;
+  data_updated_at: string | null;
+  key: string | null;
+  confidential: boolean;
+  transform: string | null;
+  quality_rules: number;
+  federation: FederationInfo | null;
 }
 
 export interface ProfileEntry {
@@ -257,6 +402,8 @@ export interface SystemInfo {
 }
 
 export interface Me {
+  /** URL of the MCP data server when it is open to this account */
+  mcp_url?: string;
   id: number;
   username: string;
   display_name: string | null;
@@ -391,6 +538,8 @@ export interface SourceConfigDraft {
   /** HTTP Basic "user:password" (e.g. MaxMind account_id:license_key); ${REFEX_SOURCE_*} variables are expanded */
   basic_auth?: string | null;
   extract: string | null;
+  /** New attempts when the remote site fails (connection, timeout, HTTP 408 / 429 / 5xx); empty: server default (5) */
+  retries?: number | null;
   path?: string | null;
   /** git: HTTPS URL of the repository, branch / tag / commit, access token (private), user name of the token */
   repository?: string | null;
@@ -418,6 +567,7 @@ export interface DefinitionConfig {
   schedule: string | null;
   max_age: string | null;
   validation: { min_rows: number; max_drop_pct: number | null; unique_key: boolean };
+  quality?: { rules: QualityRule[] };
   enabled: boolean;
   confidential?: boolean;
   downloads: string[];
@@ -433,6 +583,9 @@ export interface DefinitionConfig {
   };
   /** Bloom filter or SQLite database updated by deltas */
   incremental?: { urls: string[]; format?: 'values' | 'bloom' | 'sql' | null; full_every?: string | null; max_fp_rate?: number | null } | null;
+  /** tables: each new data set is merged into the published version (deltas) */
+  merge?: { enabled: boolean; delete_column?: string | null } | null;
+  federation?: FederationInfo | null;
 }
 
 export interface Definition {
@@ -604,6 +757,7 @@ export interface AllSettings {
   mfa: MfaSettings;
   mcp: McpSettings;
   mcp_url: string;
+  mcp_user_url: string;
   smtp: SmtpSettings;
   local_login: boolean;
   log_level: LogLevel;
@@ -626,7 +780,7 @@ export interface SmtpSettings {
   timeout: number;
 }
 
-export type NotificationEvent = 'failure' | 'recovered' | 'published';
+export type NotificationEvent = 'failure' | 'recovered' | 'published' | 'quality';
 
 export interface NotificationChannel {
   id: string;
@@ -680,10 +834,52 @@ export interface ConfigImportResult {
   runs?: number;
 }
 
+export interface EndpointReferential {
+  referential: string;
+  name: string;
+  role: 'source' | 'delta' | 'git' | 'enrichment';
+  enabled: boolean;
+  schedule: string | null;
+  calls_per_day: number | null;
+  auth: string[];
+  secrets: string[];
+  health_status: string | null;
+  last_error: string | null;
+  last_contact: string | null;
+  last_download: string | null;
+  downloaded_bytes: number | null;
+  not_modified: boolean | null;
+}
+
+export interface EndpointHost {
+  host: string;
+  scheme: string;
+  urls: { url: string; referentials: EndpointReferential[]; calls_per_day: number; last_contact: string | null; shared: boolean }[];
+  url_count: number;
+  referentials: string[];
+  referential_count: number;
+  calls_per_day: number;
+  auth: string[];
+  secrets: string[];
+  roles: string[];
+  errors: string[];
+  last_contact: string | null;
+  downloaded_bytes: number;
+}
+
+export interface EndpointInventory {
+  hosts: EndpointHost[];
+  others: { kind: string; name: string; url: string; host: string; enabled: boolean; detail?: string; secrets?: string[] }[];
+  totals: { hosts: number; urls: number; referentials: number; calls_per_day: number; insecure_hosts: number; shared_urls: number };
+  local_sources: string[];
+}
+
 export interface McpSettings {
   enabled: boolean;
   account_ids: number[];
   read_only: boolean;
+  users_enabled: boolean;
+  user_groups: string[];
 }
 
 /** Secret of the secret manager: the value is write-only, never returned by the API. */
@@ -935,4 +1131,42 @@ export interface MfaChallenge {
   username: string;
   methods: { totp: boolean; webauthn: boolean; recovery_code: boolean };
   webauthn_available: boolean;
+}
+
+export interface StorageVolume {
+  name: string;
+  path: string;
+  total: number;
+  used: number;
+  free: number;
+  free_pct: number;
+  level: 'ok' | 'warning' | 'critical';
+}
+
+export interface StorageReferential {
+  id: string;
+  name: string | null;
+  kind: string | null;
+  /** data left by a deleted referential */
+  orphan: boolean;
+  rows: number | null;
+  status: string | null;
+  total: number;
+  categories: Record<string, number>;
+  keep_raw: boolean | null;
+  keep_previous: boolean | null;
+}
+
+export interface StorageReport {
+  computed_at: string;
+  duration: number;
+  partial: boolean;
+  reserve: number;
+  volumes: StorageVolume[];
+  categories: { id: string; label: string; size: number }[];
+  referentials: StorageReferential[];
+  system: { name: string; size: number }[];
+  outside: { name: string; size: number }[];
+  largest_files: { path: string; size: number }[];
+  data_total: number;
 }

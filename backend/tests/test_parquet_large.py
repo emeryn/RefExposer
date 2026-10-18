@@ -152,6 +152,7 @@ def no_wait(monkeypatch):
     from app import ingest
 
     monkeypatch.setattr(ingest.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ingest, "retry_wait", lambda attempt, retry_after=None: 0.0)
 
 
 def test_interrupted_download_is_resumed(range_server, tmp_path, no_wait):
@@ -166,19 +167,19 @@ def test_interrupted_download_is_resumed(range_server, tmp_path, no_wait):
     assert entry["sha256"] == hashlib.sha256(srv.data).hexdigest()
     assert [r["range"] for r in srv.requests] == [None, "bytes=100000-", "bytes=400000-"]
     assert all(r["if_range"] == '"v1"' for r in srv.requests[1:])
-    assert sum("Download interrupted" in line["msg"] for line in run.logs) == 2
+    assert sum("failed (peer closed connection" in line["msg"] and "resumed at" in line["msg"] for line in run.logs) == 2
     assert not (tmp_path / ".partial").exists() or not any((tmp_path / ".partial").iterdir())
 
 
-def test_download_resumed_by_the_next_run(range_server, tmp_path, no_wait, monkeypatch):
-    from app import ingest
+def test_download_resumed_by_the_next_run(range_server, tmp_path, no_wait):
     from app.ingest import Run, download
 
     srv, url = range_server
-    monkeypatch.setattr(ingest, "DOWNLOAD_ATTEMPTS", 1)
     srv.cuts = [250_000]
+    first = Run("t", "manual")
+    first.retries = 0  # no new attempt within the run
     with httpx.Client() as client, pytest.raises(httpx.TransportError):
-        download(client, url, tmp_path, {}, None, None, Run("t", "manual"), fmt="whole")
+        download(client, url, tmp_path, {}, None, None, first, fmt="whole")
     assert sum(p.stat().st_size for p in (tmp_path / ".partial").glob("*.part")) == 250_000
     run = Run("t", "manual")
     with httpx.Client() as client:
@@ -188,15 +189,15 @@ def test_download_resumed_by_the_next_run(range_server, tmp_path, no_wait, monke
     assert entry["sha256"] == hashlib.sha256(srv.data).hexdigest()  # bytes of the previous run hashed too
 
 
-def test_changed_source_is_downloaded_again(range_server, tmp_path, no_wait, monkeypatch):
-    from app import ingest
+def test_changed_source_is_downloaded_again(range_server, tmp_path, no_wait):
     from app.ingest import Run, download
 
     srv, url = range_server
-    monkeypatch.setattr(ingest, "DOWNLOAD_ATTEMPTS", 1)
     srv.cuts = [250_000]
+    first = Run("t", "manual")
+    first.retries = 0  # no new attempt within the run
     with httpx.Client() as client, pytest.raises(httpx.TransportError):
-        download(client, url, tmp_path, {}, None, None, Run("t", "manual"), fmt="whole")
+        download(client, url, tmp_path, {}, None, None, first, fmt="whole")
     # New version published meanwhile: If-Range no longer matches, the server sends the whole new file
     srv.data, srv.etag = bytes(reversed(range(256))) * 3000, '"v2"'
     run = Run("t", "manual")

@@ -60,6 +60,12 @@ def _me(user: CurrentUser, service: Service, db: Session | None = None, request:
             data["mfa"] = mfa.status(db, db_user, public_base(request) if request is not None else None)
     if user.is_admin and user.status == "active" and db is not None:
         data["pending_requests"] = db.scalar(select(func.count()).select_from(User).where(User.status == "pending")) or 0
+    if db is not None and request is not None:  # MCP data server open to this account: its URL (My account)
+        from .. import appsettings
+
+        cfg = appsettings.load(db, "mcp")
+        if cfg.users_enabled and (user.is_admin or not cfg.user_groups or set(cfg.user_groups) & set(user.groups)):  # type: ignore[attr-defined]
+            data["mcp_url"] = public_base(request).rstrip("/") + "/api/mcp/user"
     return data
 
 

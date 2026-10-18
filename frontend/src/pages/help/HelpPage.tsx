@@ -431,12 +431,30 @@ const ADMIN: Section[] = [
         </List>
         <H>SQLite databases and SQL deltas (NIST NSRL)</H>
         <P>
-          Format <b>SQLite database</b>: choose the table or view to publish (e.g. <Code>FILE</Code> for the NSRL). When the publisher
+          <b>NIST NSRL</b>: paste the URL of the NIST download page as the source. The NSRL mode is detected: choose the set in{' '}
+          <b>NIST NSRL publication</b> (e.g. <i>Modern, minimal</i>). The latest full database is downloaded once, then each quarterly
+          delta (SQL file) is found on the page and replayed into it, in release order: nothing to list or maintain. A delta the database
+          already holds is skipped, and a delta made for another release is refused without changing anything. The RDS 2.x conversion
+          described by NIST is built in: tables <Code>NSRLFile</Code> (SHA-1, MD5, CRC32, FileName, FileSize, ProductCode…),{' '}
+          <Code>NSRLProd</Code>, <Code>NSRLMfg</Code> and <Code>NSRLOS</Code>. A last column (<Code>SourceFile</Code>, or{' '}
+          <Code>source_file</Code> in <Code>FILE</Code>, <Code>PKG</Code>…) gives the publication each row comes from: the full
+          database or the delta that added it.
+        </P>
+        <P>
+          Other SQLite databases: choose the table or view to publish (e.g. <Code>FILE</Code> for the NSRL). When the publisher
           provides SQL deltas, list their URLs in the <b>Deltas</b> field, oldest first: the full database is kept and each delta is
           applied once, in this order, in a transaction (a broken delta changes nothing). Add each new delta at the end of the list, or
           import it by hand with the <b>Import</b> button (<Code>.sql</Code> or the publisher's zip). A source of tens of GB is not
           analysed by the preview: set the format and the table by hand, the import runs in the background. For the NSRL, prefer the{' '}
           <i>minimal</i> database (distinct hashes, a few times smaller).
+        </P>
+        <H>Deltas merged into a table</H>
+        <P>
+          With <b>Deltas › Merge each new data set into the published data</b> in the definition, a table accumulates instead of being
+          replaced: each download of the URL, import or file dropped in the import folder is merged. With a key, a row of the delta
+          replaces the published row with the same key; without key, rows are added (identical rows kept once). An optional deletion
+          column removes the rows flagged <Code>true</Code>. To start again from a full data set: <b>Import › New base</b>, or{' '}
+          <b>Update › Replace with the source</b>.
         </P>
         <H>Validation and corrupted sources</H>
         <P>
@@ -478,6 +496,32 @@ const ADMIN: Section[] = [
           in 120–270 ms, batches of 1,000 values in about 2.5 s, against 5–8 s for a full scan without sorting. Above{' '}
           <Code>REFEX_LARGE_ROWS</Code> (50 million rows by default), RefExposer samples the profile, disables facets and change
           tracking, offers Parquet downloads only and stops queries after <Code>REFEX_QUERY_TIMEOUT</Code> seconds.
+        </P>
+        <P>
+          Sources of tens of GB: a <Code>.parquet.gz</Code> is decompressed while it is downloaded (the compressed file never sits on the
+          disk), and a barely compressed Parquet is rewritten with zstd when the disk can hold the copy. An update never fills the disk:
+          it keeps <Code>REFEX_MIN_FREE_DISK</Code> free (5 GB) and ends as <i>rejected</i> with the figures instead, the published version
+          staying online. When space is short, the previous version is removed first.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: 'admin-peers',
+    title: 'Synchronized instances',
+    admin: true,
+    body: () => (
+      <>
+        <P>
+          An instance can replicate the referentials of another RefExposer instance, with their definitions (description, key, quality
+          rules, SQL transformation, indexes, downloads). <b>On the instance that shares</b>: create a service account, give its group the
+          read right on the referentials to share, and an API token. <b>Here</b>: <b>Administration › Synchronized instances › Add a peer</b>,
+          with its URL and the token, then choose the referentials (or all of them) and a prefix for the local identifiers.
+        </P>
+        <P>
+          Each synchronization (on the schedule of the peer, or <b>Synchronize now</b>) creates or updates the replicas, then downloads the
+          published data of those whose version changed over there. Replicas are read-only here; a referential no longer shared stays with
+          its last data, marked <i>missing over there</i>. The token stays in the secret manager, only sent to the host of the peer.
         </P>
       </>
     ),
