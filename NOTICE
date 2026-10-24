@@ -1,0 +1,25 @@
+RefExposer
+Copyright 2026 emeryn
+
+This product includes software developed by the RefExposer contributors.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party code included in this repository
+================================================================================
+
+Most third-party software is a declared dependency, installed at build time and
+listed with its version in:
+
+  backend/requirements.txt, backend/requirements-dev.txt   (Python, pinned with hashes)
+  frontend/package-lock.json                               (JavaScript)
+
+The licences of those dependencies are their own; nothing of them is copied into
+this repository. An SBOM of a built image is produced by scripts/sbom.sh.
+
+No third-party code is vendored in this repository: nothing is copied in, so
+every licence above belongs to a dependency that is fetched at build time.
+
+The applications for other tools, which are not published yet, do carry one
+vendored copy (a Splunk SDK, Apache License 2.0). This file gains its entry with
+their release.

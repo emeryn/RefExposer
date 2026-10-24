@@ -279,7 +279,7 @@ function FacetedSearch({ r }: { r: ReferentialDetail }) {
             radius="xl"
             placeholder={`Search ${r.name}${r.search_columns.length ? ` (${r.search_columns.slice(0, 4).join(', ')})` : ''}…`}
             leftSection={rows.isFetching ? <Loader size={16} /> : <IconSearch size={18} />}
-            rightSection={text ? <CloseButton onClick={() => setText('')} aria-label="Effacer" /> : null}
+            rightSection={text ? <CloseButton onClick={() => setText('')} aria-label="Clear the search" /> : null}
             value={text}
             onChange={(e) => setText(e.currentTarget.value)}
           />

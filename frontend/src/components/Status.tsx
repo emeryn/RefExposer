@@ -60,6 +60,7 @@ export const TRIGGERS: Record<string, string> = {
   inbox: 'Import folder',
   sync: 'Sync folder',
   edit: 'Edit',
+  upstream: 'Source referential updated',
 };
 
 export function RunStatusBadge({ status }: { status: RunStatus }) {

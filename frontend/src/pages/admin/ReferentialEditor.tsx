@@ -49,13 +49,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
-import type { DefinitionConfig, PreviewResult, Row, UploadResult } from '../../api/types';
+import type { CombineConfig, DefinitionConfig, PreviewResult, Row, UploadResult } from '../../api/types';
+import CombineFields from './CombineFields';
 import { DataGrid } from '../../components/DataGrid';
 import { QualityRulesEditor } from '../../components/Quality';
 import { SecretInput } from '../../components/SecretInput';
 import { describeCron, fmtBytes, fmtNumber } from '../../lib/format';
 
-type Mode = 'http' | 'upload' | 'local' | 'git';
+type Mode = 'http' | 'upload' | 'local' | 'git' | 'combine';
 
 const EMPTY: DefinitionConfig = {
   id: '',
@@ -66,6 +67,10 @@ const EMPTY: DefinitionConfig = {
   homepage: null,
   license: null,
   owner: null,
+  owner_team: null,
+  visibility: 'internal',
+  pii: null,
+  primary_key_columns: [],
   source: { type: 'http', urls: [''], headers: {}, extract: null },
   format: '',
   options: {},
@@ -87,6 +92,8 @@ const EMPTY: DefinitionConfig = {
     profile: 'full',
     track_changes: true,
     check_key: true,
+    time_travel: false,
+    max_snapshots: 10,
   },
 };
 
@@ -138,6 +145,8 @@ const DOWNLOAD_FORMATS = [
   { value: 'jsonl', label: 'JSON Lines' },
 ];
 
+const EMPTY_PII = { columns: [] as string[], strategy: 'partial' as const, reveal_groups: [] as string[], reveal_users: [] as number[], note: '' };
+
 function slugify(s: string) {
   return s
     .normalize('NFD')
@@ -154,10 +163,36 @@ function humanize(filename: string) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** Keep only the settings of `combine` that apply to its mode and to the chosen referentials (the API refuses the others). */
+function cleanCombine(c: DefinitionConfig): CombineConfig {
+  const combine = c.combine ?? { mode: 'union' as const };
+  const referentials = (c.source.referentials ?? []).filter(Boolean);
+  const kept: Record<string, string[]> = {};
+  for (const [id, columns] of Object.entries(combine.columns ?? {})) {
+    if (referentials.includes(id) && columns.length) kept[id] = columns;
+  }
+  if (combine.mode === 'enrich') {
+    const joinOn: Record<string, string> = {};
+    for (const [id, column] of Object.entries(combine.join_on ?? {})) {
+      if (referentials.slice(1).includes(id) && column) joinOn[id] = column;
+    }
+    return { mode: 'enrich', on: combine.on || null, join_on: joinOn, columns: kept, prefix: combine.prefix !== false };
+  }
+  return { mode: 'union', columns: kept, source_column: combine.source_column || null };
+}
+
 /** Remove empty values before sending the definition. */
 function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig> {
   const source =
-    mode === 'http'
+    mode === 'combine'
+      ? {
+          type: 'referential' as const,
+          referentials: (c.source.referentials ?? []).filter(Boolean),
+          urls: [],
+          headers: {},
+          extract: null,
+        }
+      : mode === 'http'
       ? {
           type: 'http' as const,
           urls: c.source.urls.map((u) => u.trim()).filter(Boolean),
@@ -179,16 +214,25 @@ function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig>
             username: c.source.username?.trim() || null,
           }
         : { type: 'local' as const, urls: [], headers: {}, extract: null, path: c.source.path || 'raw/**/*' };
+  const combined = mode === 'combine';
   return {
     ...c,
     homepage: c.homepage || null,
     license: c.license || null,
     owner: c.owner || null,
+    owner_team: c.owner_team || null,
+    // Masking only applies to a table, and only once a column is named
+    pii: c.pii?.columns.length && c.format !== 'bloom' && c.format !== 'mmdb' ? { ...c.pii, note: c.pii.note || '' } : null,
+    primary_key_columns: c.storage.time_travel ? c.primary_key_columns ?? [] : [],
     transform: c.transform?.trim() ? c.transform : null,
     schedule: c.schedule || null,
     max_age: c.max_age || null,
     category: c.category || 'General',
     source,
+    // A unified referential reads the published data of its sources: no format or reading option to set
+    format: combined ? 'parquet' : c.format,
+    options: combined ? {} : c.options,
+    combine: combined ? cleanCombine(c) : null,
     // Deltas: Bloom filters and SQLite databases downloaded from a URL only
     // NIST NSRL: the deltas are found on the NIST page
     incremental:
@@ -197,7 +241,7 @@ function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig>
         : null,
     // Merged deltas: tables fed by files only
     merge:
-      c.merge?.enabled && c.format !== 'bloom' && c.format !== 'mmdb' && !c.options.nsrl
+      c.merge?.enabled && !combined && c.format !== 'bloom' && c.format !== 'mmdb' && !c.options.nsrl
         ? { enabled: true, delete_column: (c.key && c.merge.delete_column?.trim()) || null }
         : null,
   };
@@ -256,7 +300,9 @@ export default function ReferentialEditor() {
     };
     if (!c.source.urls.length) c.source.urls = [''];
     setDraft(c);
-    setMode(c.source.type === 'local' ? 'local' : c.source.type === 'git' ? 'git' : 'http');
+    setMode(
+      c.source.type === 'local' ? 'local' : c.source.type === 'git' ? 'git' : c.source.type === 'referential' ? 'combine' : 'http',
+    );
     setOptionsText(JSON.stringify(c.options ?? {}, null, 2));
     setHeaders(Object.entries(c.source.headers ?? {}).map(([k, v]) => ({ k, v: String(v) })));
     setIdTouched(true);
@@ -276,6 +322,7 @@ export default function ReferentialEditor() {
   };
 
   const previewSource = () => {
+    if (mode === 'combine') return { type: 'referential', referentials: (draft.source.referentials ?? []).filter(Boolean) };
     if (mode === 'upload') return { type: 'upload', upload_id: upload?.upload_id };
     if (mode === 'local') return { type: 'local', path: draft.source.path };
     if (mode === 'git')
@@ -308,6 +355,10 @@ export default function ReferentialEditor() {
         // Editing: masked credentials (never shown again) are replaced by the stored values
         referential_id: id ?? null,
         refresh: !!opts.refresh,
+        // Unified referential: how its sources are combined
+        combine: mode === 'combine' ? cleanCombine(draft) : null,
+        key: draft.key,
+        confidential: !!draft.confidential,
       });
       setPreview(res);
       const applied = res.applied_options ?? {};
@@ -363,7 +414,10 @@ export default function ReferentialEditor() {
   });
 
   const columns = preview?.columns ?? [];
-  const columnOptions = columns.map((c) => ({ value: c.name, label: `${c.name} · ${c.type.toLowerCase()}` }));
+  // Suggestions for the key, the search and the large volume options: the preview, or the published version when the
+  // source is too large to be analysed (the names can always be typed by hand)
+  const knownColumns = columns.length ? columns : current?.columns ?? [];
+  const columnNames = knownColumns.map((c) => c.name);
   const previewRows = useMemo(
     () => (preview?.rows ?? []).map((r) => Object.fromEntries(columns.map((c, i) => [c.name, r[i]])) as Row),
     [preview, columns],
@@ -375,9 +429,11 @@ export default function ReferentialEditor() {
         ? /^https?:\/\/.+/.test((draft.source.repository ?? '').trim()) && !!draft.source.path?.trim()
         : mode === 'upload'
           ? !!upload
-          : true;
+          : mode === 'combine'
+            ? (draft.source.referentials ?? []).filter(Boolean).length >= (draft.combine?.mode === 'enrich' ? 2 : 1)
+            : true;
   const previewOk = !!preview && !preview.error;
-  const keyCandidates = columns.filter((c) => /(^id$|_id$|code|key|cle|clé|^cve|^iso)/i.test(c.name)).map((c) => c.name);
+  const keyCandidates = knownColumns.filter((c) => /(^id$|_id$|code|key|cle|clé|^cve|^iso)/i.test(c.name)).map((c) => c.name);
 
   if (editing && loadingExisting) return <Loader />;
   if (editing && existing?.kind === 'internal')
@@ -424,15 +480,27 @@ export default function ReferentialEditor() {
                 onChange={(v) => {
                   setMode(v as Mode);
                   setPreview(null);
+                  if (v === 'combine') {
+                    // The published data of the sources is read as Parquet: nothing to detect
+                    setDraft((d) => ({
+                      ...d,
+                      format: 'parquet',
+                      options: {},
+                      combine: d.combine ?? { mode: 'union' },
+                    }));
+                    setOptionsText('{}');
+                  }
                 }}
                 data={[
                   { value: 'http', label: 'From a URL' },
                   { value: 'git', label: 'Git repository' },
                   { value: 'upload', label: editing ? 'Replace with a file' : 'Upload a file' },
+                  { value: 'combine', label: 'Other referentials' },
                   ...(editing && existing?.config.source.type === 'local' ? [{ value: 'local', label: 'Current files' }] : []),
                 ]}
                 w="fit-content"
               />
+              {mode === 'combine' && <CombineFields draft={draft} set={set} referentials={meta?.referentials ?? []} part="sources" />}
               {mode === 'http' && (
                 <Stack gap="xs">
                   <Text size="sm" c="dimmed">
@@ -638,11 +706,14 @@ export default function ReferentialEditor() {
         </Stepper.Step>
 
         {/* ------------------------------------------------------------ 2. Reading & preview */}
-        <Stepper.Step label="Reading" description="Format, options, preview">
+        <Stepper.Step label="Reading" description={mode === 'combine' ? 'How they are combined' : 'Format, options, preview'}>
           <Grid mt="md" gutter="md">
             <Grid.Col span={{ base: 12, lg: 4 }}>
               <Card padding="lg">
                 <Stack gap="sm">
+                  {mode === 'combine' ? (
+                    <CombineFields draft={draft} set={set} referentials={meta?.referentials ?? []} part="settings" />
+                  ) : (
                   <Select
                     label="Format"
                     description={preview ? `Detected: ${preview.detected_format}` : undefined}
@@ -654,6 +725,7 @@ export default function ReferentialEditor() {
                     }}
                     allowDeselect={false}
                   />
+                  )}
                   {(fmt === 'csv' || fmt === 'tsv') && (
                     <>
                       {preview?.sniff && (
@@ -830,7 +902,7 @@ export default function ReferentialEditor() {
                       />
                     </OptionField>
                   )}
-                  {fmt !== 'bloom' && fmt !== 'mmdb' && !draft.options.nsrl && !draft.incremental?.urls.length && (
+                  {fmt !== 'bloom' && fmt !== 'mmdb' && mode !== 'combine' && !draft.options.nsrl && !draft.incremental?.urls.length && (
                     <OptionField
                       label="Deltas"
                       description={`Each new data set (download of the URL, import, import folder) is merged into the published data instead of replacing it${draft.key ? `: a row with the same ${draft.key} replaces the published one` : ': its rows are added (identical rows kept once); set a key to replace rows'}. A new base can still be imported (Import › New base, or Update › Replace).`}
@@ -857,11 +929,52 @@ export default function ReferentialEditor() {
                     </OptionField>
                   )}
                   {fmt === 'xlsx' && (
-                    <SimpleGrid cols={2} spacing="xs">
-                      <TextInput size="xs" label="Sheet" placeholder="first" value={String(draft.options.sheet ?? '')} onChange={(e) => setOption('sheet', e.currentTarget.value)} />
-                      <TextInput size="xs" label="Range" placeholder="e.g. A1:F500" value={String(draft.options.range ?? '')} onChange={(e) => setOption('range', e.currentTarget.value)} />
-                    </SimpleGrid>
+                    <>
+                      <SimpleGrid cols={2} spacing="xs">
+                        <Autocomplete
+                          size="xs"
+                          label="Sheet"
+                          description={preview?.records_path_candidates.length ? `Sheets: ${preview.records_path_candidates.join(', ')}` : undefined}
+                          data={preview?.records_path_candidates ?? []}
+                          placeholder={preview?.records_path_candidates[0] ?? 'first'}
+                          value={String(draft.options.sheet ?? '')}
+                          onChange={(v) => setOption('sheet', v)}
+                        />
+                        <TextInput size="xs" label="Range" placeholder="e.g. A1:F500" value={String(draft.options.range ?? '')} onChange={(e) => setOption('range', e.currentTarget.value)} />
+                        <Select
+                          size="xs"
+                          label="Header row"
+                          data={[{ value: '', label: 'auto' }, { value: 'true', label: 'yes' }, { value: 'false', label: 'no' }]}
+                          value={draft.options.header === undefined ? '' : String(draft.options.header)}
+                          onChange={(v) => setOption('header', v === '' || v == null ? undefined : v === 'true')}
+                        />
+                      </SimpleGrid>
+                      <Switch
+                        size="xs"
+                        label="Read everything as text (mixed columns, leading zeros)"
+                        checked={!!draft.options.all_varchar}
+                        onChange={(e) => setOption('all_varchar', e.currentTarget.checked || undefined)}
+                      />
+                      <Text size="xs" c="dimmed">
+                        A column takes the type of its first value: one text cell further down (a comment in a column of numbers)
+                        makes the read fail. The analysis then switches this on by itself; cast the columns back with a SQL
+                        transformation, e.g. <Code>{'SELECT * REPLACE (TRY_CAST(score AS DOUBLE) AS score) FROM {source}'}</Code>.
+                      </Text>
+                      <Switch
+                        size="xs"
+                        label="Ignore cells that do not fit their column (they become empty)"
+                        checked={!!draft.options.ignore_errors}
+                        onChange={(e) => setOption('ignore_errors', e.currentTarget.checked || undefined)}
+                      />
+                      <Switch
+                        size="xs"
+                        label="Stop at the first empty row"
+                        checked={draft.options.stop_at_empty !== false}
+                        onChange={(e) => setOption('stop_at_empty', e.currentTarget.checked ? undefined : false)}
+                      />
+                    </>
                   )}
+                  {mode !== 'combine' && (
                   <JsonInput
                     size="xs"
                     label="All reader options (JSON)"
@@ -880,6 +993,7 @@ export default function ReferentialEditor() {
                     minRows={2}
                     formatOnBlur
                   />
+                  )}
                   {fmt !== 'bloom' && fmt !== 'mmdb' && (
                   <OptionField
                     label="SQL transformation (optional)"
@@ -1013,35 +1127,63 @@ export default function ReferentialEditor() {
                 <SimpleGrid cols={2} spacing="sm">
                   <Autocomplete label="Category" data={meta?.categories ?? []} value={draft.category} onChange={(v) => set('category', v)} placeholder="General" />
                   <TagsInput label="Tags" value={draft.tags} onChange={(v) => set('tags', v)} />
-                  <TextInput label="Producer" value={draft.owner ?? ''} onChange={(e) => set('owner', e.currentTarget.value)} />
                   <TextInput label="License" value={draft.license ?? ''} onChange={(e) => set('license', e.currentTarget.value)} />
+                  <TextInput label="Reference website" placeholder="https://…" value={draft.homepage ?? ''} onChange={(e) => set('homepage', e.currentTarget.value)} />
                 </SimpleGrid>
-                <TextInput label="Reference website" placeholder="https://…" value={draft.homepage ?? ''} onChange={(e) => set('homepage', e.currentTarget.value)} />
+                <Select
+                  label="Visibility"
+                  description="Shown on every card and page: it decides how the data may be handled, quoted and passed on."
+                  data={[
+                    { value: 'internal', label: 'Internal — company data' },
+                    { value: 'public', label: 'Public — open data or an external feed' },
+                  ]}
+                  value={draft.visibility ?? 'internal'}
+                  onChange={(v) => set('visibility', (v ?? 'internal') as 'internal' | 'public')}
+                  allowDeselect={false}
+                />
+                <SimpleGrid cols={2} spacing="sm">
+                  <TextInput
+                    label="Owner"
+                    description="Who answers for this data (name or e-mail)"
+                    placeholder="firstname.lastname@example.com"
+                    value={draft.owner ?? ''}
+                    onChange={(e) => set('owner', e.currentTarget.value)}
+                  />
+                  <TextInput
+                    label="Team"
+                    placeholder="e.g. Security, Data platform"
+                    value={draft.owner_team ?? ''}
+                    onChange={(e) => set('owner_team', e.currentTarget.value)}
+                  />
+                </SimpleGrid>
               </Stack>
             </Card>
             <Stack>
               <Card padding="lg">
                 <Stack gap="sm">
                   <Title order={5}>Querying</Title>
-                  <Select
+                  <Autocomplete
                     label="Key"
                     description={`Column identifying a row: exact lookup (/lookup), tracking of additions/removals/changes.${keyCandidates.length ? ` Suggestion: ${keyCandidates.join(', ')}` : ''}`}
-                    data={columnOptions}
-                    value={draft.key}
-                    onChange={(v) => set('key', v)}
-                    searchable
-                    clearable
-                    placeholder={columns.length ? 'None' : 'Analyse the source first'}
+                    data={columnNames}
+                    value={draft.key ?? ''}
+                    onChange={(v) => set('key', v || null)}
+                    placeholder={columnNames.length ? 'None' : 'Name of the column'}
                   />
-                  <MultiSelect
+                  <TagsInput
                     label="Full-text search columns"
-                    description="Default: all text columns."
-                    data={columnOptions}
+                    description="Default: all text columns. On a large volume, the search needs a sorted or indexed column (below)."
+                    data={columnNames}
                     value={draft.search_columns}
                     onChange={(v) => set('search_columns', v)}
-                    searchable
                     clearable
                   />
+                  {!columnNames.length && (
+                    <Text size="xs" c="dimmed">
+                      The source was not analysed (too large, or not reachable yet): type the column names as they appear in the file.
+                      They are checked by the import, which reports the ones it did not find.
+                    </Text>
+                  )}
                   {fmt !== 'bloom' && fmt !== 'mmdb' && (
                     <Accordion variant="contained">
                       <Accordion.Item value="storage">
@@ -1054,25 +1196,26 @@ export default function ReferentialEditor() {
                           <Stack gap="xs">
                             <Text size="xs" c="dimmed">
                               For hundreds of millions of rows (passive DNS…): the data is written sorted, and sorted copies ("indexes")
-                              make exact, prefix and range searches on these columns nearly instant.
+                              make exact, prefix and range searches on these columns nearly instant. Above{' '}
+                              <Code>REFEX_LARGE_ROWS</Code> rows they are also the <b>only</b> columns the text search and the sort can
+                              use: a referential without them can be read page by page but not searched. Type the names when the source
+                              is too large to be analysed.
                             </Text>
-                            <MultiSelect
+                            <TagsInput
                               size="xs"
                               label="Sort on"
-                              description="The first column gets fast lookups."
-                              data={columnOptions}
+                              description="The first column gets fast lookups (exact, prefix, range) and the text search."
+                              data={columnNames}
                               value={draft.storage.sort_by}
                               onChange={(v) => set('storage', { ...draft.storage, sort_by: v })}
-                              searchable
                             />
-                            <MultiSelect
+                            <TagsInput
                               size="xs"
                               label="Indexes (additional sorted copies)"
-                              description="Each index takes about the size of the referential."
-                              data={columnOptions}
+                              description="Each index takes about the size of the referential, and gets the same fast lookups."
+                              data={columnNames}
                               value={draft.storage.indexes}
                               onChange={(v) => set('storage', { ...draft.storage, indexes: v })}
-                              searchable
                             />
                             <Select
                               size="xs"
@@ -1145,7 +1288,7 @@ export default function ReferentialEditor() {
                   {fmt !== 'bloom' && fmt !== 'mmdb' && (
                     <QualityRulesEditor
                       rules={draft.quality?.rules ?? []}
-                      columns={(columns.length ? columns : current?.columns ?? []).map((c) => c.name)}
+                      columns={columnNames}
                       onChange={(rules) => set('quality', { rules })}
                     />
                   )}
@@ -1160,6 +1303,95 @@ export default function ReferentialEditor() {
                   )}
                 </Stack>
               </Card>
+              {fmt !== 'bloom' && fmt !== 'mmdb' && (
+                <Card padding="lg">
+                  <Stack gap="sm">
+                    <Title order={5}>Personal data</Title>
+                    <Text size="xs" c="dimmed">
+                      Columns named here are masked <b>everywhere</b>: rows, exports, generated downloads, the SQL
+                      console, the MCP servers and the assistant. Seeing the real values takes the right given below
+                      <b> and</b> an explicit request from the user, which is written to the audit log. The published
+                      file still holds them, so tick <b>Confidential</b> as well when they must not be readable on
+                      disk either.
+                    </Text>
+                    <TagsInput
+                      label="Columns holding personal data"
+                      description="Empty: nothing is masked."
+                      data={columnNames}
+                      value={draft.pii?.columns ?? []}
+                      onChange={(columns) =>
+                        set('pii', columns.length ? { ...EMPTY_PII, ...(draft.pii ?? {}), columns } : null)
+                      }
+                      clearable
+                    />
+                    {!!draft.pii?.columns.length && (
+                      <>
+                        <Select
+                          label="How they are served"
+                          data={[
+                            { value: 'partial', label: 'Partial — first and last character kept (a@…e)' },
+                            { value: 'hash', label: 'Pseudonym — stable, so rows can still be grouped and joined' },
+                            { value: 'hide', label: 'Hidden — replaced by ***' },
+                          ]}
+                          value={draft.pii.strategy}
+                          onChange={(v) =>
+                            set('pii', { ...draft.pii!, strategy: (v ?? 'partial') as 'hide' | 'partial' | 'hash' })
+                          }
+                          allowDeselect={false}
+                        />
+                        <MultiSelect
+                          label="Groups allowed to reveal them"
+                          description="Administrators always may. The assistant never may: it cannot give the consent."
+                          data={(meta?.groups ?? []).map((g) => g.name)}
+                          value={draft.pii.reveal_groups}
+                          onChange={(v) => set('pii', { ...draft.pii!, reveal_groups: v })}
+                          placeholder={meta?.groups.length ? 'None' : 'No group defined'}
+                        />
+                        <TextInput
+                          label="Note"
+                          description="Shown beside the masked columns: what the data is, under which rule."
+                          placeholder="e.g. GDPR record R-14, kept 3 years"
+                          value={draft.pii.note}
+                          onChange={(e) => set('pii', { ...draft.pii!, note: e.currentTarget.value })}
+                        />
+                      </>
+                    )}
+                  </Stack>
+                </Card>
+              )}
+              {fmt !== 'bloom' && fmt !== 'mmdb' && (
+                <Card padding="lg">
+                  <Stack gap="sm">
+                    <Title order={5}>Time travel</Title>
+                    <Switch
+                      label="Keep every published version"
+                      description="Each new version is kept as a snapshot (a hard link on the Parquet file: no extra space until that version is replaced). Two versions can then be compared from the “History & diff” tab, and the assistant can be asked what changed."
+                      checked={!!draft.storage.time_travel}
+                      onChange={(e) => set('storage', { ...draft.storage, time_travel: e.currentTarget.checked })}
+                    />
+                    {draft.storage.time_travel && (
+                      <>
+                        <NumberInput
+                          label="Versions kept"
+                          description="The oldest ones are dropped beyond this."
+                          min={1}
+                          max={365}
+                          value={draft.storage.max_snapshots ?? 10}
+                          onChange={(v) => set('storage', { ...draft.storage, max_snapshots: Number(v) || 10 })}
+                        />
+                        <TagsInput
+                          label="Columns identifying a row"
+                          description={`Used to tell a modified row from a new one. Empty: the key${draft.key ? ` (${draft.key})` : ''}, and failing that the whole row — a change then reads as one removal and one addition.`}
+                          data={columnNames}
+                          value={draft.primary_key_columns ?? []}
+                          onChange={(v) => set('primary_key_columns', v)}
+                          clearable
+                        />
+                      </>
+                    )}
+                  </Stack>
+                </Card>
+              )}
               {!editing && (
                 <Card padding="lg">
                   <Title order={5} mb="xs">
@@ -1187,7 +1419,18 @@ export default function ReferentialEditor() {
               <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="xs">
                 <Text size="sm">Name: <b>{draft.name || '—'}</b></Text>
                 <Text size="sm">Identifier: <Code>{draft.id || '—'}</Code></Text>
-                <Text size="sm">Source: {mode === 'http' ? draft.source.urls.filter(Boolean).join(', ') : mode === 'git' ? `${draft.source.repository} · ${draft.source.path}${draft.source.ref ? ` @ ${draft.source.ref}` : ''}` : mode === 'upload' ? upload?.files.map((f) => f.name).join(', ') : 'current files'}</Text>
+                <Text size="sm">
+                  Source:{' '}
+                  {mode === 'http'
+                    ? draft.source.urls.filter(Boolean).join(', ')
+                    : mode === 'git'
+                      ? `${draft.source.repository} · ${draft.source.path}${draft.source.ref ? ` @ ${draft.source.ref}` : ''}`
+                      : mode === 'upload'
+                        ? upload?.files.map((f) => f.name).join(', ')
+                        : mode === 'combine'
+                          ? `${draft.combine?.mode === 'enrich' ? 'enrichment' : 'union'} of ${(draft.source.referentials ?? []).join(', ')}`
+                          : 'current files'}
+                </Text>
                 <Text size="sm">Format: {draft.format || '—'}</Text>
                 <Text size="sm">Key: {draft.key ?? 'none'}</Text>
                 <Text size="sm">Schedule: {describeCron(draft.schedule)}</Text>

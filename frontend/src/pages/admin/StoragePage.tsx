@@ -1,4 +1,4 @@
-import { Alert, Anchor, Badge, Button, Card, Code, Group, Loader, Progress, SimpleGrid, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
+import { Alert, Anchor, Badge, Button, Card, Code, Group, Loader, Progress, SimpleGrid, Stack, Table, Text, Tooltip } from '@mantine/core';
 import { IconAlertTriangle, IconRefresh } from '@tabler/icons-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -11,6 +11,7 @@ const COLORS: Record<string, string> = {
   published: 'indigo',
   indexes: 'violet',
   previous: 'grape',
+  snapshots: 'blue',
   base: 'cyan',
   sources: 'orange',
   downloading: 'red',
@@ -32,6 +33,9 @@ function hints(r: StorageReferential): string[] {
   if (big(c.downloading)) out.push('Interrupted download: resumed or removed by the next update');
   if (big(c.work)) out.push('Build in progress (or left by an interrupted one): removed by the next update');
   if (big(c.exports)) out.push('Generated downloads: rebuilt on demand');
+  // Hard links: the figure overstates what the snapshots really hold until the version they share is replaced
+  if (big(c.snapshots))
+    out.push('Past versions kept for time travel: lower storage.max_snapshots, or delete some from the History & diff tab');
   return out;
 }
 
@@ -101,7 +105,6 @@ export default function StoragePage() {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-start">
         <div>
-          <Title order={2}>Disk space</Title>
           <Text c="dimmed" size="sm">
             Free space of the volumes and what takes the space in the data folder. Read only: nothing is deleted from this page.
           </Text>

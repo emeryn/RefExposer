@@ -44,6 +44,10 @@ SERVICE_PASSWORD = "!service"  # never a valid password hash
 USER_STATUSES = ("active", "pending", "rejected")
 LEVELS = {"read": 1, "manage": 2}
 ALL_REFERENTIALS = "*"
+# Grant scope covering a whole category: "category:Threat intelligence". A referential identifier cannot
+# contain a colon, so the two forms never collide.
+CATEGORY_PREFIX = "category:"
+MAX_CATEGORY_LENGTH = 100
 
 user_groups = Table(
     "user_groups",
@@ -105,12 +109,17 @@ class Group(Base):
 
 
 class Grant(Base):
-    """Access granted to a user or a group on a referential ('*' = every referential)."""
+    """Access granted to a user or a group.
+
+    `referential_id` holds the scope: a referential identifier, `*` (every referential), or `category:<name>`
+    (every referential of that category, resolved at each request, so one added to the category later is
+    covered without touching the rights).
+    """
 
     __tablename__ = "grants"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    referential_id: Mapped[str] = mapped_column(String(64), index=True)
+    referential_id: Mapped[str] = mapped_column(String(128), index=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
     level: Mapped[str] = mapped_column(String(16), default="read")
@@ -229,6 +238,138 @@ class SourceSecret(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     created_by: Mapped[str | None] = mapped_column(String(64))
     updated_by: Mapped[str | None] = mapped_column(String(64))
+
+
+class Conversation(Base):
+    """Conversation of a user with the assistant, kept until the user deletes it.
+
+    It belongs to one account: the API filters on `user_id` and reports another user's conversation as unknown.
+    """
+
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="New conversation")
+    model: Mapped[str | None] = mapped_column(String(128))
+    # Agent mode asked for by the user on this conversation
+    agent: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now, index=True)
+
+
+class ChatMessage(Base):
+    """One message of a conversation. Assistant messages carry the trace of the tools they used."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(32), ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(String(1_000_000), default="")
+    # Assistant message: [{tool, arguments, ok, summary}] of the steps it went through
+    steps: Mapped[list | None] = mapped_column(JSON)
+    # Assistant message: [{kind: sql|file, ...}] handed to the user (a query to open in the console, a file)
+    artifacts: Mapped[list | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(String(2000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+    __table_args__ = (CheckConstraint("role in ('user', 'assistant')", name="ck_chat_messages_role"),)
+
+
+class ReferentialSnapshot(Base):
+    """Published version kept for time travel (`storage.time_travel`): the Parquet file of that version, and
+    what it held. The file is a hard link on the published file, so a snapshot costs nothing until the version
+    it shares its blocks with is replaced."""
+
+    __tablename__ = "referential_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    referential_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    row_count: Mapped[int | None] = mapped_column(Integer)
+    # Name of the file inside data/<id>/snapshots/
+    file: Mapped[str] = mapped_column(String(255))
+    size: Mapped[int | None] = mapped_column(Integer)
+    # Hash of the column names and types: two snapshots with different schemas are compared on their common columns
+    schema_hash: Mapped[str] = mapped_column(String(32), default="")
+    columns: Mapped[list | None] = mapped_column(JSON)
+    # The file is encrypted (the referential was confidential when it was published)
+    encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
+    run_id: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (UniqueConstraint("referential_id", "file", name="uq_snapshots_file"),)
+
+
+# Watchdog: how its runs are started, and what one found
+WATCHDOG_TRIGGERS = ("cron", "on_sync")
+WATCHDOG_STATUSES = ("ok", "finding", "error")
+SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+class WatchdogTask(Base):
+    """A scheduled investigation run by the assistant on a fixed set of referentials (watchdog.py).
+
+    It runs with the rights of the account it belongs to, narrowed to `referential_ids`: the agent cannot read
+    anything else, whatever the model asks for. Its answer is a structured verdict, and the recipients are only
+    told when it actually found something.
+    """
+
+    __tablename__ = "watchdog_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(String(500), default="")
+    # Account whose rights the investigation runs with (its author, or whoever an administrator chose)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # The only referentials this watchdog may read: chosen explicitly, never "everything"
+    referential_ids: Mapped[list] = mapped_column(JSON, default=list)
+    trigger_type: Mapped[str] = mapped_column(String(16), default="cron")
+    schedule: Mapped[str | None] = mapped_column(String(100))  # crontab expression (cron trigger)
+    prompt: Mapped[str] = mapped_column(String(8000), default="")
+    template: Mapped[str | None] = mapped_column(String(32))  # the pre-filled template it was created from
+    # Who is told when a finding is detected: e-mail addresses, and ids of configured notification channels
+    notify_emails: Mapped[list | None] = mapped_column(JSON)
+    notify_channels: Mapped[list | None] = mapped_column(JSON)
+    # Below this severity a finding is recorded but nobody is woken up
+    min_severity: Mapped[str] = mapped_column(String(16), default="LOW")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+
+    user: Mapped[User] = relationship(lazy="joined")
+
+    __table_args__ = (
+        CheckConstraint("trigger_type IN ('cron', 'on_sync')", name="ck_watchdog_trigger"),
+    )
+
+
+class WatchdogRun(Base):
+    """One investigation: what started it, what the agent concluded, and whether the recipients were told."""
+
+    __tablename__ = "watchdog_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("watchdog_tasks.id", ondelete="CASCADE"), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # cron · on_sync:<referential> · manual
+    trigger: Mapped[str] = mapped_column(String(80), default="cron")
+    status: Mapped[str] = mapped_column(String(16), default="ok")
+    finding_detected: Mapped[bool] = mapped_column(Boolean, default=False)
+    severity: Mapped[str | None] = mapped_column(String(16))
+    summary: Mapped[str] = mapped_column(String(2000), default="")
+    details_markdown: Mapped[str] = mapped_column(String(200_000), default="")
+    affected_items_count: Mapped[int | None] = mapped_column(Integer)
+    steps: Mapped[list | None] = mapped_column(JSON)  # tool calls of the agent, as in a conversation
+    # [{target, ok, detail}] of the notifications sent (empty when there was nothing to tell)
+    notifications: Mapped[list | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(String(2000))
+
+    __table_args__ = (CheckConstraint("status IN ('ok', 'finding', 'error')", name="ck_watchdog_run_status"),)
 
 
 class AuditLog(Base):

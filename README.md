@@ -2,6 +2,11 @@
 
 # RefExposer
 
+[![CI](https://github.com/emeryn/RefExposer/actions/workflows/ci.yml/badge.svg)](https://github.com/emeryn/RefExposer/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](backend/requirements.in)
+[![Node 22](https://img.shields.io/badge/node-22-blue.svg)](frontend/package.json)
+
 One tool to **expose, monitor and query heterogeneous referentials** (CSV, TSV, JSON, JSON Lines, TXT, XML, Parquet, Excel, Bloom filters, MaxMind DB / GeoIP), whether they are downloaded from the Internet, dropped as files, or maintained directly in the application.
 
 Each referential is declared from the administration interface (URL, Git repository or uploaded file, with a live preview) or in a YAML file. RefExposer downloads it, normalizes it to Parquet, checks the new version and publishes it. It is then available in four ways:
@@ -14,11 +19,17 @@ Each referential is declared from the administration interface (URL, Git reposit
 Beyond downloaded sources:
 
 - **Internal referentials** are created and edited inside RefExposer (row editor, file loads, write API), for the lists your teams maintain themselves.
+- **Unified referentials** combine several referentials into one: their rows put together, the rows of one enriched with the columns of the others, or any query of the SQL console kept as a referential. They are rebuilt whenever a source publishes a new version.
 - **Sync folder**: files pushed into a folder (scp / rsync over ssh, every week for instance) become referentials by themselves, imported again when they change.
 - **Manual imports**: a version can be uploaded from the referential page or dropped in an import folder, for example when the source is unreachable or only sent by e-mail.
 - **Corrupted sources are refused**: an empty file, an HTML error page or a broken archive never replaces the current version; the error is shown on the referential.
 - **Data quality**: rules checked on every new version (filled, unique, IP / domain / hash / CVE formats, allowed values, ranges, SQL conditions), a score per version, and a quality gate that rejects a bad version.
 - **Notifications**: e-mails and generic webhooks (Slack, Teams, Discord, incident tools…) when a referential fails, recovers or publishes a new version.
+- **Governance**: every referential says whether it holds **internal** or **public** data, and who answers for it — shown on every card and page, with a quick filter in the dashboard.
+- **Personal data**: the columns holding it are **masked everywhere** (rows, exports, downloads, SQL, MCP, assistant). Seeing the real values takes the right **and** an explicit request from the user, which is audited.
+- **Time travel**: a referential can keep each published version (hard links: no extra space) and compare any two of them — rows added, removed and modified with their before and after.
+- **Watchdogs** (optional, administrators and advanced users): the assistant investigating on its own, on a schedule or right after a synchronization, over a scope you choose — and telling the recipients only when it finds something.
+- **Alerts**: one list of what needs a look — watchdog findings, failed updates, stale data, quality rules failing, a volume that drifted — with the report or the log of each behind one click.
 
 Access is protected:
 
@@ -27,6 +38,7 @@ Access is protected:
 - **Roles** (administrator, advanced user, user), **rights per referential**, API tokens, **service accounts** for tools (API only) and an audit log.
 - **Secret manager**: API keys, tokens and passwords of the sources are stored encrypted and referenced as `${secret:<name>}`, never returned by the API, optionally restricted to their hosts.
 - **Bulk discovery**: every data file of a Git repository (e.g. [cybref](https://github.com/emeryn/cybref)) or of an HTTP folder becomes a referential in a few clicks.
+- **In-application assistant** (optional): a chatbot on its own page, backed by a model you host (Ollama or OpenAI-compatible). In agent mode it queries the referentials and acts **through the session of the user**, never with more rights; confidential referentials are kept away from the model unless an administrator allows them.
 - **MCP servers** (optional): every user queries the referentials it may read from an AI assistant, with its own API token; an administration server lets an agent drive RefExposer with the token of a service account.
 - **Storage**: accounts, settings, definitions and internal rows in PostgreSQL. **Confidential referentials** are encrypted at rest (data files, internal rows and their keys).
 
@@ -145,6 +157,7 @@ Any of these:
 - **Stop**: `docker compose down`. The referentials stay in `./data`, the database in the `db-data` Docker volume. `docker compose down -v` **deletes the database**.
 - **Update**: `git pull`, then `docker compose up -d --build`. Database migrations and folder permissions are handled at startup, including when coming from a version whose containers ran as root.
 - **Back up**: the `db-data` volume (`docker compose exec -T db pg_dump -U refexposer refexposer > refexposer.sql`), the `data/` folder, and `REFEX_SECRET_KEY` kept apart. The configuration is also backed up daily in `data/.backups` (see [System tasks](#system-tasks)).
+- **Check the dependencies and the images**: `make scan` (or `sh scripts/scan.sh`). Rebuilding with `--pull` applies the security updates of the base images. See [Supply chain](#supply-chain).
 
 ### Containers
 
@@ -489,6 +502,45 @@ Back up as with Docker: the database dump, `~/refexposer/data/`, and `REFEX_SECR
 
 ## Architecture
 
+### What it does, end to end
+
+```
+        WHERE DATA COMES FROM                    WHAT REFEXPOSER DOES                    WHO USES IT
+  ─────────────────────────────────   ──────────────────────────────────────────   ──────────────────────────
+
+  HTTP / HTTPS  URL, API, archive ┐
+  Git           repository        │   ┌───────────── one referential ───────────┐
+  Sync folder   pushed files      ├──▶│                                         │
+  Import folder dropped files     │   │  acquire ─▶ read ─▶ transform (SQL)      │
+  Upload        from the browser  │   │     │          │           │             │
+  Internal      rows typed / API  │   │     │     csv tsv txt      │             │
+  Peer instance replicated        │   │     │     json jsonl       ▼             │
+  Referentials  union / enrich  ──┘   │     │     xml xlsx     validate          │   ┌─ interface: browse,
+                                      │     │     parquet      min rows,         │   │  search, facets, SQL
+  ┌────────────────────────────────┐  │     │     sqlite       max drop,         │   │
+  │ a referential = a definition   │  │     │     bloom mmdb   unique key,       ├──▶├─ REST API: /rows,
+  │ + its data + its history       │  │     │                  quality rules     │   │  /lookup, /export,
+  │ + its rights                   │  │     │                      │             │   │  /download, /raw
+  └────────────────────────────────┘  │     │                      ▼             │   │
+                                      │     │                  publish           │   ├─ MCP server (agents)
+  every run is recorded: who,         │     │                  version N+1,      │   │
+  why, how long, how many rows,       │     │                  diff vs N,        │   └─ downloads: whole
+  what changed, its log               │     └──── keep ──────▶  column profile   │      referential, per
+                                      └─────────────────────────────────────────┘      version, cached
+                                                     │                   │
+                                            data/<id>/ (files)    PostgreSQL (metadata)
+```
+
+- A **referential** is one data set: where it comes from, how it is read, how it is checked, who may read it, and every
+  version it has had. Nothing is served until a version passed its checks; a failed update leaves the previous version online.
+- The **published form is always the same** whatever the source — a Parquet file read by DuckDB — which is why every
+  referential offers the same filters, search, SQL, downloads and API, from 10 rows to billions.
+- Binary referentials (**Bloom filter**, **MaxMind DB**) are published as they are: no table, but membership tests and IP
+  lookups through the API, and the raw file for tools.
+- Only the **backend** reads the data. The browser and the API clients never see the files.
+
+### Components
+
 ```
 ┌──────────────────────────┐        ┌─────────────────────────────────────────────┐
 │ frontend (nginx :8080)   │ /api → │ backend (FastAPI :8000)                     │
@@ -536,13 +588,17 @@ backend/              FastAPI API + DuckDB engine (Python 3.12)
   app/models.py         relational schema (SQLAlchemy)
   app/migrations/       Alembic migrations (applied at startup)
   app/api/              REST routes
+  requirements.in       declared dependencies (version ranges): the file to edit
+  requirements.txt      generated by scripts/lock.sh: pinned versions and file hashes, installed by the images
   tests/                pytest tests (pipeline, API, sources, security, authentication, second factor, tasks…)
 frontend/             React 19 + Mantine 8 + TanStack Query, served by nginx
 config/               referential definitions (YAML files, optional)
 data/                 published referentials, history, backups (created automatically)
 import/               import folder: manual versions of existing referentials
 sync/                 sync folder: every file or folder pushed there is a referential
-example/n8n/          n8n workflow using the API
+examples/              example configurations and scripts (CybrefV2 definitions, API scripts)
+scripts/               lock.sh (pin the Python dependencies), scan.sh (supply-chain scan), sbom.sh (SBOM)
+Makefile               shortcuts: up, down, logs, build, test, typecheck, scan, sbom (make help)
 ```
 
 ### Layout of `data/`
@@ -561,6 +617,42 @@ data/.system/                  history of the system tasks
 data/.tmp/                     uploads, previews, exports in progress
 data/.secret_key               generated encryption key, when REFEX_SECRET_KEY is not set
 ```
+
+### Where the data is really stored
+
+Two places hold everything, and both must be backed up: the **`data/` volume** (the data sets themselves, as files) and
+the **PostgreSQL database** (accounts, rights, settings and the rows of internal referentials). Nothing is kept in the
+frontend container, and no data is stored in the browser beyond the session cookie and display preferences.
+
+| What | Where exactly | Encrypted at rest |
+|---|---|---|
+| Published version of a referential, previous version, sorted copies | `data/<id>/current.parquet`, `previous.parquet`, `current.by_<column>.parquet` (or `current.bloom` / `current.mmdb`) | only if the referential is **confidential**: Parquet Modular Encryption, AES-GCM, one key per referential |
+| Downloaded source files | `data/<id>/raw/` (deleted after the build when `keep_raw: false`, when the referential is confidential, or above `REFEX_KEEP_RAW_MAX`) | no |
+| Generated downloads (CSV, Excel, JSON, Parquet) | `data/<id>/exports/`, one set per version | no — a confidential referential generates them per request and never keeps them |
+| Status, schema, column profile, source and run summary | `data/<id>/meta.json` | the column profile (which holds values: min, max, most frequent) is encrypted for a confidential referential |
+| Update history and logs | `data/<id>/runs.jsonl` (capped by `REFEX_KEEP_RUNS`) | no |
+| Manual imports kept as the current source | `data/<id>/manual/<date>/` | no (not kept for a confidential referential) |
+| **Rows of an internal referential** | PostgreSQL table `internal_records`, one row per record — **not** in `data/` | AES-256-GCM per row, bound to the referential, when it is confidential; the key column is then replaced by a keyed fingerprint (HMAC-SHA256) |
+| Published form of an internal referential | `data/<id>/current.parquet`, rebuilt from the database a few seconds after each edit | as above, if confidential |
+| Definitions created from the interface | PostgreSQL table `referential_definitions` | no (credentials inside them are `${secret:…}` references, never values) |
+| Definitions written by hand | `config/*.yml`, read-only in the interface | no |
+| Accounts, groups, rights, sessions, API tokens | PostgreSQL | passwords: Argon2id · session and API tokens: SHA3-256 fingerprints (the token itself is never stored) |
+| Secrets of the secret manager, LDAP bind password, OIDC client secret, proxy password, peer tokens | PostgreSQL | AES-256-GCM with a key derived from `REFEX_SECRET_KEY` |
+| Audit log | PostgreSQL (retention from the settings), and optionally sent to syslog | no |
+| Settings edited in the interface, branding, notification channels | PostgreSQL | secret fields only |
+| Configuration backups | `data/.backups/` (definitions, settings, rights — never the data sets) | secrets inside them stay encrypted |
+| System task history | `data/.system/` | no |
+| Uploads, previews, exports in progress, DuckDB spill files of large sorts | `data/.tmp/` (cleaned on a TTL and after each query) | no |
+| Encryption key, when `REFEX_SECRET_KEY` is not set | `data/.secret_key`, mode 600 | — it **is** the key: set `REFEX_SECRET_KEY` instead so the key does not sit on the volume it protects |
+
+- **Keys** are never stored next to their ciphertext when `REFEX_SECRET_KEY` is set: each use derives its own key
+  (HKDF-SHA256) from that one secret — one per referential for Parquet, one for internal rows, one for their key
+  fingerprints, one for the settings. Back it up: without it the published versions can be rebuilt from their sources,
+  but the rows of confidential internal referentials are lost.
+- **Volumes**: `./data` and `./import` are mounted into the backend container (`/data`, `/import`); `./config` and
+  `./sync` as well. The database keeps its own volume. See [Containers](#containers).
+- Details of the confidential mode, and what it does not cover, are in
+  [Confidential referentials](#confidential-referentials).
 
 ### Update cycle
 
@@ -639,7 +731,7 @@ referentials:
     owner: CISA
 
     source:
-      type: http                    # http (default) | git | local (see below)
+      type: http                    # http (default) | git | local | sync | internal | referential (see below)
       urls:                         # one or more URLs
         - https://www.cisa.gov/sites/default/files/csv/known_exploited_vulnerabilities.csv
       headers: {}                   # extra HTTP headers (e.g. API token)
@@ -673,11 +765,31 @@ referentials:
 | `jsonl` | `read_json` (newline-delimited) | same |
 | `txt` | one line = one record | `column` (column name, default `value`), `comment` (default `#`), `skip_empty` |
 | `parquet` | `read_parquet` | |
-| `xlsx` | `read_xlsx` (excel extension) | `sheet`, `range`, `header`, `all_varchar` |
+| `xlsx` | `read_xlsx` (excel extension) | `sheet` (the analysis lists them), `range` (`A1:F500`), `header`, `all_varchar`, `ignore_errors`, `stop_at_empty`, `empty_as_varchar` |
 | `xml` | converted to JSON Lines, then `read_json` | `records_path`: name of the repeated record element (default: the likeliest one, frequent and rich) |
 | `bloom` | DCSO Bloom filter (published as is) | `normalize`, `pattern`, `enrich_bulk_url`, `enrich_key` |
 | `mmdb` | MaxMind DB (published as is, IP lookups) | |
 | `sqlite` | SQLite database, attached read-only (sqlite extension) | `table`: table or view to read; `nsrl`: NIST NSRL set, publications and deltas found automatically (see [SQLite databases](#sqlite-databases-nist-nsrl-and-sql-deltas)) |
+
+#### Excel workbooks
+
+A column of an Excel sheet takes the type of its **first value**: a column of numbers holding one piece of text further
+down (a note in a “comment” column) cannot be read at all, and the workbook declares no type for the column itself.
+RefExposer then reads **every column as text**, keeps `all_varchar: true` in the definition so the next updates read the
+file the same way, and says so in the preview and in the run log. Cast the columns that really are numbers or dates in
+the transformation:
+
+```yaml
+format: xlsx
+options:
+  sheet: Inventory          # the analysis lists the sheets of the workbook
+  all_varchar: true
+transform: |
+  SELECT * REPLACE (TRY_CAST(score AS DOUBLE) AS score, TRY_CAST(opened AS DATE) AS opened) FROM {source}
+```
+
+`ignore_errors: true` is the other way out — cells that do not fit become empty — but it loses data silently.
+`stop_at_empty: false` keeps reading past a blank row in the middle of the sheet.
 
 ### SQL transformations
 
@@ -949,6 +1061,8 @@ storage:
   profile: sample                   # column profile on a sample
 ```
 
+**Naming the columns when the source cannot be analysed**: a source of tens of GB is not downloaded by the preview, so the editor has no column list to offer. The **key**, the **search columns**, `sort_by` and `indexes` are plain text fields: type the names as they appear in the file (header of a CSV, fields of a JSON record, columns of the Parquet file or of the SQLite table). The import checks them — an unknown sort or index column is refused with its name, a missing search column is a warning in the log — and the columns actually produced appear in the **Schema** tab afterwards. Without these columns a large referential can be browsed page by page but **not searched**, because a search over everything would read the whole file; when `search_columns` is left empty, the search uses every sorted and indexed text column.
+
 **Principle**: for each block of rows of the Parquet file, DuckDB keeps the minimum and maximum value of every column. On sorted data, an exact, prefix or range lookup only reads the few relevant blocks instead of the whole file. Each index is a full copy sorted on another column. The engine picks the right copy from the filter automatically, and these copies are visible in the SQL console (`pdns__by_rdata`…).
 
 **Automatic guardrails** above `REFEX_LARGE_ROWS` rows (50 million by default):
@@ -1058,7 +1172,117 @@ curl -X POST -H "$H" -F file=@ranges.xlsx -F mode=upsert \
 
 Other routes: `GET /api/referentials/{id}/records` (with `q`, `limit`, `offset`), `GET|DELETE /records/{key}`, `POST /records` (one row or `{"records": [...]}`), and `POST|PUT|DELETE /api/internal-referentials[/{id}]` to create, change the columns of, or delete an internal referential.
 
+**Complete worked example**, from the creation of the referential to a bulk load from a CSV:
+[`examples/scripts/refex-internal.py`](examples/scripts/refex-internal.py) and its
+[README](examples/scripts/README.md) — the same commands are in the application help, under *Internal referentials*.
+
 ---
+
+## Unified referentials
+
+A referential can be built from the **published data of other referentials** instead of a source of its own
+(`source.type: referential`, or *New referential › Other referentials*). Two shapes:
+
+- **union** — the rows of every referential, one after the other, columns matched by name (a column one of them does
+  not have is empty for its rows). One list maintained by your team plus the same kind of list coming from another
+  team or replicated from another instance become one referential.
+- **enrich** — the first referential gives the rows, the others add their columns, joined on a shared value
+  (left join: a row without a match keeps empty values).
+
+```yaml
+referentials:
+  # Every team's assets in one place, keeping where each row comes from
+  - id: assets-all
+    name: Assets (every team)
+    key: hostname
+    source:
+      type: referential
+      referentials: [team1-assets, team2-assets]
+    combine:
+      mode: union
+      source_column: _team           # added column holding the id of the source referential
+      # columns: {team2-assets: [hostname, ip, owner]}   # optional: only these columns
+
+  # Assets enriched with their owner and the criticality of their site
+  - id: assets-enriched
+    name: Assets with owner and site
+    key: hostname
+    source:
+      type: referential
+      referentials: [assets, owners, sites]   # the first one gives the rows
+    combine:
+      mode: enrich
+      on: hostname                   # column of 'assets' holding the value to join on
+      join_on: {sites: site_code}    # 'sites' matches it with a differently named column
+      columns: {owners: [owner, team]}
+      prefix: true                   # added columns: owners_owner, owners_team, sites_criticality…
+    transform: SELECT * EXCLUDE (sites_internal_note) FROM {source}
+    schedule: "30 7 * * *"           # safety net: it is rebuilt as soon as a source publishes a new version
+```
+
+- It is **rebuilt automatically** whenever one of its sources publishes a new version (trigger *Source referential
+  updated*), and the run ends as *Unchanged* when the versions it read have not moved.
+- Each source must have been **published at least once**: its columns and its Parquet file are what the build reads.
+  The run log and the **Source** tab record which version of each source the data came from, and the source's own
+  **Source** tab lists the unified referentials built from it.
+- A **confidential** source can only be combined into a confidential referential, otherwise its data would be
+  published unencrypted and the definition is refused. A referential cannot read itself, directly or through another
+  unified referential, and a referential used by one cannot be deleted before it.
+- Everything else behaves like a normal referential: key, search columns, sort and indexes, quality rules, generated
+  downloads, rights, SQL table. In the transformation, `{source}` is the combined result and `{source0}`,
+  `{source1}`… are the referentials on their own. Bloom filters and MaxMind databases have no rows to combine.
+
+### From the SQL console
+
+**Save as referential**, next to the exports of the [SQL console](#sql-console-security), turns the query that has
+just run into a unified referential. The **query is stored, not its rows**: the join written to explore the data
+becomes a referential rebuilt whenever one of the referentials it reads publishes a new version.
+
+```bash
+curl -X POST -H "$H" -H "Content-Type: application/json" "http://localhost:8080/api/sql/referential" -d '{
+  "id": "kev-epss", "name": "Exploited vulnerabilities and their EPSS score", "key": "cveID",
+  "sql": "SELECT k.cveID, k.vendorProject, e.epss FROM cisa_kev k JOIN epss e ON e.cve = k.cveID"
+}'
+```
+
+The referentials the query reads are detected from its table names (`sources` names them explicitly), and the
+query is checked in the same sandbox as the console before anything is stored: it must parse, read only those
+referentials and be usable as a subquery. The stored definition binds each table name to the published file of its
+referential with a CTE, so the query is kept as it was written and stays editable in the referential editor.
+
+Reserved to administrators and advanced users, limited to the referentials the account may read, and audited as
+`referential.create`. It starts with **no group grant**: an administrator opens it to the groups that need it. An
+advanced user gets the manage right on what it creates, as for an internal referential.
+
+---
+
+## Governance: visibility and ownership
+
+Every referential says **what kind of data it holds** and **who answers for it**. Both are shown wherever it
+appears — on its card in the dashboard, in its header, in the API — because the two kinds are not handled the
+same way, and because a question about the data needs someone to ask.
+
+| Field | What it means |
+|---|---|
+| `visibility: internal` (the default) | Company data. Not published anywhere else: it is not to be copied into a ticket, a pastebin or a third-party tool without thinking about it. |
+| `visibility: public` | Open data or an external feed (CISA KEV, NVD, IANA, a public blocklist…): already published outside, and quoting it is free. |
+| `owner` | Who answers for this data: a name or, better, an e-mail address. The **e-mail notification channels** can send the alerts of a referential to its owner (*Also the owner of the referential*). |
+| `owner_team` | The team behind that person, for when they move on. |
+
+- **Where it shows**: a filled **Internal** (padlock) or **Public** (globe) badge on each card and in the
+  header of the referential, the owner with their initials beside it, and a quick filter
+  **All / Internal / Public** in the dashboard. The *Referentials* stat card says how the catalogue splits.
+- **Where it is set**: *Description* step of the referential editor, or in YAML:
+
+```yaml
+- id: staff-directory
+  name: Staff directory
+  visibility: internal          # internal (default) · public
+  owner: dpo@example.com
+  owner_team: Security
+```
+
+- `visibility` and the owner are **metadata**: changing them never rebuilds the referential.
 
 ## Confidential referentials
 
@@ -1086,6 +1310,69 @@ A referential marked **confidential** (`confidential: true`, or the switch in it
   - SQL queries logged at the `trace` level;
   - Bloom filters and MaxMind databases, which are served as is to tools and cannot be confidential.
 - **Searching** an internal referential decrypts its rows in the application, because the database only holds ciphertexts. This stays fast up to a few hundred thousand rows.
+
+## Personal data: column masking
+
+A referential can name the columns that hold **personal data**. Those columns are **masked for everyone**, and
+the real values only come out for an account that is entitled to see them **and** asks for them explicitly.
+
+```yaml
+- id: staff-directory
+  name: Staff directory
+  key: id
+  pii:
+    columns: [email, full_name]
+    strategy: hash              # hide · partial · hash
+    reveal_groups: [dpo, security]
+    reveal_users: []            # account ids, for a named exception
+    note: "GDPR record R-14, kept 3 years"
+```
+
+| `strategy` | What is served | Good for |
+|---|---|---|
+| `partial` (the default) | `a***e` — the first and last characters | Recognising a value you already know |
+| `hash` | a stable 16-character pseudonym, salted with the instance secret | Counting, grouping and **joining** on the column without the value |
+| `hide` | `***` | When even the shape must not leak |
+
+**It is one rule, applied where the data is read.** The DuckDB view of the referential selects the masked
+expression instead of the column, so there is nothing for a caller to remember: rows, lookups, exports,
+column statistics, the global search, the change view, the generated downloads, the SQL console, the MCP
+servers and the assistant are all masked, and so is anything added later.
+
+**Revealing takes two things**, and both are needed:
+
+1. **the right** — the account is named in `pii.reveal_users`, belongs to one of `pii.reveal_groups`, or is an
+   administrator;
+2. **the request** — `reveal=true` on the call (the *Show personal data* switch in the Data tab, the SQL
+   console and the diff view). Every such request is written to the **audit log** (`pii.reveal`, with the
+   columns and the path).
+
+So a script, a cron job, a download link or a question to the assistant **never** gets personal data by
+accident: masked is the default, not a mode to turn on.
+
+- **The assistant and the MCP servers can never reveal.** They act for a model or a tool, which cannot give
+  the consent, so the switch is simply not available to them — whatever the prompt asks, and even when the
+  account behind them is an administrator.
+- **Generated downloads** (CSV, Excel, Parquet…) are produced from the masked view and cached, so one user's
+  right never leaks into a file served to another. The **source files** and the **previous version**, which
+  are served straight from disk, are refused to an account that may not reveal; use
+  `GET /api/referentials/{id}/export?reveal=true` instead.
+- **A unified referential reads its sources masked**: personal data does not spread into a derived
+  referential by being combined, and the masked values are what lands in its own Parquet file. To keep the
+  real values downstream, mask them on the unified referential rather than on its source. Changing `pii`
+  rebuilds the referentials built from it.
+- **Masking is not encryption**: the published Parquet file still holds the real values. When they must not be
+  readable on disk either, mark the referential **confidential** as well — the two combine.
+- **A masked column is served as text**, whatever it held: a masked number is not a number any more, and
+  saying so is better than serving a plausible wrong value.
+- **A configured column the data does not have** (a renamed source, a typo) is reported as `missing` in the
+  interface and in the API instead of silently taking the masking away.
+- **One consequence worth knowing**: with `hide` or `partial`, two rows differing only in a masked column read
+  as identical in the change and diff views. Use `hash` when that matters — it keeps them distinct.
+
+API: `pii` on `GET /api/referentials` and `/api/referentials/{id}` (columns, strategy, note, `can_reveal`,
+`missing`), `reveal=true` on `/rows`, `/export`, `/lookup`, `/changes`, `/diff`, `/columns/{c}/stats`, and
+`{"reveal": true}` on `POST /api/sql`.
 
 ## Outgoing connections
 
@@ -1218,6 +1505,42 @@ Bloom filters and SQLite databases have their own deltas (`incremental`, see abo
 
 ---
 
+## Time travel: past versions and diffs
+
+Turned on per referential, **time travel** keeps each published version and lets two of them be compared.
+
+```yaml
+- id: external-scan
+  name: External scan
+  key: asset
+  primary_key_columns: [asset, port]   # what identifies a row (default: key)
+  storage:
+    time_travel: true
+    max_snapshots: 30                  # the oldest ones are dropped beyond this
+```
+
+- **What it costs**: a snapshot is a **hard link** on the published Parquet file, so it takes no extra space
+  until the version it shares its blocks with is replaced. It shows up as *Past versions kept* in
+  **System › Disk space** (at its full size, which overstates what it really holds).
+- **Where**: a **History & diff** tab appears on the referential — two version pickers, the
+  `+X added, −Y removed, ~Z modified` summary, the rows of each category, and the before/after of every
+  changed column. The list below it shows the versions kept and can delete one.
+- **How a row is identified**: `primary_key_columns`, failing that the `key` of the referential, failing both
+  the whole row — and then a change reads as one removal and one addition, which the interface says plainly.
+- **A schema change** does not break the comparison: only the columns both versions have are compared, and the
+  others are listed.
+- **Masking applies**: a diff is masked like everything else, and `reveal=true` works the same way.
+- **The assistant can use it**: the tools `list_referential_snapshots` and `diff_referential_snapshots` are
+  how it answers "what is new since Monday", instead of guessing from two queries. They are also in the
+  [MCP data server](#mcp-data-server-every-user).
+
+This is not the same thing as the **Changes** tab, which always compares the published version with the one
+before it (`storage.keep_previous`). Time travel goes further back, and compares any two versions.
+
+API: `GET /api/referentials/{id}/snapshots`,
+`GET /api/referentials/{id}/diff?from={id}&to=latest&kind=summary|added|removed|modified`,
+`DELETE /api/referentials/{id}/snapshots/{snapshot_id}` (manage right).
+
 ## Synchronization between instances
 
 A RefExposer instance can **replicate the referentials of another one** (a central instance feeding regional or isolated ones, production feeding pre-production…), with their definitions: name, description, category, key, search columns, **quality rules**, **SQL transformation**, indexes, generated downloads, confidentiality.
@@ -1249,12 +1572,18 @@ curl -X POST -H "$H" "http://replica:8080/api/admin/federation/peers/prod/sync"
 | Role | Can… |
 |---|---|
 | **Administrator** | everything: all referentials, users, groups, rights, settings, audit log, System page, configuration reload |
-| **Advanced user** | the referentials granted to them, plus the SQL console and creating internal referentials (they get the manage right on the ones they create) |
+| **Advanced user** | the referentials granted to them, plus the SQL console and creating referentials (internal, or a query of the console kept as one: they get the manage right on the ones they create) |
 | **User** | only the referentials granted to them, directly or through their groups (no SQL console) |
 
 ### Rights per referential
 
-A right links a **user or a group** to **a referential** (or `*` = all referentials) with a level:
+A right links a **user or a group** to a **scope**, with a level:
+
+| Scope | Covers |
+|---|---|
+| One referential | that referential |
+| **A category** | every referential of that category, **now and as they are added to it** |
+| `*` | every referential |
 
 | Level | Allows |
 |---|---|
@@ -1262,6 +1591,30 @@ A right links a **user or a group** to **a referential** (or `*` = all referenti
 | **Manage** | read + start, force or cancel an update, manual imports, editing internal referentials |
 
 The effective right is the highest of the direct rights and those of the groups. A referential that is not granted is **invisible**: absent from the lists, the global search and the SQL console, with a `404` answer when it is requested directly.
+
+#### Rights on a whole category
+
+Categories group the referentials in the interface; a right can be given on one, which is the way to hand a set
+of referentials to a team in one row instead of a dozen:
+
+```bash
+curl -X POST -H "$H" -H "Content-Type: application/json" "http://localhost:8080/api/admin/grants"   -d '{"category": "Threat intelligence", "group_id": 3, "level": "read"}'
+```
+
+The scope picker of the rights editor (a user's page, a group's page, the **Access** tab of a referential) offers
+the three forms in one list: *All referentials*, *By category* (with how many each holds) and *One referential*.
+
+- **Resolved at every request**, against the categories the referentials have at that moment: a referential added
+  to the category is covered without touching the rights, and one **moved out of it stops being**. Changing the
+  category of a referential therefore changes who may read it — it is a rights change made from the referential
+  editor, and it is in the audit log as a `referential.update`.
+- A right on a category of a referential appears on its **Access** tab marked `category`, read-only there: it is
+  edited from the user or the group it was given to, like a `*` right.
+- The **highest** level wins, so a direct `manage` on one referential sits on top of a `read` given on its
+  category.
+- A category nothing is in yet is accepted: the right waits for its first referential rather than being refused.
+- Stored as `category:<name>` in the scope of the grant, carried by the configuration export and by the MCP tool
+  `grant_access` (`category` argument).
 
 Rights are managed in the interface (**Administration › Users / Groups**, or the **Access** tab of a referential) or with `/api/admin/grants`.
 
@@ -1420,8 +1773,6 @@ To export a **selection** (with filters), use the *Export* menu of the explorer 
 
 ## Using the API
 
-> An n8n workflow (list, query, lookup, download) is provided in [`example/n8n`](example/n8n/README.md).
-
 Each referential has **documentation generated automatically** from its actual schema. It is regenerated with every new version:
 
 - the **API** tab of the referential: endpoints, parameters (one typed filter per column), exact row format, examples taken from the data, and a **Try it** button that runs the request and gives the matching `curl` command;
@@ -1458,6 +1809,10 @@ curl -H "$H" -o kev.xlsx "http://localhost:8080/api/referentials/cisa-kev/export
 curl -X POST -H "$H" "http://localhost:8080/api/sql" -H "Content-Type: application/json" \
   -d '{"sql": "SELECT k.cveID, e.epss FROM cisa_kev k JOIN epss e ON e.cve = k.cveID ORDER BY e.epss DESC LIMIT 10"}'
 
+# The same query kept as a referential, rebuilt whenever a source publishes a new version
+curl -X POST -H "$H" "http://localhost:8080/api/sql/referential" -H "Content-Type: application/json" \
+  -d '{"id": "kev-epss", "name": "KEV and EPSS", "key": "cveID", "sql": "SELECT k.cveID, e.epss FROM cisa_kev k JOIN epss e ON e.cve = k.cveID"}'
+
 # Search across referentials
 curl -H "$H" "http://localhost:8080/api/search?q=CVE-2021-44228"
 ```
@@ -1484,7 +1839,8 @@ SQL queries run in an isolated DuckDB connection, specific to the rights of the 
 - only the tables of the accessible referentials exist, and only their Parquet files can be read;
 - locked configuration (`enable_external_access=false`, `lock_configuration`);
 - maximum duration (`REFEX_SQL_TIMEOUT`) and maximum number of returned rows (`REFEX_SQL_MAX_ROWS`);
-- every query is recorded in the audit log.
+- every query is recorded in the audit log;
+- *Save as referential* goes through the same sandbox before anything is stored, and the stored query reads only the referentials the account may read.
 
 ---
 
@@ -1524,6 +1880,36 @@ quality:
 - **Notifications**: the `quality` event warns when a version is published with rules not met while the previous one met them. A failing `error` rule rejects the version, which is a `failure`.
 - The rules are edited in the referential editor (step *Description*). They take one scan of the data: on billions of rows, keep them few.
 
+## Alerts (in the application)
+
+**Alerts** is the list of what needs a look, newest first, reachable from the bell in the header and from the
+menu. It gathers two things:
+
+| Kind | Raised when |
+|---|---|
+| **Watchdog** | A [scheduled investigation](#watchdogs-scheduled-investigations) found something, or could not finish. |
+| **Update** | The last update failed, was rejected by the validation, or found a corrupted source. |
+| **Quality** | The published version does not pass its [quality rules](#data-quality). |
+| **Stale** | No new version within the expected delay (`max_age`, or twice the schedule interval). |
+| **Drift** | The last version changed the volume by more than 20 % on a referential that had enough rows for the ratio to mean something. A drop counts for more than growth. |
+
+Clicking an entry opens what it takes to act on it: the **report the watchdog wrote** (its Markdown table of
+affected items, the queries it went through, whether each notification was delivered), the **log of the failed
+update**, the **failing quality rules** with their pass rates, or the **figures** of the drift — and a link to
+the referential or the watchdog.
+
+- **Nothing to acknowledge, nothing to clean up.** The list is built from the state of the referentials and the
+  recorded watchdog runs, so an alert disappears on its own once the thing behind it is fixed, and it can never
+  disagree with what the rest of the interface shows.
+- **Filtered by what you may see**: a referential you cannot read is not there, a watchdog belongs to its owner
+  (administrators see every one), and ordinary accounts get no watchdog alerts at all.
+- The **badge on the bell** counts what arrived since you last opened the page; that mark is kept in your
+  browser, so it is per person and per device, and nothing about it is stored on the server.
+- This is the **in-application** view. Pushing the same events out by e-mail or webhook is
+  [notification channels](#notifications-e-mail-webhooks), configured per channel; the two are independent.
+
+API: `GET /api/alerts?limit=&kind=` (`watchdog`, `failure`, `quality`, `stale`, `drift`), `GET /api/alerts/{id}`.
+
 ## Notifications (e-mail, webhooks)
 
 **Administration › Notifications** sends the events of the referentials to channels:
@@ -1542,6 +1928,143 @@ quality:
 - **Credentials and signature**: header values may be `${secret:…}` references (restricted to their hosts, see [Secret manager](#secret-manager)). Literal values are masked by the API. With a signing secret, the body is signed: `X-RefExposer-Signature: sha256=<HMAC-SHA256 of the body>`. `X-RefExposer-Event` gives the event.
 - **Reliability**: deliveries run in the background (an update never waits for them), with 3 attempts (after 2 s, then 8 s). The 500 last deliveries and their result are listed on the page (`data/.notifications.jsonl`). The send button of a channel sends a test at once.
 - API: `/api/admin/notifications` (channels, `POST /{id}/test`, `GET /deliveries`), `PUT /api/admin/settings/smtp`, `POST /api/admin/settings/smtp/test`.
+
+## In-application assistant
+
+A chatbot on a page of its own (**Assistant** in the menu), backed by **a model you host**: Ollama, or anything
+speaking the OpenAI API (vLLM, llama.cpp server, LocalAI, TGI). Disabled by default; the menu entry only appears
+once an administrator enabled it in **Settings › Assistant**.
+
+In **agent mode** it uses the application for the person who is chatting: it lists the referentials, queries them,
+runs SQL, hands over a query to open in the SQL console, produces a JSON or CSV file, and — when writes are
+allowed — starts an update or creates a referential. The same tools as the [MCP servers](#mcp-data-server-every-user),
+driven from the chat instead of an external client.
+
+### Rights: the session of the user, never more
+
+Every tool call goes through the **REST API in-process, carrying the authentication of the person chatting**: the
+same session, the same per-referential grants, the same validations, the same audit log. There is no elevation
+anywhere.
+
+- A user who cannot see referential *B* cannot query it from the chat: the API answers `404`, exactly as it would
+  in the interface, and the model is told it has no access.
+- An administrator can create a referential from the chat; a reader asking for the same thing gets a refusal.
+- Write tools are offered only when **Allow actions that change something** is on, and they still obey the rights
+  of the account.
+
+### Confidential referentials
+
+**Confidential referentials may be queried** is off by default. While it is off, nothing of a confidential
+referential reaches the model — not its rows, not its columns, not its name:
+
+- the identifiers of every confidential referential are put in the `denied` set of the account for the whole tool
+  call, and `CurrentUser.level()` checks that set **before the role**, so an administrator is restricted too;
+- every read goes through it: `/rows`, `/lookup`, `/export`, `/download`, `/search`, `/facets`, the catalog, and
+  the tables registered in the **SQL sandbox** — a query naming a confidential table finds no such table;
+- the agent refuses a tool call naming one before making it, and filters what the administration endpoints list.
+
+It is an authorization rule, not a prompt instruction: a model that tries anyway gets nothing.
+
+### Configuration (Settings › Assistant)
+
+| Setting | What it does |
+|---|---|
+| API, address | `ollama` (`/api/chat`) or `openai` (`/v1/chat/completions`), and the address of the server |
+| API key | Optional: most local servers have none. Sent as `Authorization: Bearer` |
+| Extra headers | Any header the gateway in front of the model expects (tenant, routing, an API key under another name) |
+| Model | Chosen from the list the server returns, after **Test and list the models** |
+| Verify TLS | Stays on: the **certificate authorities of Settings › Network & proxy** are the ones used, so an internal root CA needs nothing more here |
+| Temperature, top_p, answer limit, messages kept | Generation, and how much of the conversation goes into the prompt |
+| Context window | `num_ctx` for Ollama: 0 leaves it to the server, which is often small — raise it when the agent reads large tool results. The OpenAI API has no such parameter |
+| Stop sequences, other options | Anything else the server accepts, as JSON: for Ollama inside the `options` object (`repeat_penalty`, `top_k`, `min_p`, `mirostat`, `seed`, `num_thread`…), for an OpenAI-compatible server at the top level (`repetition_penalty`, `top_k`, `frequency_penalty`…). A key set there wins over the fields above; the keys that make up the request itself (`model`, `messages`, `stream`, `tools`…) are refused. **Sent to the model right now** shows the resulting block |
+| Agent mode, steps, writes | Whether it may use the application, how many tool calls per answer, and whether it may change anything |
+| Confidential referentials | Above |
+| Groups allowed, accounts allowed | Who may use it: these groups and these named accounts. Everyone when both are empty; administrators always; service accounts never (no interface session) |
+| System prompt | Visible and editable, with **Load the default** and **Back to default** |
+| Questions per minute, retention | Per-account rate limit, and how long conversations are kept (purged by the `assistant_retention` task) |
+
+The browser never calls the inference server: RefExposer is its only client, so the server does not have to be
+reachable from the workstations. The address, the API key and the headers are administration settings; the key is
+encrypted at rest and never returned to the browser.
+
+### What the user sees
+
+The conversation is kept server-side and **belongs to one account**: someone else's conversation is reported as
+unknown. It goes on until the user deletes it (one conversation, or all of them), so several questions in a row
+build on each other. Answers stream in as they are written, each tool call shows up as a line (tool, arguments,
+result), and the answer is rendered as Markdown built into React elements — no HTML, no remote images, links
+with their real target.
+
+API: `GET /api/assistant` (availability), `/api/assistant/conversations` (list, create, delete all),
+`/api/assistant/conversations/{id}` (read, rename, delete), `POST /api/assistant/conversations/{id}/messages`
+(server-sent events: `token`, `step`, `done`), `POST /api/assistant/test` (administrators).
+
+## Watchdogs: scheduled investigations
+
+A **watchdog** is the assistant asking itself the same question again and again, over a **fixed set of
+referentials**, and telling someone **only when it finds something**.
+
+They are **off by default**: an administrator turns them on in *Settings › Assistant* (**Scheduled
+watchdogs**), which needs the agent mode. They are also **reserved to administrators and advanced users** —
+for anyone else the menu is not there and the whole API answers 403. Turning the switch off removes every
+schedule at once, and a trigger that slips through is refused rather than run.
+
+### How one is defined
+
+| Field | What it does |
+|---|---|
+| Name, description | What this watchdog is for. |
+| **Referentials** | The **only** ones it may read. Chosen explicitly — there is no "everything". |
+| **Trigger** | `cron` (a crontab expression, or one of the usual schedules) or `on_sync`: right after one of its referentials publishes a new version. |
+| **Prompt** | The investigation itself. |
+| **Recipients** | E-mail addresses, and/or the [notification channels](#notifications-e-mail-webhooks) already configured. |
+| **Severity floor** | A finding below it is recorded, but nobody is woken up. |
+
+### Three things it cannot do
+
+- **Leave its scope.** The list of referentials travels **signed** with every tool call, and
+  `CurrentUser.level()` returns 0 for anything outside it. The model can ask for another referential; it does
+  not exist for the call.
+- **Exceed its account.** It runs with the rights of the account it belongs to, through a session opened for
+  the run and closed after it, so every tool call goes through the same checks as a click in the interface.
+  Creating a watchdog is refused when that account cannot read a referential of the scope.
+- **Write.** The tools that change something are off for a watchdog, whatever *Allow writes* permits in the
+  chat.
+
+### What it answers
+
+The model is given a prompt of its own and must return a structured verdict:
+
+```json
+{"finding_detected": true, "severity": "HIGH", "summary": "3 machines are not in the CMDB",
+ "details_markdown": "| host | ip | seen |\n| --- | --- | --- |\n…", "affected_items_count": 3}
+```
+
+An answer that is **not** that JSON is recorded as an **error**, with the text kept — never as "nothing to
+report". Silence is never mistaken for an all-clear.
+
+### Ready-made investigations
+
+The editor offers three templates (plus a free one), pre-filling the prompt and the description:
+
+- **Shadow IT hunt (CMDB vs infrastructure / network)** — assets alive on the network or the hypervisor that
+  the CMDB does not know, or that carry no EDR agent.
+- **External exposure drift (EASM)** — new sub-domains, newly exposed addresses or sensitive services, using
+  the diff with the last snapshot when the referential keeps them.
+- **IAM audit & orphan accounts** — the HR referential crossed with the active accounts (AD, VPN,
+  applications): accounts still open for someone who has left.
+
+### Following them
+
+Findings also land in [Alerts](#alerts-in-the-application), with the report attached. Each watchdog lists its
+**executions**: date, what started it (`cron`, `on_sync:<referential>`, `manual`),
+*nothing to report* / *finding* with its severity / *failed*, the report the agent wrote, the tool calls it
+went through, and whether each notification was delivered. **Run now** starts one on the spot (in the
+background: an investigation calls the model several times). The 100 most recent runs of a watchdog are kept.
+Every run is audited (`watchdog.run`).
+
+API: `GET|POST /api/watchdogs`, `GET|PATCH|DELETE /api/watchdogs/{id}`, `POST /api/watchdogs/{id}/run`,
+`GET /api/watchdogs/{id}/runs`, `GET /api/watchdogs/runs`, `GET /api/watchdogs/templates`.
 
 ## MCP data server (every user)
 
@@ -1663,8 +2186,10 @@ This section lists the security mechanisms in place, by area. The linked section
 |---|---|
 | Identity sources | Local accounts (can be disabled for **single sign-on only**, `REFEX_LOCAL_LOGIN=false`), **LDAP / Active Directory** and **OpenID Connect**. LDAP uses LDAPS or StartTLS; the certificate is checked against the company CAs and user input is escaped in the LDAP filters. OpenID Connect uses the authorization code flow with **PKCE (S256)**, `state` and `nonce`. The ID token signature, issuer, audience and expiry are checked, only asymmetric algorithms are accepted, and the return path after sign-in is restricted to the application (no open redirect). See [LDAP directory, OpenID Connect and access approval](#ldap-directory-openid-connect-and-access-approval). |
 | Approval | Every account coming from LDAP or OpenID Connect is created **pending**. Nobody gets in until an administrator approves the account. |
-| Least privilege | Three roles: administrator, advanced user, user. Rights are given **per referential** (read / manage), to users or groups. A referential that is not granted is invisible: it is missing from the lists and the search, and answers `404`, like an unknown one. See [Users and rights](#users-and-rights). |
+| Least privilege | Three roles: administrator, advanced user, user. Rights are given to users or groups (read / manage) on **one referential, a whole category, or all of them**; a category right is resolved at each request from the current category of each referential. A referential that is not granted is invisible: it is missing from the lists and the search, and answers `404`, like an unknown one. See [Users and rights](#users-and-rights). |
 | SQL console | Reserved to administrators and advanced users. Each set of rights gets its own **sandbox**: only the granted tables, read-only, a single `SELECT` per query, no external access, a locked configuration and a time limit. See [SQL console security](#sql-console-security). |
+| Watchdogs | Off unless the agent mode is on. A watchdog is confined to the referentials it names: the scope travels **HMAC-signed** with every tool call and `CurrentUser.level()` returns 0 outside it. It runs with the rights of its own account, through a session opened for the run and closed after it, and the tools that change something are off whatever the assistant settings allow. An answer that is not the expected structured verdict is recorded as an error, never as an all-clear. Every run is audited (`watchdog.run`). See [Watchdogs: scheduled investigations](#watchdogs-scheduled-investigations). |
+| Assistant (LLM) | Off by default. Every tool call goes through the REST API **with the session of the person chatting**: no elevation, so the model can never read or do what that account could not. Confidential referentials are added to the `denied` set of the account for the whole call, checked **before the role**, which covers the rows, the catalog and the SQL sandbox alike; the agent also refuses a call naming one. The internal header that applies the restriction is HMAC-signed, so a browser cannot forge it. Model output is rendered as React elements (no HTML, no remote images), tool results are passed as data and never as instructions, generation is rate limited per account and every action is audited with `via: agent`. See [In-application assistant](#in-application-assistant). |
 | Service accounts | Accounts for tools, which **cannot sign in to the interface**. They only use API tokens created by an administrator, and they cannot create their own. See [Service accounts](#service-accounts). |
 | API tokens | 256 random bits, shown once and stored as **SHA3-256** fingerprints. They can expire (a maximum can be enforced with `REFEX_API_TOKEN_MAX_DAYS`), are revocable at any time, and carry exactly the rights of their owner. They are sent with `Authorization: Bearer`, or with HTTP Basic (token as password) for tools that only support it. |
 | Two-factor authentication | Authenticator app (**TOTP**, RFC 6238) and **security keys / passkeys** (**WebAuthn / FIDO2**) for local and LDAP accounts. It is optional, or required for everybody or for some groups. TOTP codes cannot be replayed, the signature counter of keys is checked, recovery codes are one-time, and the session opens only after the second factor. See [Two-factor authentication](#two-factor-authentication). |
@@ -1679,6 +2204,7 @@ This section lists the security mechanisms in place, by area. The linked section
 | Secrets in the database | LDAP, OpenID Connect and proxy secrets and the syslog client key are encrypted with **AES-256-GCM**, and are never sent back by the API. |
 | Keys | Derived with **HKDF-SHA256** from `REFEX_SECRET_KEY`, one key per use and per referential. The backend refuses to start with a key shorter than 32 characters. |
 | Confidential referentials | Data **encrypted at rest**: Parquet files (AES-GCM), internal rows (AES-256-GCM), keys of these rows (HMAC fingerprint) and column profiles. Source files and generated downloads are never kept on disk. See [Confidential referentials](#confidential-referentials). |
+| Personal data | The columns named in `pii` are **masked by the DuckDB view of the referential**, so every read is masked: rows, lookups, exports, statistics, search, diffs, generated downloads, the SQL console, the MCP servers and the assistant. Revealing them needs the right (`reveal_groups` / `reveal_users`, or administrator) **and** an explicit `reveal=true`, which is audited (`pii.reveal`); the assistant and the MCP servers can never reveal. A unified referential reads its sources masked. See [Personal data: column masking](#personal-data-column-masking). |
 | Source credentials | API keys, license keys and Git tokens (HTTP headers, `basic_auth`, `token`) reference the secret manager (`${secret:…}`: encrypted, write-only, optionally restricted to their hosts) or `${REFEX_SOURCE_…}` environment variables, so they stay out of the definitions. Only this prefix of variables is expanded, so other secrets can never be sent to a source. Credentials are masked in the API answers. |
 
 ### Integrity of the published data
@@ -1715,6 +2241,112 @@ This section lists the security mechanisms in place, by area. The linked section
   - a strict **Content-Security-Policy**, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`;
   - **rate limiting** on the sign-in and the second factor (10 requests per minute per IP) and on the API;
   - client IP forwarded without trusting the client (`X-Forwarded-For` replaced), so the audit log records the real address.
+
+### Supply chain
+
+The dependencies, the images and the Dockerfiles are scanned by one command. Docker is the only prerequisite:
+every tool runs in a container, nothing is installed on the host.
+
+```bash
+make scan          # or: sh scripts/scan.sh         dependencies + Dockerfiles + images
+make scan-deps     # or: sh scripts/scan.sh deps    dependencies only, no image needed
+make sbom          # or: sh scripts/sbom.sh         CycloneDX bill of materials of the images
+make lock          # or: sh scripts/lock.sh         recompile the Python lock files
+```
+
+#### Pinned dependencies
+
+Both parts install from a lock file, so two builds of the same commit install the same code:
+
+| Part | Declared in | Installed from | Guarantee |
+|---|---|---|---|
+| Backend (Python) | `backend/requirements.in` (ranges) | `backend/requirements.txt` — 49 packages pinned with their file hashes | `pip install --require-hashes`: a version or a file that does not match the lock **fails the build** |
+| Backend tests | `backend/requirements-dev.in` | `backend/requirements-dev.txt` (56 packages) | same |
+| Frontend (JavaScript) | `frontend/package.json` | `frontend/package-lock.json` | `npm ci` |
+
+To change a dependency, edit the `.in` file and run `make lock`; review the diff, then rebuild. `make lock-upgrade`
+takes the newest versions the ranges allow. Resolution runs in `python:3.12-slim`, the image the backend is built
+from, so the versions and the environment markers match the runtime.
+
+What it runs, and what makes it fail:
+
+| Check | Tool | Fails the scan on |
+|---|---|---|
+| Python dependencies (`backend/requirements.txt` and `requirements-dev.txt`, pinned) | `pip-audit`, `trivy fs` | any known vulnerability |
+| JavaScript dependencies (`frontend/package-lock.json`) | `npm audit --audit-level=high` | high or critical |
+| Images built here (backend, frontend): OS and language packages, embedded secrets, misconfiguration | `trivy image` | any **critical**, or a **high that has a fix** |
+| Dockerfiles | `trivy config` | high or critical misconfiguration |
+| Third-party images (PostgreSQL) | `trivy image` | never: reported only, their content belongs to their publisher |
+
+A vulnerability without a fix upstream does not fail the scan: it would block every build without anything to
+apply. Rebuilding with `make build` (which passes `--pull`) is what applies the fixes: both images install the
+security updates of their base image at build time, so the result does not depend on when the base tag was last
+rebuilt.
+
+#### Last scan
+
+| Target | Result | Date |
+|---|---|---|
+| `backend/requirements.txt` (49 pinned) — pip-audit, Trivy | No known vulnerabilities | 2026-10-21 |
+| `backend/requirements-dev.txt` (56 pinned) — pip-audit, Trivy | No known vulnerabilities | 2026-10-21 |
+| `frontend/package-lock.json` — npm audit | 0 vulnerabilities | 2026-10-21 |
+| Dockerfiles — Trivy 0.76.0 `config` | 0 misconfigurations | 2026-10-21 |
+| `refexposer-backend` image (`sha256:9ac6d97a…`, Debian 13.7, 263 OS packages) | **0 critical, 0 fixable high** (49 high / 84 medium / 126 low without a fix upstream), 0 secrets | 2026-10-21 |
+| `refexposer-frontend` image (`sha256:f241d20b…`, Alpine 3.24.2) | **0 vulnerabilities**, 0 secrets | 2026-10-21 |
+| `postgres:17-alpine` (third party, `sha256:b0f9560a…`) | 0 in the Alpine packages; 1 critical + 25 high in the bundled `gosu` binary (Go standard library 1.24.6) | 2026-10-21 |
+
+The `gosu` findings come from the official PostgreSQL image: the binary is statically linked against an older Go
+standard library and only runs once, at container start, to drop privileges. There is nothing to patch on this
+side; it goes away when the publisher rebuilds the image. The Debian findings of the backend image are packages
+Debian marks *no fix available* (`fix_deferred` / `affected`), mostly in libraries the application never calls.
+
+Base images, pinned by tag and recorded by digest at the last scan:
+
+| Image | Digest |
+|---|---|
+| `python:3.12-slim` | `sha256:a6e34c598f24…` |
+| `nginxinc/nginx-unprivileged:1.31-alpine` | `sha256:b5047b9b7684…` |
+| `postgres:17-alpine` | `sha256:b0f9560a2de0…` |
+| `node:22-alpine` (build stage only) | `sha256:0a7108bf6c7b…` |
+
+#### Not covered yet
+
+- **Pinning by digest** and an update bot (Renovate, Dependabot, or a periodic review offline): pinning without
+  one freezes the vulnerabilities in place, so the two go together.
+- **Signed images**: `cosign` signatures and the SBOM attached as an attestation, verified at deployment.
+- **CIS benchmark of the base OS** (`oscap-podman` / `oscap-docker`) and a **DAST** pass (OWASP ZAP baseline)
+  against the running stack: not run.
+- **Vendored code**: none in this repository — every third-party library is a declared dependency, fetched at
+  build time and pinned (see [NOTICE](NOTICE)). A vendored copy would be invisible to the dependency scan, so
+  any that appears later is listed there and tracked by hand.
+
+### Code scanning (CodeQL)
+
+GitHub code scanning runs on `main`. Three kinds of finding come out of it, and they are handled differently.
+
+**Fixed in the code**
+
+| Alert | What was done |
+|---|---|
+| `py/clear-text-logging-sensitive-data` | A settings change is written to the audit log and to syslog through `appsettings.audit_safe()`: the encrypted fields are replaced by `***`, and so are the **values** of the free-form header maps — a gateway key routinely lives in a header. The names are kept, the values never leave the database. |
+| `py/polynomial-redos` | `EMAIL_RE` was quadratic on input like `!@!.!.!.…` because the dot was inside the character classes. Rewritten so each part matches in exactly one way, with bounded label lengths, and the recipient of a test e-mail is capped at 320 characters. |
+| `py/insecure-protocol` | `ssl.create_default_context()` already refuses TLS 1.0 and 1.1 on this runtime; `minimum_version = TLSv1_2` is now set explicitly, in the certificate-expiry task and in the outgoing HTTP client, so it does not depend on a default. |
+| `py/reflective-xss` | The documentation page accepted any identifier `str.isalnum()` liked, which includes letters of other scripts. It is now an ASCII pattern, URL-encoded into the specification link and HTML-escaped into the title: nothing from the query string can become markup. |
+| `py/url-redirection` | `oidc.safe_next()` parses the path instead of pattern-matching it and rebuilds it from its parts, so a scheme or a host anywhere in it is dropped. |
+| `py/incomplete-url-substring-sanitization` (×2) | Test-only: an assertion searched for a URL inside an exported CSV. It now compares the first column of each line, which is what the test actually means. |
+
+**Hardened, but the alert stands by design** — `py/full-ssrf` on `POST /api/admin/settings/proxy/test` and on the
+federation catalog fetch. Both exist in order to call an address an administrator typed; no allowlist can make
+that go away, and an administrator can already point a referential source anywhere. `network.validate_outbound()`
+now removes what turns such a request into an escalation: http(s) only, no credentials in the address, and any
+host resolving to a **link-local address refused** — the cloud metadata services among them, which answer with
+the credentials of the instance. Private and loopback addresses stay allowed: an inference server, a syslog
+collector or a peer on the internal network is the normal case. Resolution is opportunistic, because a name
+reached through a proxy is resolved by the proxy; this is therefore **not** a defence against DNS rebinding.
+
+**Accepted** — `py/stack-trace-exposure` on the syslog test. The endpoint is admin-only and its whole purpose is
+to report why a collector cannot be reached, step by step; the text comes from `str(exception)`, not from a
+traceback. Dismiss it as intended behaviour rather than hiding the message.
 
 ### Left to the operator
 
@@ -1795,8 +2427,11 @@ To reach the backend directly (port 8000), uncomment the `ports` section of the 
 # Backend tests (pipeline, API, filters, SQL sandbox, authentication, rights, sources, sync, internal referentials)
 docker build --target test -t refexposer-backend:test backend && docker run --rm refexposer-backend:test
 
-# Backend locally (Python 3.12+)
-cd backend && pip install -r requirements-dev.txt
+# Backend locally (Python 3.12+); --require-hashes installs exactly the locked versions
+cd backend && pip install --require-hashes -r requirements-dev.txt
+
+# Add or change a dependency: edit requirements.in (or requirements-dev.in), then recompile the lock
+make lock            # or: sh scripts/lock.sh   ·   make lock-upgrade to take the newest allowed versions
 REFEX_DATA_DIR=../data REFEX_CONFIG_DIR=../config REFEX_ADMIN_PASSWORD='Dev-Passw0rd!' uvicorn app.main:app --reload
 
 # New migration after changing app/models.py
@@ -1806,11 +2441,31 @@ cd backend && alembic revision --autogenerate -m "description"
 cd frontend && npm install && npm run dev
 ```
 
+## Contributing
+
+Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) says what you need to run the
+project, what a change is expected to look like, and what CI checks. Everyone taking part follows the
+[Code of Conduct](CODE_OF_CONDUCT.md). Found a vulnerability? [SECURITY.md](SECURITY.md) — please do not open
+a public issue.
+
+Changes worth knowing about are in [CHANGELOG.md](CHANGELOG.md).
+
+## Licence
+
+RefExposer is released under the **[Apache License 2.0](LICENSE)**: use it, run it, change it, redistribute
+it, build something commercial on it. Keep the licence and the [NOTICE](NOTICE) with it, and say which files
+you changed. There is no warranty of any kind.
+
+Third-party code copied into this repository is listed in [NOTICE](NOTICE); everything else is a declared
+dependency with its own licence, pinned in `backend/requirements.txt` and `frontend/package-lock.json`.
+
+Source files carry no licence header — `LICENSE` covers the whole repository.
+
 ## Ideas for later
 
 - SAML, single logout (RP-initiated logout) with Keycloak
 - Notify administrators (e-mail, Teams) of new access requests
-- Row- or column-level rights inside a referential
-- Notifications (webhook, e-mail, Teams) on failures, corrupted sources or new versions
-- Keep N historical versions and “as of” queries
+- Row-level rights inside a referential (columns are covered by the masking of personal data)
 - Prometheus metrics
+- Applications doing this from inside other tools (SIEM, orchestrators, threat-intelligence platforms):
+  written and built, documentation and release to come

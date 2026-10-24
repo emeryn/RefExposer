@@ -50,9 +50,9 @@ export default function ChangesTab({ r }: { r: ReferentialDetail }) {
             setPage(1);
           }}
           data={[
-            { value: 'added', label: label('Ajouts', c?.added) },
-            { value: 'removed', label: label('Suppressions', c?.removed) },
-            { value: 'modified', label: label('Modifications', c?.modified) },
+            { value: 'added', label: label('Added', c?.added) },
+            { value: 'removed', label: label('Removed', c?.removed) },
+            { value: 'modified', label: label('Modified', c?.modified) },
           ]}
         />
         <Text size="sm" c="dimmed">

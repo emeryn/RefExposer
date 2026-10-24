@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 class QueryError(ValueError):
@@ -169,6 +169,44 @@ def reader_expr(fmt: str, files: list[str], options: dict[str, Any] | None = Non
     raise ValueError(f"unsupported format: {fmt}")
 
 
+# A spreadsheet cell whose value does not fit the type the column was given from its first value
+_XLSX_CELL_TYPE = re.compile(r"Failed to parse cell|Could not convert string")
+
+
+def read_fallbacks(error: str, fmt: str, options: dict[str, Any]) -> list[dict[str, Any]]:
+    """Reader options worth retrying when a source cannot be read as it is, best first (preview and import)."""
+    if fmt == "xlsx" and "all_varchar" not in options and _XLSX_CELL_TYPE.search(error):
+        # Excel columns are typed from their first value: a single text cell further down (a note in a column of
+        # numbers) breaks the read. Everything is read as text instead, and can be cast in a transformation.
+        return [{"all_varchar": True}]
+    if fmt in ("json", "jsonl", "xml") and "maximum_depth" not in options and "Duplicate name" in error:
+        # Nested objects with keys differing only by case: the deeper levels are kept as JSON
+        return [{"maximum_depth": d} for d in (3, 2, 1)]
+    return []
+
+
+def fallback_reason(options: dict[str, Any]) -> str:
+    """Why a source had to be read with these extra options (shown in the preview and the run log)."""
+    if options.get("all_varchar"):
+        return "a cell does not fit the type of its column: every column is read as text (cast them in a SQL transformation)"
+    if "maximum_depth" in options:
+        return f"nested objects with duplicate keys: read with maximum_depth={options['maximum_depth']} (deeper levels kept as JSON)"
+    return "read with " + ", ".join(f"{k}={v}" for k, v in options.items())
+
+
+def apply_transform(transform: str, reader: Callable[[int | None], str], groups: list[list[str]]) -> str:
+    """Replace the placeholders of a transformation. `reader(None)` gives the reader over everything, `reader(i)`
+    the reader over group `i` (built only when the placeholder is there: reading a group may convert files)."""
+    sql = transform.strip().rstrip(";")
+    for i in reversed(range(len(groups))):  # reversed so {source1} is not eaten by {source10}
+        if f"{{source{i}}}" in sql:
+            sql = sql.replace(f"{{source{i}}}", reader(i))
+        sql = sql.replace(f"{{files{i}}}", lit(groups[i]))
+    if "{source}" in sql:
+        sql = sql.replace("{source}", reader(None))
+    return sql.replace("{files}", lit([f for g in groups for f in g]))
+
+
 def build_source_sql(fmt: str, groups: list[list[str]], options: dict[str, Any], transform: str | None) -> str:
     """Build the final SELECT producing the dataset.
 
@@ -179,15 +217,7 @@ def build_source_sql(fmt: str, groups: list[list[str]], options: dict[str, Any],
     all_files = [f for g in groups for f in g]
     if not transform:
         return f"SELECT * FROM {reader_expr(fmt, all_files, options)}"
-    sql = transform.strip().rstrip(";")
-    for i in reversed(range(len(groups))):  # reversed so {source1} is not eaten by {source10}
-        if f"{{source{i}}}" in sql:
-            sql = sql.replace(f"{{source{i}}}", reader_expr(fmt, groups[i], options))
-        sql = sql.replace(f"{{files{i}}}", lit(groups[i]))
-    if "{source}" in sql:
-        sql = sql.replace("{source}", reader_expr(fmt, all_files, options))
-    sql = sql.replace("{files}", lit(all_files))
-    return sql
+    return apply_transform(transform, lambda i: reader_expr(fmt, all_files if i is None else groups[i], options), groups)
 
 
 # --------------------------------------------------------------------------- filtering
@@ -209,7 +239,7 @@ OPERATORS: dict[str, str] = {
     "regex": "matches the regular expression",
 }
 
-RESERVED_PARAMS = {"q", "sort", "limit", "offset", "columns", "format", "count"}
+RESERVED_PARAMS = {"q", "sort", "limit", "offset", "columns", "format", "count", "reveal"}
 
 _NUMERIC = re.compile(r"^(TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT|FLOAT|DOUBLE|DECIMAL.*)$")
 _TEMPORAL = re.compile(r"^(DATE|TIME.*|TIMESTAMP.*|INTERVAL)$")
@@ -371,13 +401,20 @@ class TableQuery:
         return cols + [c for c in (self.indexes or {}) if c not in cols]
 
     @property
+    def fast_search_columns(self) -> list[str]:
+        """Text columns a search can use on a large referential: the sorted and indexed ones among the search
+        columns, or all of them when the referential does not name any (prefix search)."""
+        wanted = self.search_columns or self.fast_columns
+        return [c for c in wanted if c in self.fast_columns and type_kind(self.columns.get(c, "")) == "text"]
+
+    @property
     def fast_filter(self) -> str | None:
         """First filter that can use a sort order (column), if any."""
         for f in self.filters or []:
             if f.column in self.fast_columns and f.op in FAST_OPS:
                 return f.column
         if self.search and self.search.strip() and self.large:
-            cols = [c for c in (self.search_columns or []) if c in self.fast_columns]
+            cols = self.fast_search_columns
             return cols[0] if cols else None
         return None
 
@@ -408,11 +445,13 @@ class TableQuery:
             raise QueryError(full_scan_message(self.huge, used, self.fast_columns))
         if self.search and self.search.strip() and self.large:
             # Full-text "contains" would scan everything: prefix search on sorted columns only
-            cols = [c for c in (self.search_columns or []) if c in self.fast_columns and type_kind(self.columns.get(c, "")) == "text"]
+            cols = self.fast_search_columns
             if not cols:
                 fast = ", ".join(self.fast_columns) or "none"
-                raise QueryError(f"full-text search is not available on this volume: filter on a sorted or indexed column ({fast}), "
-                                 "or set storage.sort_by / storage.indexes on the column to search (prefix search)")
+                named = ", ".join(self.search_columns or []) or "none"
+                raise QueryError(f"text search is not available on this volume: it only reads the sorted and indexed text columns "
+                                 f"({fast}), and the search columns of this referential are {named}. Set storage.sort_by (or "
+                                 "storage.indexes) on the column to search, or filter on a column instead (prefix search)")
             conds.append("(" + " OR ".join(prefix_range(c, self.search.strip()) for c in cols) + ")")
         elif self.search and self.search.strip():
             cols = [c for c in (self.search_columns or []) if c in self.columns]

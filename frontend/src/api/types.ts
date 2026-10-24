@@ -100,6 +100,24 @@ export interface QualitySummary {
   checked_at: string | null;
 }
 
+/** Visibility of a referential: company data, or something already published outside. */
+export type Visibility = 'internal' | 'public';
+
+/** How a personal data column is served when it is not revealed. */
+export type PiiStrategy = 'hide' | 'partial' | 'hash';
+
+/** Masking of the personal data columns of a referential (absent when it has none). */
+export interface PiiState {
+  columns: string[];
+  strategy: PiiStrategy;
+  /** What the data is and under which rule, written by whoever configured the masking */
+  note: string;
+  /** Whether this account may ask for the real values (it still has to ask: `reveal`) */
+  can_reveal: boolean;
+  /** Configured columns the published version does not have (renamed source, typo) */
+  missing: string[];
+}
+
 export interface ReferentialSummary {
   id: string;
   name: string;
@@ -109,11 +127,20 @@ export interface ReferentialSummary {
   homepage: string | null;
   license: string | null;
   owner: string | null;
+  /** Team answering for the referential, beside its owner */
+  owner_team: string | null;
+  visibility: Visibility;
+  /** Columns holding personal data, masked for everyone by default; null when there are none */
+  pii: PiiState | null;
+  /** Past versions are kept and can be compared (Time travel tab) */
+  time_travel: boolean;
+  /** Columns identifying a row when two versions are compared (the key by default) */
+  primary_key_columns: string[];
   format: string;
-  source_type: 'http' | 'local' | 'internal' | 'sync';
+  source_type: 'http' | 'local' | 'internal' | 'sync' | 'git' | 'referential';
   origin: 'file' | 'database' | 'sync';
   config_file: string | null;
-  kind: 'table' | 'bloom' | 'mmdb' | 'internal';
+  kind: RefKind;
   large: boolean;
   sort_by: string[];
   indexes: string[];
@@ -152,8 +179,32 @@ export interface ReferentialSummary {
   sync_path: string | null;
   /** deltas merged into the published version (settings and state since the base) */
   merge?: MergeState | null;
+  /** unified referential: how its source referentials are combined */
+  combine?: CombineState | null;
   /** replica of a referential of another RefExposer instance */
   federation?: FederationInfo | null;
+}
+
+export type RefKind = 'table' | 'bloom' | 'mmdb' | 'internal' | 'combined';
+
+/** `combine` of a definition: how the referentials of `source.referentials` are combined. */
+export interface CombineConfig {
+  mode: 'union' | 'enrich';
+  /** enrich: column of the first referential holding the value to join on (default: the key) */
+  on?: string | null;
+  /** enrich: {referential id: its column matching `on`} when the names differ */
+  join_on?: Record<string, string>;
+  /** {referential id: columns taken from it}; all of them when absent */
+  columns?: Record<string, string[]>;
+  /** enrich: added columns named <referential>_<column> */
+  prefix?: boolean;
+  /** union: column recording which referential each row comes from */
+  source_column?: string | null;
+}
+
+/** Same, as the API reports it on a referential: with the referentials it combines. */
+export interface CombineState extends CombineConfig {
+  referentials: string[];
 }
 
 export interface MergeState {
@@ -265,6 +316,12 @@ export interface SourceInfo {
   fetched_at?: string;
   checked_at?: string;
   not_modified?: boolean;
+  /** unified referential: the source referential and the version its data came from */
+  referential?: string;
+  name?: string;
+  version?: number | null;
+  row_count?: number | null;
+  data_updated_at?: string | null;
 }
 
 export interface BloomInfo {
@@ -300,6 +357,8 @@ export interface ReferentialDetail extends ReferentialSummary {
   key_unique: boolean | null;
   has_previous: boolean;
   sources: SourceInfo[];
+  /** unified referentials built from this one (rebuilt after each of its new versions) */
+  dependents: string[];
   search_columns: string[];
   max_age: string | null;
   config: Record<string, unknown>;
@@ -342,12 +401,262 @@ export interface ChangesResponse {
   rows: Row[] | { key: string; changes: { column: string; before: unknown; after: unknown }[] }[];
 }
 
+export interface Snapshot {
+  id: number;
+  version: number;
+  created_at: string;
+  row_count: number | null;
+  size: number | null;
+  columns: number;
+  schema_hash: string;
+  encrypted: boolean;
+  /** The file is still on disk (it is removed with the retention policy) */
+  available: boolean;
+  run_id: string | null;
+}
+
+export interface SnapshotListing {
+  enabled: boolean;
+  max_snapshots: number;
+  /** Columns identifying a row for the comparison; empty: rows are compared whole */
+  keys: string[];
+  latest: { id: 'latest'; version: number | null; row_count: number | null; created_at: string | null; size: number | null };
+  snapshots: Snapshot[];
+  stored_size: number;
+}
+
+export interface DiffSide {
+  ref: string;
+  version: number | null;
+  created_at: string | null;
+  row_count: number | null;
+  columns: number;
+}
+
+export interface DiffSummary {
+  kind: 'summary';
+  from: DiffSide;
+  to: DiffSide;
+  keys: string[];
+  columns: string[];
+  masked: string[];
+  revealed: boolean;
+  /** False when no key identifies a row: a change then reads as one removal and one addition */
+  comparable: boolean;
+  added: number;
+  removed: number;
+  modified: number;
+  /** Columns only one of the two versions has */
+  schema_changed: string[];
+}
+
+export interface DiffRows {
+  kind: 'added' | 'removed' | 'modified';
+  total: number;
+  columns: Column[];
+  rows: Row[] | { key: string; changes: { column: string; before: unknown; after: unknown }[] }[];
+  note?: string;
+}
+
+export type Severity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export interface WatchdogNotification {
+  target: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface WatchdogRun {
+  id: number;
+  task_id: number;
+  /** Set on the recent-runs list: the name of the watchdog it belongs to */
+  name?: string;
+  started_at: string;
+  finished_at: string | null;
+  trigger: string;
+  status: 'ok' | 'finding' | 'error';
+  finding_detected: boolean;
+  severity: Severity | null;
+  summary: string;
+  details_markdown?: string;
+  affected_items_count: number | null;
+  notifications: WatchdogNotification[];
+  error: string | null;
+  steps: AgentStep[];
+}
+
+export interface WatchdogTask {
+  id: number;
+  name: string;
+  description: string;
+  user_id: number;
+  username: string;
+  referential_ids: string[];
+  trigger_type: 'cron' | 'on_sync';
+  schedule: string | null;
+  prompt: string;
+  template: string | null;
+  notify_emails: string[];
+  notify_channels: string[];
+  min_severity: Severity;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  next_run_at: string | null;
+  running: boolean;
+  last_run: WatchdogRun | null;
+}
+
+export interface WatchdogTemplate {
+  id: string;
+  label: string;
+  description: string;
+  prompt: string;
+}
+
+export type AlertKind = 'watchdog' | 'failure' | 'quality' | 'stale' | 'drift';
+
+/** One line of the alert feed: a watchdog finding, or a referential that drifted. */
+export interface Alert {
+  id: string;
+  kind: AlertKind;
+  severity: Severity;
+  at: string | null;
+  title: string;
+  summary: string;
+  /** Where to go in the interface to act on it */
+  link: string;
+  referential_id: string | null;
+  referential_name: string | null;
+  watchdog_id: number | null;
+  watchdog_name: string | null;
+  /** A watchdog finding carries the report the agent wrote */
+  has_report: boolean;
+}
+
+export interface AlertFeed {
+  alerts: Alert[];
+  counts: Record<string, number>;
+}
+
+/** An alert with what it takes to act on it (the report, the logs, the rules, the figures). */
+export interface AlertDetail {
+  alert: Alert;
+  run?: WatchdogRun | Run | null;
+  watchdog?: { id: number; name: string; description: string; referential_ids: string[]; trigger_type: string; schedule: string | null } | null;
+  referential?: ReferentialSummary | null;
+  quality?: QualityResult | null;
+  figures?: Record<string, unknown>;
+}
+
 export interface SqlResult {
   columns: Column[];
   rows: unknown[][];
   row_count: number;
   truncated: boolean;
   elapsed_ms: number;
+}
+
+export interface AssistantStatus {
+  available: boolean;
+  enabled: boolean;
+  configured: boolean;
+  model: string | null;
+  agent: boolean;
+  writes: boolean;
+  confidential: boolean;
+  /** Scheduled watchdogs are on, and this account may use them (administrators and advanced users) */
+  watchdogs: boolean;
+  max_steps: number;
+  max_chars: number;
+}
+
+export interface AssistantSettings {
+  enabled: boolean;
+  provider: 'ollama' | 'openai';
+  base_url: string;
+  api_key: string;
+  api_key_set?: boolean;
+  api_key_clear?: boolean;
+  headers: Record<string, string>;
+  model: string;
+  verify_tls: boolean;
+  timeout: number;
+  temperature: number;
+  top_p: number;
+  max_tokens: number;
+  context_tokens: number;
+  stop: string[];
+  options: Record<string, unknown>;
+  history_messages: number;
+  agent_enabled: boolean;
+  max_steps: number;
+  allow_writes: boolean;
+  allow_confidential: boolean;
+  /** Scheduled watchdogs: off by default, and reserved to administrators and advanced users */
+  watchdogs_enabled: boolean;
+  groups: string[];
+  user_ids: number[];
+  system_prompt: string;
+  retention_days: number;
+  rate_per_minute: number;
+}
+
+export interface AgentStep {
+  tool: string;
+  arguments: Record<string, unknown>;
+  ok: boolean;
+  summary: string;
+}
+
+export type Artifact =
+  | { kind: 'sql'; sql: string; title: string; explanation?: string }
+  | { kind: 'file'; filename: string; format: string; content: string };
+
+export interface ChatMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  steps: AgentStep[];
+  artifacts: Artifact[];
+  error: string | null;
+  created_at: string;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  model: string | null;
+  agent: boolean;
+  created_at: string;
+  updated_at: string;
+  messages: number | null;
+}
+
+export interface ConversationDetail extends Omit<Conversation, 'messages'> {
+  messages: ChatMessage[];
+}
+
+export interface SqlReferentialRequest {
+  sql: string;
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  sources?: string[];
+  key?: string | null;
+  search_columns?: string[];
+  schedule?: string | null;
+  pull?: boolean;
+}
+
+export interface SqlReferentialCreated {
+  id: string;
+  sources: string[];
+  columns: Column[];
+  transform: string;
+  run: Run | null;
 }
 
 export interface SqlTable {
@@ -357,6 +666,8 @@ export interface SqlTable {
   row_count: number | null;
   columns: Column[];
   indexes?: Record<string, string>;
+  /** Columns the console serves masked, and whether this account may ask for them in clear */
+  pii?: PiiState | null;
 }
 
 export interface SearchResult {
@@ -466,8 +777,13 @@ export interface AdminGroup {
 
 export interface GrantInfo {
   id: number;
+  /** Stored scope: a referential id, '*', or 'category:<name>'. */
   referential_id: string;
   referential_name: string | null;
+  scope: 'referential' | 'category' | 'all';
+  category: string | null;
+  /** Referentials the right covers as things stand (a category resolves at each request). */
+  covers: string[];
   level: Access;
   subject_type: 'user' | 'group';
   user: { id: number; username: string; display_name: string | null } | null;
@@ -532,7 +848,9 @@ export interface CatalogEntry extends ReferentialSummary {
 }
 
 export interface SourceConfigDraft {
-  type: 'http' | 'local' | 'git';
+  type: 'http' | 'local' | 'git' | 'referential';
+  /** unified referential: identifiers of the referentials to combine (the first one gives the rows of an enrichment) */
+  referentials?: string[];
   urls: string[];
   headers: Record<string, string>;
   /** HTTP Basic "user:password" (e.g. MaxMind account_id:license_key); ${REFEX_SOURCE_*} variables are expanded */
@@ -558,6 +876,12 @@ export interface DefinitionConfig {
   homepage: string | null;
   license: string | null;
   owner: string | null;
+  owner_team?: string | null;
+  visibility?: Visibility;
+  /** Columns holding personal data: masked when served, revealed only on request by an allowed account */
+  pii?: { columns: string[]; strategy: PiiStrategy; reveal_groups: string[]; reveal_users: number[]; note: string } | null;
+  /** Columns identifying a row when two versions are compared (the key by default) */
+  primary_key_columns?: string[];
   source: SourceConfigDraft;
   format: string;
   options: Record<string, unknown>;
@@ -580,11 +904,16 @@ export interface DefinitionConfig {
     profile: 'full' | 'sample' | 'none';
     track_changes: boolean;
     check_key: boolean;
+    /** Keep each published version so two of them can be compared (Time travel) */
+    time_travel?: boolean;
+    max_snapshots?: number;
   };
   /** Bloom filter or SQLite database updated by deltas */
   incremental?: { urls: string[]; format?: 'values' | 'bloom' | 'sql' | null; full_every?: string | null; max_fp_rate?: number | null } | null;
   /** tables: each new data set is merged into the published version (deltas) */
   merge?: { enabled: boolean; delete_column?: string | null } | null;
+  /** unified referential: how the referentials of source.referentials are combined */
+  combine?: CombineConfig | null;
   federation?: FederationInfo | null;
 }
 
@@ -592,7 +921,7 @@ export interface Definition {
   id: string;
   origin: 'file' | 'database' | 'sync';
   config_file: string | null;
-  kind: 'table' | 'bloom' | 'mmdb' | 'internal';
+  kind: RefKind;
   large: boolean;
   sort_by: string[];
   indexes: string[];
@@ -759,6 +1088,9 @@ export interface AllSettings {
   mcp_url: string;
   mcp_user_url: string;
   smtp: SmtpSettings;
+  assistant: AssistantSettings;
+  assistant_default_prompt: string;
+  assistant_parameters: Record<string, unknown>;
   local_login: boolean;
   log_level: LogLevel;
   public_url: string | null;

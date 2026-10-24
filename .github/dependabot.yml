@@ -1,0 +1,42 @@
+version: 2
+updates:
+  # Python: the .txt files are generated with hashes by scripts/lock.sh, so Dependabot watches the .in files
+  # it can reason about and a bump is finished by `make lock`.
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python:
+        patterns: ['*']
+        update-types: [minor, patch]
+    labels: [dependencies]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      javascript:
+        patterns: ['*']
+        update-types: [minor, patch]
+    labels: [dependencies]
+
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels: [dependencies]

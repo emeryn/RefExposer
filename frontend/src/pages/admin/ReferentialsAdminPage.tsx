@@ -17,11 +17,10 @@ import {
   Table,
   Text,
   TextInput,
-  Title,
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconAlertTriangle, IconDatabaseEdit, IconDatabasePlus, IconDots, IconDownload, IconPlayerStop, IconFileImport, IconFolderShare, IconEdit, IconFileCode, IconFileText, IconPlus, IconRefresh, IconSearch, IconTrash, IconUpload, IconWorld } from '@tabler/icons-react';
+import { IconAlertTriangle, IconDatabaseEdit, IconDatabasePlus, IconDots, IconDownload, IconPlayerStop, IconFileImport, IconFolderShare, IconGitMerge, IconEdit, IconFileCode, IconFileText, IconPlus, IconRefresh, IconSearch, IconTrash, IconUpload, IconWorld } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -37,6 +36,8 @@ import { describeCron, fmtBytes, fmtNumber, fmtRelative } from '../../lib/format
 function sourceLabel(d: Definition) {
   const s = d.config.source;
   if (d.kind === 'internal') return { icon: <IconDatabaseEdit size={14} />, text: 'Internal (edited in RefExposer)' };
+  if (d.kind === 'combined')
+    return { icon: <IconGitMerge size={14} />, text: `${d.summary.combine?.mode === 'enrich' ? 'Enriched with' : 'Union of'} ${(s.referentials ?? []).join(', ')}` };
   if (d.origin === 'sync') return { icon: <IconFolderShare size={14} />, text: d.summary.sync_path ?? 'Sync folder' };
   if (s.type === 'local') return { icon: <IconUpload size={14} />, text: d.origin === 'database' ? 'Uploaded files' : `Local files (${s.path})` };
   const hosts = [...new Set(s.urls.map((u) => { try { return new URL(u).host; } catch { return u; } }))];
@@ -81,7 +82,7 @@ function YamlModal({ id, onClose }: { id: string | null; onClose: () => void }) 
         </Group>
         <ScrollArea.Autosize mah={520}>
           <Code block fz={12}>
-            {data ?? 'Chargement…'}
+            {data ?? 'Loading…'}
           </Code>
         </ScrollArea.Autosize>
       </Stack>
@@ -163,7 +164,6 @@ export default function ReferentialsAdminPage() {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-end">
         <div>
-          <Title order={2}>Referentials</Title>
           <Text c="dimmed" size="sm">
             Add a source (URL or file), configure how it is read, its schedule and its access.
           </Text>

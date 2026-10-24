@@ -36,6 +36,9 @@ class BusyError(Exception):
 class Service:
     def __init__(self, settings: Settings):
         self.settings = settings
+        # The ASGI application, set at startup: a scheduled watchdog calls the REST API in process and has no
+        # request to take it from (watchdog.py)
+        self.app: Any = None
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.engine = Engine(settings.data_dir, *engine_limits(settings), settings.query_timeout)
         self.downloads = Downloads(self.engine, settings)
@@ -53,6 +56,8 @@ class Service:
         self._lock = threading.RLock()
         self._inbox_seen: dict[str, tuple[int, float]] = {}
         self._pending_publish: dict[str, str | None] = {}
+        # Unified referentials to rebuild once their own run ends (a source published a new version meanwhile)
+        self._pending_upstream: dict[str, str | None] = {}
         self._debounce: dict[str, threading.Timer] = {}  # internal referentials waiting for edits to settle
         self.inbox_unknown: list[str] = []
         self._sync: dict[str, Any] = {}  # id -> sync.SyncEntry
@@ -85,6 +90,9 @@ class Service:
             self.scheduler.start()
             # System tasks (folder scans, maintenance, monitoring, security, backups): see tasks.py
             self.tasks.schedule_all()
+            from . import watchdog
+
+            watchdog.schedule_all(self)  # scheduled investigations run by the assistant (watchdog.py)
         for ref in list(self.refs.values()):  # updates interrupted by the last stop: started again
             meta = self.metas.get(ref.id) or {}
             if meta.get("resume_after_restart"):
@@ -357,7 +365,7 @@ class Service:
     def _schedule_all(self) -> None:
         for job in self.scheduler.get_jobs():
             # Internal jobs (session purge...) and system tasks (scheduled by tasks.py) are kept
-            if not job.id.startswith(("__", "task:")):
+            if not job.id.startswith(("__", "task:", "watchdog:")):
                 job.remove()
         from .federation import schedule_peers
 
@@ -412,6 +420,30 @@ class Service:
         with session_factory()() as db:
             # Only the data column: no ORM object per row
             return [load(ref_id, d) for d in db.scalars(select(InternalRecord.data).where(InternalRecord.referential_id == ref_id).order_by(InternalRecord.row_key))]
+
+    # ------------------------------------------------------------------ unified referentials
+    def _combine_parts(self, ref: ReferentialConfig) -> list[Any]:
+        from .combine import parts
+
+        return parts(self.settings, self.refs, self.metas, ref)
+
+    def dependents(self, ref_id: str) -> list[str]:
+        """Unified referentials reading this one (directly)."""
+        return [r.id for r in self.refs.values() if r.is_combined and ref_id in r.source.referentials]
+
+    def _update_dependents(self, ref_id: str, user: str | None) -> None:
+        """A new version of a referential rebuilds the unified referentials made from it."""
+        for dependent in self.dependents(ref_id):
+            ref = self.refs.get(dependent)
+            if ref is None or not ref.enabled or self.metas.get(dependent, {}).get("pinned"):
+                continue
+            with self._lock:
+                if dependent in self.active:
+                    # It is reading the sources right now: rebuilt again when its run ends
+                    self._pending_upstream[dependent] = user
+                    continue
+            log.info("[%s] new version: rebuilding '%s'", ref_id, dependent)
+            self.submit(dependent, "upstream", False, user)
 
     def publish_internal(self, ref_id: str, user: str | None, delay: float | None = None) -> None:
         """Republish an internal referential after edits. The publication waits `delay` seconds
@@ -482,12 +514,15 @@ class Service:
             return meta
 
     def _register(self, ref: ReferentialConfig, meta: dict[str, Any]) -> None:
-        """Expose the published version; an encrypted one (confidential) is read with its key."""
+        """Expose the published version; an encrypted one (confidential) is read with its key, and the
+        personal data columns are masked by the view itself (pii.py)."""
         from .crypto import parquet_key
+        from .pii import projection
 
         paths = RefPaths(self.settings.data_dir, ref.id)
         key = parquet_key(ref.id) if meta.get("encrypted") else None
-        self.engine.register(ref.table, paths.current, self.index_files(ref), key)
+        columns = [c["name"] for c in meta.get("columns") or []] or None
+        self.engine.register(ref.table, paths.current, self.index_files(ref), key, projection(ref, columns))
 
     def is_pinned(self, ref_id: str) -> bool:
         return bool(self.metas.get(ref_id, {}).get("pinned"))
@@ -524,7 +559,7 @@ class Service:
         try:
             root.mkdir(parents=True, exist_ok=True)
             # Folders of referentials that no longer exist (or became internal) are removed when they hold nothing but the README
-            wanted = {ref.id for ref in self.refs.values() if not (ref.is_internal or ref.is_sync)}
+            wanted = {ref.id for ref in self.refs.values() if not (ref.is_internal or ref.is_sync or ref.is_combined)}
             for d in root.iterdir():
                 if d.is_dir() and not d.name.startswith(".") and d.name not in wanted:
                     content = list(d.iterdir())
@@ -533,7 +568,8 @@ class Service:
                             f.unlink()
                         d.rmdir()
             for ref in self.refs.values():
-                if ref.is_internal or ref.is_sync:  # fed by the editor / the API, or already by files
+                # Fed by the editor / the API, already by files, or rebuilt from other referentials
+                if ref.is_internal or ref.is_sync or ref.is_combined:
                     continue
                 d = root / ref.id
                 d.mkdir(exist_ok=True)
@@ -635,7 +671,7 @@ class Service:
         run.save_journal()
         try:
             meta = execute_run(ref, self.settings, run, cancelled=lambda: ref.id in self._cancel, manual=manual,
-                               internal_rows=self._internal_rows)
+                               internal_rows=self._internal_rows, combine_parts=self._combine_parts)
             if manual is not None:
                 meta["manual_import"] = {"origin": manual["origin"], "by": manual.get("by"), "at": iso(utcnow()),
                                          "files": [f.name for f in manual["files"]], "run": run.id}
@@ -702,6 +738,19 @@ class Service:
                 log.warning("[%s] cannot move the imported files: %s", ref.id, e)
         if run.status in ("success", "unchanged"):
             run.message = run.message or ("No change" if run.status == "unchanged" else "New version published")
+        if run.status == "success" and ref.storage.time_travel:
+            # Time travel: the version just published is kept (a hard link, see snapshots.py) so it can be
+            # compared later. A failure here never fails an update that did publish.
+            from . import snapshots
+
+            try:
+                with self.tasks.db() as db:
+                    snap = snapshots.record(db, self.settings.data_dir, ref, meta, run.id)
+                if snap is not None:
+                    run.log(f"Snapshot of version {snap.version} kept (time travel)")
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] snapshot not kept", ref.id)
+                run.log("The snapshot of this version could not be kept", "warn")
         meta.pop("crashed", None)  # the update went to its end: automatic updates resume
         meta["last_run"] = run.to_dict(with_logs=False)
         meta["last_attempt_at"] = iso(run.finished_at)
@@ -718,8 +767,17 @@ class Service:
             self.active.pop(ref.id, None)
             self._cancel.discard(ref.id)
             again = self._pending_publish.pop(ref.id, False)
+            upstream = self._pending_upstream.pop(ref.id, False)
         if again is not False and ref.id in self.refs:
             self.submit(ref.id, "edit", False, again)
+        elif upstream is not False and ref.id in self.refs:
+            self.submit(ref.id, "upstream", False, upstream)
+        if run.status == "success":
+            self._update_dependents(ref.id, run.user)
+            # Watchdogs waiting for this referential to be synchronized (trigger "on_sync")
+            from . import watchdog
+
+            watchdog.on_sync(self, ref.id)
 
     # ------------------------------------------------------------------ status
     def index_files(self, ref: ReferentialConfig) -> dict[str, tuple[str, Path]]:
@@ -806,7 +864,11 @@ class Service:
             return "stale"
         return "ok"
 
-    def summary(self, ref: ReferentialConfig, access: str | None = None) -> dict[str, Any]:
+    def summary(self, ref: ReferentialConfig, access: str | None = None, user: Any = None) -> dict[str, Any]:
+        """`user`: the account the answer is for, when the payload depends on it (whether it may lift the
+        masking of the personal data columns)."""
+        from .pii import state as pii_state
+
         meta = self.metas.get(ref.id, {})
         run = self.active.get(ref.id)
         nxt = self.next_run(ref.id)
@@ -819,10 +881,18 @@ class Service:
             "homepage": ref.homepage,
             "license": ref.license,
             "owner": ref.owner,
+            "owner_team": ref.owner_team,
+            # internal (company data) or public (open data, external feed): told apart in the interface
+            "visibility": ref.visibility,
+            # Personal data columns and their masking, None when the referential has none
+            "pii": pii_state(ref, user, [c["name"] for c in meta.get("columns") or []]),
+            "time_travel": ref.storage.time_travel,
+            "primary_key_columns": ref.primary_key_columns,
             "format": ref.format,
             "source_type": ref.source.type,
             "origin": ref.origin,
-            "kind": "bloom" if ref.is_bloom else "mmdb" if ref.is_mmdb else "internal" if ref.is_internal else "table",
+            "kind": ("bloom" if ref.is_bloom else "mmdb" if ref.is_mmdb else "internal" if ref.is_internal
+                     else "combined" if ref.is_combined else "table"),
             "config_file": ref.config_file,
             "source_urls": ref.source.urls,
             "key": ref.key,
@@ -854,7 +924,8 @@ class Service:
             # state of the published version: differs from `confidential` until the next publication
             "encrypted": bool(meta.get("encrypted")),
             "manual_import": meta.get("manual_import"),
-            "import_folder": str(self.settings.import_dir / ref.id) if self.settings.import_dir and not (ref.is_sync or ref.is_internal) else None,
+            "import_folder": (str(self.settings.import_dir / ref.id) if self.settings.import_dir
+                              and not (ref.is_sync or ref.is_internal or ref.is_combined) else None),
             "sync_path": f"{self.settings.sync_dir}/{ref.source.path}" if ref.is_sync else None,
             "large": self.is_large(ref.id),
             "sort_by": ref.storage.sort_by,
@@ -862,11 +933,14 @@ class Service:
             "quality": quality_summary(meta.get("quality")),
             # Deltas merged into the published version: settings and state since the base
             "merge": {**ref.merge.model_dump(), **(meta.get("merge") or {})} if ref.merge and ref.is_merge else None,
+            # Unified referential: how its sources are combined, and which ones
+            "combine": ({**(ref.combine.model_dump() if ref.combine else {}), "referentials": ref.source.referentials}
+                        if ref.is_combined else None),
             # Replica of a referential of another instance (peer)
             "federation": ref.federation.model_dump() if ref.federation else None,
         }
 
-    def detail(self, ref: ReferentialConfig, access: str | None = None) -> dict[str, Any]:
+    def detail(self, ref: ReferentialConfig, access: str | None = None, user: Any = None) -> dict[str, Any]:
         meta = self.metas.get(ref.id, {})
         run = self.active.get(ref.id)
         config = ref.model_dump(mode="json", exclude={"config_file"})
@@ -876,7 +950,7 @@ class Service:
             if config["source"].get(secret):
                 config["source"][secret] = "***"
         return {
-            **self.summary(ref, access),
+            **self.summary(ref, access, user),
             "current_run": run.to_dict(with_logs=True) if run else None,
             "columns": meta.get("columns") or [],
             "profile": meta.get("profile") or [],
@@ -888,6 +962,8 @@ class Service:
             "quality": meta.get("quality"),
             "has_previous": RefPaths(self.settings.data_dir, ref.id).previous.exists(),
             "sources": meta.get("sources") or [],
+            # Unified referentials built from this one: they are rebuilt after each new version
+            "dependents": self.dependents(ref.id),
             "search_columns": ref.search_columns,
             "max_age": ref.max_age,
             "config": config,

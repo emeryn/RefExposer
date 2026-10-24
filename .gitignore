@@ -18,11 +18,30 @@ config/*
 *.pem
 *.key
 *.crt
+*.cer
+*.der
 *.p12
 *.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+.netrc
+.npmrc
+.pypirc
+kubeconfig
 .secret_key
 secrets/
 certs/
+
+# --- Applications for other tools -------------------------------------------------------------------
+# Not published yet: written and built, documentation and release to come. Removing this line brings them
+# back, and these rules go with them (a negation cannot re-include a file whose folder is excluded):
+#   integrations/**/refexposer_client.py     copies written into each package by integrations/package.sh
+#   !integrations/shared/refexposer_client.py
+#   integrations/opencti/config.yml          filled-in connector configuration (holds tokens)
+#   !integrations/dist/.gitkeep              kept so the build container can write into dist/
+integrations/
 
 # Local Docker overrides (ports, volumes, SELinux labels…)
 docker-compose.override.yml
@@ -52,7 +71,10 @@ venv/
 
 # --- Node / frontend ----------------------------------------------------------------------------------
 node_modules/
-dist/
+# dist/ and build/ hold generated artifacts
+**/dist/*
+**/build/
+coverage/
 *.tsbuildinfo
 .vite/
 npm-debug.log*
@@ -65,4 +87,25 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 *.log
+
+# Leftovers of an edit, a merge or a backup
+*.bak
+*.orig
+*.rej
+*_old.*
+*.tmp
+
+# --- AI assistant context -----------------------------------------------------------------------------
+# Instructions and transcripts of a coding assistant: never part of the project
 .claude/
+.clauderules
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.cursor/
+.cursorrules
+.clinerules
+.roomodes
+.aider*
+.continue/
+.github/copilot-instructions.md

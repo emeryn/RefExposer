@@ -178,3 +178,15 @@ def test_generated_openapi(env):
     tags = [t["name"] for t in hal.get("/api/catalog/openapi.json").json()["tags"]]
     assert tags == ["Mots"]
     assert hal.get("/api/referentials/countries/openapi.json").status_code == 404
+
+
+def test_definition_says_the_kind_of_referential(env):
+    # The editor and the administration list read 'kind' to send an internal or unified referential
+    # to the right page: it must be there, not only inside 'summary'
+    r = env.post("/api/internal-referentials", json={
+        "id": "notes", "name": "Notes", "key": "code", "columns": [{"name": "code", "type": "text"}]})
+    assert r.status_code == 201, r.text
+    by_id = {d["id"]: d for d in env.get("/api/admin/referentials").json()}
+    assert by_id["notes"]["kind"] == "internal" and by_id["countries"]["kind"] == "table"
+    assert env.get("/api/admin/referentials/notes").json()["kind"] == "internal"
+    assert {"large", "sort_by", "indexes"} <= set(by_id["countries"])

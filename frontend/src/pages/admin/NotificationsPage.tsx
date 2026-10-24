@@ -253,7 +253,6 @@ export default function NotificationsPage() {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-end">
         <div>
-          <Title order={2}>Notifications</Title>
           <Text c="dimmed" size="sm">
             E-mails and webhooks when a referential fails, recovers or publishes a new version. A failing referential is notified once,
             when it starts failing.

@@ -41,8 +41,11 @@ def test_inventory_grouped_by_host(env, http_dir):
 
     csv = env.get("/api/admin/endpoints/export").text.splitlines()
     assert csv[0].startswith("host,url,referential") and sum("remote.csv.gz" in line for line in csv) == 3
-    hosts_csv = env.get("/api/admin/endpoints/export", params={"hosts_only": True}).text
-    assert "https://git.example.org" in hosts_csv and "https://chat.example.com" in hosts_csv
+    hosts_csv = env.get("/api/admin/endpoints/export", params={"hosts_only": True}).text.splitlines()
+    # The first column of each line is compared, not searched for: a substring check on a URL says nothing
+    # about which host the line is really about
+    exported = {line.split(",")[0] for line in hosts_csv[1:]}
+    assert {"https://git.example.org", "https://chat.example.com"} <= exported
 
 
 def test_reserved_to_administrators(env):

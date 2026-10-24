@@ -40,6 +40,7 @@ import { useReferentials } from '../api/hooks';
 import { useAuth } from '../auth/AuthContext';
 import type { ReferentialSummary } from '../api/types';
 import { EmptyState, RefreshButton, StatCard } from '../components/Common';
+import { MaskedBadge, Owner, VisibilityBadge } from '../components/Governance';
 import { HealthBadge, RunProgress, RunStatusBadge, TRIGGERS } from '../components/Status';
 import { describeCron, fmtBytes, fmtCompact, fmtDelta, fmtDuration, fmtNumber, fmtRelative } from '../lib/format';
 
@@ -54,6 +55,7 @@ function RefCard({ r }: { r: ReferentialSummary }) {
               {r.name}
             </Anchor>
             <Group gap={6}>
+              <VisibilityBadge visibility={r.visibility} />
               <Badge size="xs" variant="light" color="grape">
                 {r.category}
               </Badge>
@@ -69,6 +71,13 @@ function RefCard({ r }: { r: ReferentialSummary }) {
               <Tooltip label="Internal referential: managed in RefExposer, no remote source">
               <Badge size="xs" variant="light" color="grape" leftSection={<IconDatabaseEdit size={10} />}>
               internal
+              </Badge>
+              </Tooltip>
+              )}
+              {r.kind === 'combined' && (
+              <Tooltip label={`Unified referential: ${r.combine?.mode === 'enrich' ? 'rows enriched with the columns of' : 'rows of'} ${(r.combine?.referentials ?? []).join(', ')}`}>
+              <Badge size="xs" variant="light" color="teal">
+              unified
               </Badge>
               </Tooltip>
               )}
@@ -93,6 +102,7 @@ function RefCard({ r }: { r: ReferentialSummary }) {
               </Badge>
               </Tooltip>
               )}
+              {r.pii && <MaskedBadge pii={r.pii} />}
               {r.key && (
                 <Tooltip label="Referential key">
                   <Badge size="xs" variant="default" tt="none" leftSection={<IconKey size={10} />}>
@@ -108,6 +118,8 @@ function RefCard({ r }: { r: ReferentialSummary }) {
         <Text size="sm" c="dimmed" lineClamp={2} mih={40}>
           {r.description || 'No description.'}
         </Text>
+
+        <Owner owner={r.owner} team={r.owner_team} size="xs" />
 
         <SimpleGrid cols={3} spacing="xs">
           <div>
@@ -240,6 +252,7 @@ export default function Dashboard() {
   const { data: system } = useQuery({ queryKey: ['system'], queryFn: api.system, refetchInterval: 30000, enabled: !!me?.is_admin });
   const [filter, setFilter] = useState('');
   const [health, setHealth] = useState('all');
+  const [visibility, setVisibility] = useState('all');
   const [category, setCategory] = useState<string | null>(null);
 
   const categories = useMemo(() => [...new Set((refs ?? []).map((r) => r.category))].sort(), [refs]);
@@ -247,13 +260,14 @@ export default function Dashboard() {
     const f = filter.trim().toLowerCase();
     return (refs ?? []).filter((r) => {
       if (category && r.category !== category) return false;
+      if (visibility !== 'all' && r.visibility !== visibility) return false;
       if (health === 'attention' && !['error', 'stale', 'empty'].includes(r.health)) return false;
       if (health === 'ok' && r.health !== 'ok') return false;
       if (health === 'running' && r.health !== 'running') return false;
       if (!f) return true;
       return [r.name, r.id, r.description, r.category, ...r.tags].join(' ').toLowerCase().includes(f);
     });
-  }, [refs, filter, health, category]);
+  }, [refs, filter, health, visibility, category]);
 
   if (isLoading)
     return (
@@ -313,7 +327,9 @@ export default function Dashboard() {
         <StatCard
           label="Referentials"
           value={all.length}
-          hint={`${all.filter((r) => r.has_data).length} with data · ${categories.length} categories`}
+          hint={`${all.filter((r) => r.visibility !== 'public').length} internal · ${
+            all.filter((r) => r.visibility === 'public').length
+          } public · ${categories.length} categories`}
           icon={<IconDatabase size={20} />}
         />
         <StatCard label="Rows served" value={fmtCompact(totalRows)} hint={`${fmtNumber(totalRows)} rows`} icon={<IconListNumbers size={20} />} color="cyan" />
@@ -355,6 +371,15 @@ export default function Dashboard() {
         />
         <Select placeholder="All categories" data={categories} value={category} onChange={setCategory} clearable w={200} />
         <SegmentedControl
+          value={visibility}
+          onChange={setVisibility}
+          data={[
+            { value: 'all', label: 'All' },
+            { value: 'internal', label: 'Internal' },
+            { value: 'public', label: 'Public' },
+          ]}
+        />
+        <SegmentedControl
           value={health}
           onChange={setHealth}
           data={[
@@ -370,7 +395,7 @@ export default function Dashboard() {
         <EmptyState icon={<IconDatabase size={28} />} title="No referential">
           {all.length === 0
             ? me?.is_admin
-              ? 'Create one from Administration › Referentials, or add YAML definitions to the config/ folder and reload the configuration from the System page.'
+              ? 'Create one from Administration › Referentials, or add YAML definitions to the config/ folder and reload the configuration from Administration › System.'
               : 'No referential is available to you yet: ask an administrator for access.'
             : 'No referential matches the filters.'}
         </EmptyState>

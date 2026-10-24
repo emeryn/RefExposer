@@ -18,7 +18,6 @@ import {
   TagsInput,
   Text,
   TextInput,
-  Title,
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -114,7 +113,6 @@ export default function DiscoveryPage() {
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>Bulk discovery</Title>
         <Text c="dimmed" size="sm">
           One referential per data file of a Git repository (e.g. <Anchor href="https://github.com/emeryn/cybref" target="_blank">cybref</Anchor>,{' '}
           <Code>output/*</Code>) or of an HTTP folder (directory listing): scan, review the proposals, create them at once.

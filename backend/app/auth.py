@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from . import syslog
 from .db import get_db
-from .models import ALL_REFERENTIALS, LEVELS, ApiToken, AuditLog, AuthSession, Grant, Group, User, aware, now
+from .models import ALL_REFERENTIALS, CATEGORY_PREFIX, LEVELS, ApiToken, AuditLog, AuthSession, Grant, Group, User, aware, now
 from .security import burn_verification, hash_password, hash_token, new_session_token, verify_password
 from .settings import Settings, get_settings
 
@@ -37,7 +37,15 @@ class CurrentUser:
     must_change_password: bool
     groups: list[str] = field(default_factory=list)
     grants: dict[str, int] = field(default_factory=dict)  # referential id -> level
-    via: Literal["session", "token", "mcp"] = "session"  # mcp: internal call of the MCP server (service account)
+    # Referentials this request may not touch whatever its rights, for a call made on behalf of the assistant
+    # when confidential referentials are kept away from the model (llm/agent.py). Checked before the role, so
+    # an administrator is restricted too: every read goes through level(), including the SQL sandbox.
+    denied: frozenset[str] = field(default_factory=frozenset)
+    # Referentials this request is restricted to, whatever its rights: the scope a watchdog was given, so a
+    # scheduled agent cannot wander off the referentials it was pointed at. None: no such restriction.
+    allowed: frozenset[str] | None = None
+    # mcp: internal call of the MCP server (service account) · agent: internal call of the assistant
+    via: Literal["session", "token", "mcp", "agent"] = "session"
     credential_id: int | None = None
     status: str = "active"
     auth_source: str = "local"
@@ -62,6 +70,10 @@ class CurrentUser:
         return self.role in ("admin", "advanced")
 
     def level(self, ref_id: str) -> int:
+        if ref_id in self.denied:
+            return 0
+        if self.allowed is not None and ref_id not in self.allowed:
+            return 0
         if self.is_admin:
             return LEVELS["manage"]
         return max(self.grants.get(ref_id, 0), self.grants.get(ALL_REFERENTIALS, 0))
@@ -117,8 +129,9 @@ def audit(
 ) -> None:
     ip = client_ip(request) if request else None
     name = getattr(user, "username", None) or username
-    if getattr(user, "via", None) == "mcp":  # action of an agent through the administration MCP server
-        detail = {**(detail or {}), "via": "mcp"}
+    # Action of an agent: through the administration MCP server, or through the assistant of the application
+    if getattr(user, "via", None) in ("mcp", "agent"):
+        detail = {**(detail or {}), "via": user.via}
     db.add(AuditLog(
         user_id=getattr(user, "id", None),
         username=name,
@@ -133,18 +146,33 @@ def audit(
         db.commit()
 
 
-def load_grants(db: Session, user: User) -> dict[str, int]:
+def load_grants(db: Session, user: User, categories: dict[str, str] | None = None) -> dict[str, int]:
+    """Effective level per referential, from the grants of the account and of its groups.
+
+    A grant on a category is resolved here, against the categories the referentials have **now**: one added to
+    the category since the grant was given is covered, and one moved out of it stops being. `*` is kept as it
+    is and read by `CurrentUser.level()`.
+    """
     group_ids = [g.id for g in user.groups]
     cond = Grant.user_id == user.id
     if group_ids:
         cond = or_(cond, Grant.group_id.in_(group_ids))
     out: dict[str, int] = {}
     for g in db.scalars(select(Grant).where(cond)):
-        out[g.referential_id] = max(out.get(g.referential_id, 0), LEVELS.get(g.level, 0))
+        level = LEVELS.get(g.level, 0)
+        if g.referential_id.startswith(CATEGORY_PREFIX):
+            wanted = g.referential_id[len(CATEGORY_PREFIX):]
+            for ref_id, category in (categories or {}).items():
+                if category == wanted:
+                    out[ref_id] = max(out.get(ref_id, 0), level)
+        else:
+            out[g.referential_id] = max(out.get(g.referential_id, 0), level)
     return out
 
 
-def to_current(db: Session, user: User, via: Literal["session", "token"], credential_id: int) -> CurrentUser:
+def to_current(db: Session, user: User, via: Literal["session", "token"], credential_id: int,
+               categories: dict[str, str] | None = None) -> CurrentUser:
+    """`categories`: {referential id: its category}, to resolve the grants given on a whole category."""
     return CurrentUser(
         id=user.id,
         username=user.username,
@@ -153,7 +181,7 @@ def to_current(db: Session, user: User, via: Literal["session", "token"], creden
         role=user.role,
         must_change_password=user.must_change_password,
         groups=sorted(g.name for g in user.groups),
-        grants={} if user.role == "admin" else load_grants(db, user),
+        grants={} if user.role == "admin" else load_grants(db, user, categories),
         via=via,
         credential_id=credential_id,
         status=user.status,
@@ -162,6 +190,12 @@ def to_current(db: Session, user: User, via: Literal["session", "token"], creden
 
 
 # --------------------------------------------------------------------------- request authentication
+
+def categories_of(request: Request) -> dict[str, str]:
+    """{referential id: its category}, as the service holds them right now (empty before it is loaded)."""
+    service = getattr(request.app.state, "service", None)
+    return {r.id: r.category for r in service.refs.values()} if service is not None else {}
+
 
 def authenticate(request: Request, db: Session) -> CurrentUser | None:
     settings = get_settings()
@@ -189,12 +223,12 @@ def authenticate(request: Request, db: Session) -> CurrentUser | None:
         if not api_token.last_used_at or t - aware(api_token.last_used_at) > timedelta(minutes=1):
             api_token.last_used_at = t
             db.commit()
-        current = to_current(db, user, "token", api_token.id)
+        current = to_current(db, user, "token", api_token.id, categories_of(request))
         if request.headers.get("x-refexposer-mcp"):  # call of the MCP server: signed, checked against its settings
             from .mcp import elevate
 
             current = elevate(db, request, current, api_token.id)
-        return current
+        return _restrict_agent(db, request, current)
 
     cookie = request.cookies.get(SESSION_COOKIE)
     if not cookie:
@@ -214,7 +248,17 @@ def authenticate(request: Request, db: Session) -> CurrentUser | None:
         sess.last_seen_at = t
         sess.expires_at = t + timedelta(hours=settings.session_ttl_hours)  # sliding expiration
         db.commit()
-    return to_current(db, sess.user, "session", sess.id)
+    return _restrict_agent(db, request, to_current(db, sess.user, "session", sess.id,
+                                                   categories_of(request)))
+
+
+def _restrict_agent(db: Session, request: Request, current: CurrentUser) -> CurrentUser:
+    """Tool call of the assistant (signed header): the rights of the account, minus what the model may not see."""
+    if not request.headers.get("x-refexposer-agent"):
+        return current
+    from .llm.agent import restrict
+
+    return restrict(db, request, current)
 
 
 def current_user_allow_pending(request: Request, db: Session = Depends(get_db)) -> CurrentUser:

@@ -295,6 +295,28 @@ def _audit_retention(m: TaskManager, p: dict[str, Any]) -> Result:
     return Result(message=f"{n} audit entr{'y' if n == 1 else 'ies'} older than {p['days']} days removed", details={"removed": n})
 
 
+def _assistant_retention(m: TaskManager, p: dict[str, Any]) -> Result:
+    """Conversations of the assistant older than the retention period chosen in its settings."""
+    from sqlalchemy import delete, func, select
+
+    from . import appsettings
+    from .models import ChatMessage, Conversation
+
+    with m.db() as db:
+        days = appsettings.load(db, "assistant").retention_days
+        if not days:
+            return Result(message="no retention period set for the assistant", changed=False)
+        limit = datetime.now(timezone.utc) - timedelta(days=days)
+        ids = list(db.scalars(select(Conversation.id).where(Conversation.updated_at < limit)).all())
+        if ids:
+            db.execute(delete(ChatMessage).where(ChatMessage.conversation_id.in_(ids)))
+            db.execute(delete(Conversation).where(Conversation.id.in_(ids)))
+            db.commit()
+    n = len(ids)
+    return Result(message=f"{n} conversation(s) untouched for more than {days} days removed",
+                  details={"removed": n}, changed=n > 0)
+
+
 def _older_than(path: Path, seconds: float) -> bool:
     try:
         return time.time() - path.stat().st_mtime > seconds
@@ -439,6 +461,7 @@ def _certificate(m: TaskManager, p: dict[str, Any]) -> Result:
         parts = urlsplit(url)
         host, port = parts.hostname or "", parts.port or 443
     ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # stated rather than left to the default of the runtime
     ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # expiry is checked even for a private CA
     with socket.create_connection((host, port), timeout=15) as raw, ctx.wrap_socket(raw, server_hostname=host) as s:
         cert = x509.load_der_x509_certificate(s.getpeercert(binary_form=True))
@@ -580,6 +603,10 @@ def _definitions() -> list[TaskDef]:
                 "Deletes the audit entries older than the retention period (compliance: check your obligations before enabling it).",
                 _audit_retention, schedule="30 3 * * *", enabled=False,
                 params=[Param("days", "Retention (days)", "int", 365, min=30, max=3650)]),
+        TaskDef("assistant_retention", "Assistant conversations retention", "maintenance",
+                "Deletes the conversations with the assistant left untouched for longer than the retention period "
+                "set in Settings › Assistant (0 keeps them).",
+                _assistant_retention, schedule="45 3 * * *", quiet=True),
         TaskDef("disk_cleanup", "Disk cleanup", "maintenance",
                 "Removes the temporary files left behind (interrupted uploads, previews, exports) and reports, or deletes, the "
                 "folders of referentials that no longer exist.", _disk_cleanup, schedule="0 4 * * *",

@@ -76,7 +76,7 @@ export function SecretInput({
               </Menu.Item>
             ))}
             <Menu.Divider />
-            <Menu.Item component={Link} to="/admin/secrets" target="_blank" leftSection={<IconSettings size={14} />}>
+            <Menu.Item component={Link} to="/admin/settings/secrets" target="_blank" leftSection={<IconSettings size={14} />}>
               Manage secrets
             </Menu.Item>
           </Menu.Dropdown>

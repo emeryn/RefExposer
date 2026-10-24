@@ -357,7 +357,6 @@ export default function PeersPage() {
     <Stack gap="lg">
       <Group justify="space-between">
         <div>
-          <Title order={2}>Synchronized instances</Title>
           <Text c="dimmed" size="sm">
             Referentials replicated from other RefExposer instances: definition, quality rules, SQL transformation and data.
           </Text>

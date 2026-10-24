@@ -43,7 +43,6 @@ export default function SystemPage() {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-end">
         <div>
-          <Title order={2}>System</Title>
           <Text c="dimmed" size="sm">
             Service configuration, scheduling and limits.
           </Text>

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from email.utils import formatdate, parsedate_to_datetime
+from html import escape
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -17,6 +20,7 @@ from ..config import ReferentialConfig
 from ..db import get_db
 from ..downloads import DownloadError, DownloadFile
 from ..engine import rows_to_records
+from .. import pii
 from ..service import Service
 from ..sqlbuild import qi
 from ..storage import RefPaths
@@ -31,6 +35,7 @@ def _sample(service: Service, ref: ReferentialConfig) -> dict[str, Any] | None:
         return None
     where = f" WHERE {qi(ref.key)} IS NOT NULL" if ref.key else ""
     try:
+        # The view masks the personal data columns: a sample row of the catalogue never shows them
         cols, rows = service.engine.fetch(f"SELECT * FROM {qi(ref.table)}{where} LIMIT 1")
     except Exception:  # noqa: BLE001
         return None
@@ -49,7 +54,7 @@ def catalog(service: Service = Depends(get_service), user: CurrentUser = Depends
             continue
         meta = service.metas.get(ref.id, {})
         out.append({
-            **service.summary(ref, user.access(ref.id)),
+            **service.summary(ref, user.access(ref.id), user),
             "formats": [] if ref.is_artifact else service.downloads.available(ref, meta),
             "sources": _artifact_files(service, ref, meta) if ref.is_artifact else service.downloads.sources(ref, meta),
         })
@@ -94,6 +99,15 @@ RAW_DOC = ("Raw file, for tools: the MaxMind DB (.mmdb, original name) or the Bl
 def download(ref_id: str, fmt: str, request: Request, service: Service = Depends(get_service), user: CurrentUser = Depends(require_user), db: Session = Depends(get_db)):
     ref = get_ref_with_data(service, ref_id, user)
     meta = service.metas.get(ref_id, {})
+    if fmt in ("source", "raw", "previous") and pii.columns_of(ref):
+        # These serve files as they are on disk, which still hold the real values: generated formats go
+        # through the masked view instead, and whoever may see the values uses /export?reveal=true
+        if not pii.may_reveal(ref, user):
+            raise HTTPException(403, "this referential has masked personal data columns: the source files and the "
+                                     "previous version are not downloadable as they are. Use a generated format "
+                                     "(csv, parquet…), which is masked.")
+        audit(db, "pii.reveal", user=user, target=f"ref:{ref_id}", request=request,
+              detail={"columns": pii.columns_of(ref), "path": f"download/{fmt}"})
     try:
         if ref.is_artifact:
             if fmt not in ("raw", "source", "previous", "mmdb" if ref.is_mmdb else "bloom"):
@@ -174,8 +188,10 @@ def catalog_openapi(request: Request, service: Service = Depends(get_service), u
 @router.get("/catalog/docs", tags=["documentation"], summary="Interactive documentation (Swagger) of the referentials", response_class=HTMLResponse)
 def catalog_docs(ref: str | None = None):
     """Public page: the specification itself is only served to authenticated users."""
-    if ref and not ref.replace("-", "").replace("_", "").isalnum():
+    # ASCII identifiers only (isalnum() also accepts letters of other scripts), then escaped on the way
+    # into the page: nothing from the query string can become markup
+    if ref and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", ref):
         raise HTTPException(400, "invalid identifier")
-    spec_url = f"/api/referentials/{ref}/openapi.json" if ref else "/api/catalog/openapi.json"
+    spec_url = f"/api/referentials/{quote(ref, safe='')}/openapi.json" if ref else "/api/catalog/openapi.json"
     title = f"API — {ref}" if ref else "Referentials API"
-    return HTMLResponse(SWAGGER_HTML.format(title=title, spec_url=json.dumps(spec_url)))
+    return HTMLResponse(SWAGGER_HTML.format(title=escape(title), spec_url=json.dumps(spec_url)))

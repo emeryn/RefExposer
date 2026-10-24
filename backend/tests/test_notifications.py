@@ -146,7 +146,7 @@ def test_failure_then_recovery(env, http_dir, smtp, hook):
     time.sleep(0.5)
     assert len(smtp.messages) == 1 and len(received) == 2
 
-    # Fixed: recovered (and published for the channel listening to it, once)
+    # The source is back: "recovered" (and "published" for the channel listening to it, once)
     (env.www / "feed.csv").write_text(CSV, encoding="utf-8")
     assert refresh(env, "feed")["status"] == "success"
     wait_for(lambda: len(smtp.messages) == 2 and len(received) == 4)

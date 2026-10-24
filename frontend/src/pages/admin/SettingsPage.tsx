@@ -3,7 +3,6 @@ import {
   Badge,
   Button,
   Card,
-  Checkbox,
   Code,
   Divider,
   FileButton,
@@ -27,15 +26,22 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconBrush, IconCheck, IconFileText, IconKey, IconMail, IconRobot, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconX } from '@tabler/icons-react';
+import { IconBell, IconBrush, IconCheck, IconFileText, IconKey, IconLock, IconMail, IconRobot, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconWorldUpload, IconX } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState, type ReactNode } from 'react';
+import { lazy, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useBranding } from '../../api/hooks';
 import type { BrandingSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
 import { BrandHeader } from '../../components/Brand';
 import { CodeSnippet, CopyIcon } from '../../components/Common';
+import { SavedSecret } from '../../components/SavedSecret';
+import { AssistantTab } from './AssistantTab';
+
+// Hosted as tabs of this page: they configure what the service talks to, like the sections above
+const EndpointsPage = lazy(() => import('./EndpointsPage'));
+const NotificationsPage = lazy(() => import('./NotificationsPage'));
+const SecretsPage = lazy(() => import('./SecretsPage'));
 
 const MONO = { input: { fontFamily: 'var(--mantine-font-family-monospace)' } };
 
@@ -71,39 +77,6 @@ function Steps({ steps }: { steps: TestStep[] }) {
   );
 }
 
-function SecretInput({
-  label,
-  description,
-  value,
-  isSet,
-  clear,
-  onChange,
-  onClear,
-}: {
-  label: string;
-  description?: string;
-  value: string;
-  isSet?: boolean;
-  clear?: boolean;
-  onChange: (v: string) => void;
-  onClear: (v: boolean) => void;
-}) {
-  return (
-    <Stack gap={4}>
-      <PasswordInput
-        label={label}
-        description={description}
-        placeholder={isSet && !clear ? '•••••••• (saved, leave empty to keep it)' : ''}
-        value={value}
-        onChange={(e) => onChange(e.currentTarget.value)}
-        disabled={clear}
-        autoComplete="new-password"
-        rightSectionWidth={36}
-      />
-      {isSet && <Checkbox size="xs" label="Clear the saved value" checked={!!clear} onChange={(e) => onClear(e.currentTarget.checked)} />}
-    </Stack>
-  );
-}
 
 function Section({ title, children, icon }: { title: string; children: ReactNode; icon?: ReactNode }) {
   return (
@@ -158,7 +131,7 @@ function ProxyTab({ initial, envProxy }: { initial: ProxySettings; envProxy: Rec
             />
             <SimpleGrid cols={{ base: 1, sm: 2 }}>
               <TextInput label="Proxy user (optional)" value={cfg.username} onChange={(e) => set('username', e.currentTarget.value)} autoComplete="off" />
-              <SecretInput
+              <SavedSecret
                 label="Proxy password"
                 value={cfg.password}
                 isSet={cfg.password_set}
@@ -260,7 +233,7 @@ function MfaTab({ initial, ssoOnly }: { initial: MfaSettings; ssoOnly: boolean }
             )}
             <Text size="xs" c="dimmed">
               When it is required, accounts without a second factor enrol it at their next sign-in (QR code, then recovery codes).
-              A lost phone: reset the second factor of the account from Administration › Users.
+              A lost phone: reset the second factor of the account from Administration › Users and access.
             </Text>
             <Group>
               <Button onClick={() => save.mutate(cfg)} loading={save.isPending}>
@@ -289,7 +262,7 @@ function SmtpTab({ initial }: { initial: SmtpSettings }) {
         <Stack>
           <Section title="Outgoing e-mail server (SMTP)" icon={<IconMail size={18} />}>
             <Text size="sm" c="dimmed">
-              Used by the e-mail channels of <Link to="/admin/notifications">Administration › Notifications</Link> (failure of a referential,
+              Used by the e-mail channels of <Link to="/admin/settings/notifications">Notifications</Link> (failure of a referential,
               recovery, new version).
             </Text>
             <SimpleGrid cols={{ base: 1, sm: 3 }}>
@@ -317,7 +290,7 @@ function SmtpTab({ initial }: { initial: SmtpSettings }) {
             />
             <SimpleGrid cols={{ base: 1, sm: 2 }}>
               <TextInput label="User name" description="Empty: no authentication" value={cfg.username} onChange={(e) => set('username', e.currentTarget.value)} autoComplete="off" />
-              <SecretInput
+              <SavedSecret
                 label="Password"
                 value={cfg.password}
                 isSet={cfg.password_set}
@@ -612,7 +585,7 @@ function SyslogTab({ initial, status, logLevel, companyCa }: { initial: SyslogSe
                 value={cfg.client_cert}
                 onChange={(e) => set('client_cert', e.currentTarget.value)}
               />
-              <SecretInput
+              <SavedSecret
                 label="Private key (PEM, unencrypted)"
                 value={cfg.client_key}
                 isSet={cfg.client_key_set}
@@ -730,7 +703,7 @@ function LdapTab({ initial }: { initial: LdapSettings }) {
             <Divider label="Service account (user lookup)" labelPosition="left" />
             <SimpleGrid cols={{ base: 1, sm: 2 }}>
               <TextInput label="Account DN" placeholder="cn=refexposer,ou=services,dc=example,dc=com" value={cfg.bind_dn} onChange={(e) => set('bind_dn', e.currentTarget.value)} />
-              <SecretInput
+              <SavedSecret
                 label="Password"
                 value={cfg.bind_password}
                 isSet={cfg.bind_password_set}
@@ -943,7 +916,7 @@ function OidcTab({ initial, redirectUri, publicUrl }: { initial: OidcSettings; r
             />
             <SimpleGrid cols={{ base: 1, sm: 2 }}>
               <TextInput label="Client ID" value={cfg.client_id} onChange={(e) => set('client_id', e.currentTarget.value)} />
-              <SecretInput
+              <SavedSecret
                 label="Client secret"
                 description="Confidential client (recommended)"
                 value={cfg.client_secret}
@@ -1030,20 +1003,41 @@ export default function SettingsPage() {
   const { tab = 'network' } = useParams();
   const navigate = useNavigate();
   const { data, isLoading } = useQuery({ queryKey: ['settings'], queryFn: api.settings });
+  const { data: groups } = useQuery({ queryKey: ['admin-groups'], queryFn: api.groups });
+  const { data: accounts } = useQuery({ queryKey: ['admin-users'], queryFn: api.users });
   if (isLoading || !data) return <Loader />;
   return (
     <Stack gap="lg">
       <div>
         <Title order={2}>Settings</Title>
         <Text c="dimmed" size="sm">
-          Outgoing network, identity sources and logging. Passwords and secrets are encrypted in the database (AES-256-GCM, key{' '}
+          Everything the service talks to: outgoing network, identity sources, logging, notifications and the secrets of the
+          sources. Passwords and secrets are encrypted in the database (AES-256-GCM, key{' '}
           {data.secret_key_source === 'env' ? 'from REFEX_SECRET_KEY' : 'generated in data/.secret_key'}) and are never shown again.
         </Text>
       </div>
-      <Tabs value={tab} onChange={(v) => navigate(`/admin/settings/${v}`)} keepMounted={false}>
-        <Tabs.List mb="md">
+      {/* Vertical tabs: there are enough sections that a single row would wrap and hide the last ones */}
+      <Tabs
+        value={tab}
+        onChange={(v) => navigate(`/admin/settings/${v}`)}
+        keepMounted={false}
+        orientation="vertical"
+        variant="pills"
+        // Vertical pills centre their label by default, which reads badly in a column of entries
+        styles={{
+          tab: { justifyContent: 'flex-start', textAlign: 'left' },
+          tabLabel: { flex: 1, textAlign: 'left' },
+        }}
+      >
+        <Tabs.List mr="lg" miw={210}>
           <Tabs.Tab value="network" leftSection={<IconNetwork size={16} />}>
             Network & proxy
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="endpoints"
+            leftSection={<IconWorldUpload size={16} />}
+          >
+            Outgoing connections
           </Tabs.Tab>
           <Tabs.Tab
             value="ldap"
@@ -1067,8 +1061,21 @@ export default function SettingsPage() {
           <Tabs.Tab value="smtp" leftSection={<IconMail size={16} />} rightSection={data.smtp.host ? <Badge size="xs" color="teal">on</Badge> : null}>
             E-mail
           </Tabs.Tab>
+          <Tabs.Tab value="notifications" leftSection={<IconBell size={16} />}>
+            Notifications
+          </Tabs.Tab>
           <Tabs.Tab value="mcp" leftSection={<IconRobot size={16} />} rightSection={data.mcp.enabled ? <Badge size="xs" color="teal">on</Badge> : null}>
             MCP server
+          </Tabs.Tab>
+          <Tabs.Tab value="secrets" leftSection={<IconLock size={16} />}>
+            Secrets
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="assistant"
+            leftSection={<IconRobot size={16} />}
+            rightSection={data.assistant.enabled ? <Badge size="xs" color="teal">on</Badge> : null}
+          >
+            Assistant
           </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="network">
@@ -1094,6 +1101,26 @@ export default function SettingsPage() {
         </Tabs.Panel>
         <Tabs.Panel value="mcp">
           <McpTab initial={data.mcp} url={data.mcp_url} userUrl={data.mcp_user_url} />
+        </Tabs.Panel>
+        <Tabs.Panel value="endpoints">
+          <EndpointsPage />
+        </Tabs.Panel>
+        <Tabs.Panel value="notifications">
+          <NotificationsPage />
+        </Tabs.Panel>
+        <Tabs.Panel value="secrets">
+          <SecretsPage />
+        </Tabs.Panel>
+        <Tabs.Panel value="assistant">
+          <AssistantTab
+            initial={data.assistant}
+            defaultPrompt={data.assistant_default_prompt}
+            groups={(groups ?? []).map((g: { name: string }) => g.name)}
+            savedParameters={data.assistant_parameters}
+            users={(accounts ?? [])
+              .filter((u) => u.auth_source !== 'service' && u.role !== 'admin')
+              .map((u) => ({ value: String(u.id), label: u.display_name ? `${u.display_name} (${u.username})` : u.username }))}
+          />
         </Tabs.Panel>
       </Tabs>
     </Stack>

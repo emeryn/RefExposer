@@ -153,7 +153,10 @@ class Downloads:
         if fmt == "xlsx" and not self.engine.excel:
             raise DownloadError(501, "Excel export unavailable (DuckDB 'excel' extension not loaded)")
 
-        if ref.confidential:
+        if ref.confidential or ref.table in self.engine.masks:
+            # Confidential: the published files are encrypted with a key that is never handed out. Masked
+            # personal data columns: the file is produced from the view, which masks them — a generated
+            # download is shared between users, so it is never the unmasked one.
             return self._temporary(ref, f"SELECT * FROM {qi(ref.table)}", filename, ext, copy_opts or "FORMAT parquet, COMPRESSION zstd", media)
 
         with self._lock(ref.id, fmt):

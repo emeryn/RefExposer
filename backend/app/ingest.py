@@ -32,7 +32,8 @@ from .quality import SAMPLE_ROWS as QUALITY_SAMPLE_ROWS
 from .resources import sqlite_cache_kib
 from .quality import evaluate as evaluate_quality
 from .settings import Settings
-from .sqlbuild import SQLITE_MAGIC, attach_sqlite, build_source_sql, is_sqlite_file, lit, parquet_reader, parquet_sample, qi
+from .sqlbuild import (SQLITE_MAGIC, attach_sqlite, build_source_sql, fallback_reason, is_sqlite_file, lit, parquet_reader,
+                       parquet_sample, qi, read_fallbacks)
 from .storage import RefPaths, dir_size, iso, parse_iso, read_meta, utcnow, write_meta
 
 log = logging.getLogger(__name__)
@@ -790,7 +791,7 @@ def _fingerprint_downloads(sources: list[dict[str, Any]], config_hash: str) -> s
 # --------------------------------------------------------------------------- pipeline
 
 def _connect(settings: Settings, paths: RefPaths, fmt: str, key: tuple[str, str] | None = None,
-             large_source: bool = False) -> duckdb.DuckDBPyConnection:
+             large_source: bool = False, read_keys: list[tuple[str, str]] | None = None) -> duckdb.DuckDBPyConnection:
     from .resources import ingest_limits, temp_limit
 
     con = duckdb.connect()
@@ -798,6 +799,9 @@ def _connect(settings: Settings, paths: RefPaths, fmt: str, key: tuple[str, str]
         # Writing encrypted Parquet needs the OpenSSL crypto of httpfs (the built-in one can only decrypt)
         con.execute("LOAD httpfs")
         con.execute(f"PRAGMA add_parquet_key({lit(key[0])}, {lit(key[1])})")
+    for source_key in read_keys or []:  # confidential sources of a unified referential
+        if source_key != key:
+            con.execute(f"PRAGMA add_parquet_key({lit(source_key[0])}, {lit(source_key[1])})")
     con.execute(f"SET temp_directory = {lit(str(paths.work / 'duckdb'))}")
     # Spill files of a large sort: bounded by the free space minus the reserve (default: 90 % of the free space,
     # enough to fill the disk shared with the database and the other referentials)
@@ -880,7 +884,7 @@ def _passthrough_source(ref: ReferentialConfig, groups: list[list[Path]]) -> Pat
     """The source when it can be published without being rewritten: a single Parquet file, without transform,
     reading options or encryption (published files are written with the layout and compression of the source)."""
     files = [f for g in groups for f in g]
-    if ref.format != "parquet" or len(files) != 1 or ref.transform or ref.options or ref.confidential:
+    if ref.format != "parquet" or len(files) != 1 or ref.transform or ref.options or ref.confidential or ref.is_combined:
         return None
     return files[0]
 
@@ -1093,6 +1097,33 @@ def internal_sql(ref: ReferentialConfig, path: Path, count: int) -> str:
     return f"SELECT {', '.join(qi(n) for n, _ in cols)} FROM read_json({lit(str(path))}, format = 'newline_delimited', columns = {spec})"
 
 
+def _copy_with_fallbacks(con: duckdb.DuckDBPyConnection, ref: ReferentialConfig, run: Run, sql: str,
+                         rebuild: Callable[[dict[str, Any]], str], target: str, out: Path) -> str:
+    """Write the data set, retrying with the reader options that recover from a read error (a spreadsheet
+    column typed from its first value, nested keys differing only by case). Returns the SQL actually used."""
+    try:
+        con.execute(f"COPY ({sql}) {target}")
+        return sql
+    except duckdb.Error as e:
+        if isinstance(e, (duckdb.InterruptException, duckdb.OutOfMemoryException)):
+            raise
+        retry = read_fallbacks(str(e), ref.format, ref.options)
+        if not retry:
+            raise
+        for extra in retry:
+            out.unlink(missing_ok=True)  # the failed COPY may have left a partial file
+            try:
+                sql = rebuild(extra)
+                con.execute(f"COPY ({sql}) {target}")
+            except duckdb.Error:
+                if extra is retry[-1]:
+                    raise
+                continue
+            run.log(fallback_reason(extra), "warn")
+            return sql
+        raise
+
+
 def execute_run(
     ref: ReferentialConfig,
     settings: Settings,
@@ -1100,6 +1131,7 @@ def execute_run(
     cancelled: Callable[[], bool] = lambda: False,
     manual: dict[str, Any] | None = None,
     internal_rows: Callable[[str], list[dict[str, Any]]] | None = None,
+    combine_parts: Callable[[ReferentialConfig], list[Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the full pipeline. Returns the new meta. Raises on failure."""
     paths = RefPaths(settings.data_dir, ref.id).ensure()
@@ -1116,7 +1148,25 @@ def execute_run(
     run.phase = "download"
     groups: list[list[Path]] = []
     sources: list[dict[str, Any]] = []
-    if ref.is_internal:
+    combined: list[Any] = []
+    if ref.is_combined:
+        # Unified referential: the published data of the other referentials, read where it already is
+        from .combine import CombineError, describe
+
+        if combine_parts is None:
+            raise RunRejected("a unified referential can only be built by the service")
+        try:
+            combined = combine_parts(ref)
+        except CombineError as e:
+            raise RunRejected(str(e)) from e
+        groups = [[p.path] for p in combined]
+        sources = describe(combined)
+        cfg = ref.combine
+        how = "enriched with" if cfg and cfg.mode == "enrich" else "union of"
+        run.log(f"Unified referential ({how} {len(combined)} referential(s)): "
+                + ", ".join(f"{p.id} v{p.version} ({p.row_count:,} rows)" if p.row_count else f"{p.id} v{p.version}"
+                            for p in combined))
+    elif ref.is_internal:
         # Rows managed in RefExposer: exported from the database, then published like any source
         records = internal_rows(ref.id) if internal_rows else []
         export = paths.raw / "records.jsonl"
@@ -1240,7 +1290,8 @@ def execute_run(
         })
 
     all_files = [f for g in groups for f in g]
-    if ref.source.type not in ("http", "internal") and manual is None:  # downloaded / imported files are already checked
+    # Downloaded, imported and already published files (a unified referential) are checked when they are produced
+    if ref.source.type not in ("http", "internal", "referential") and manual is None:
         for f in all_files:
             check_source_file(f, ref.format)
     if ref.is_sqlite:
@@ -1249,7 +1300,11 @@ def execute_run(
         if not all_files:
             raise SourceCorrupted("corrupted source: no SQLite database in the source files")
     run.stats["downloaded_bytes"] = run.bytes_done
-    if ref.is_sqlite:
+    if ref.is_combined:
+        # The sources are published versions: nothing to read again to know whether they changed
+        versions = "".join(f"{p.id}:{p.version}:{p.updated_at}" for p in combined)
+        fingerprint = hashlib.sha256((ref.config_hash + versions).encode()).hexdigest()
+    elif ref.is_sqlite:
         state = meta.get("incremental") or {}
         fingerprint = _fingerprint_stat(all_files, ref.config_hash, orjson.dumps(state.get("applied") or []).decode())
     else:
@@ -1277,11 +1332,23 @@ def execute_run(
     paths.work.mkdir(parents=True, exist_ok=True)
     tmp = paths.work / "next.parquet"
     tmp.unlink(missing_ok=True)
-    if ref.is_internal:
-        sql = internal_sql(ref, all_files[0], sources[0]["records"])
-    else:
-        sql = build_source_sql(ref.format, [[str(f) for f in g] for g in groups], ref.options, ref.transform)
     st = ref.storage
+
+    def source_sql(extra: dict[str, Any] | None = None) -> str:
+        """The SELECT producing the data set; `extra` adds reader options (read_fallbacks)."""
+        if ref.is_combined:
+            from .combine import build_sql
+
+            sql = build_sql(ref, combined)
+        elif ref.is_internal:
+            sql = internal_sql(ref, all_files[0], sources[0]["records"])
+        else:
+            sql = build_source_sql(ref.format, [[str(f) for f in g] for g in groups], {**ref.options, **(extra or {})}, ref.transform)
+        if st.sort_by:
+            sql = f"SELECT * FROM ({sql}) ORDER BY {', '.join(qi(c) for c in st.sort_by)}"
+        return sql
+
+    sql = source_sql()
     copy_opts = f"FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {st.row_group_size}"
     # Confidential: Parquet Modular Encryption (AES-GCM) of every written file. `was_encrypted`: state of the
     # published version, which may differ when the confidentiality has just been switched
@@ -1293,10 +1360,9 @@ def execute_run(
     new_key = pkey[0] if ref.confidential else None
     if new_key:
         copy_opts += f", ENCRYPTION_CONFIG {{footer_key: {lit(new_key)}}}"
-    if st.sort_by:
-        sql = f"SELECT * FROM ({sql}) ORDER BY {', '.join(qi(c) for c in st.sort_by)}"
     large_source = meta["raw_size"] > LARGE_SOURCE_BYTES
-    con = _connect(settings, paths, ref.format, pkey, large_source)
+    con = _connect(settings, paths, ref.format, pkey, large_source,
+                   read_keys=[p.key for p in combined if p.key] or None)
     if large_source:
         memory, threads = (con.execute(f"SELECT current_setting('{k}')").fetchone()[0] for k in ("memory_limit", "threads"))
         run.log(f"Large source ({meta['raw_size'] / (1 << 30):.1f} GB): DuckDB limited to {memory} of memory and {threads} "
@@ -1333,7 +1399,7 @@ def execute_run(
             run.log(f"Parquet source published as is ({how}" + (f", already sorted on '{st.sort_by[0]}'" if st.sort_by else "") + ")")
         else:
             run.log("Transforming and writing parquet" + (f" (sorted on {', '.join(st.sort_by)})" if st.sort_by else ""))
-            con.execute(f"COPY ({sql}) TO {lit(str(tmp))} ({copy_opts})")
+            sql = _copy_with_fallbacks(con, ref, run, sql, source_sql, f"TO {lit(str(tmp))} ({copy_opts})", tmp)
         if merging:  # the data set is a delta: merged into the published version
             merged = _merge_into_published(con, ref, run, paths, tmp, new_key, pkey[0] if was_encrypted else None, copy_opts)
         elif ref.is_merge:  # published alone: the rows flagged for deletion are still left out

@@ -1,4 +1,4 @@
-import { Badge, Button, Card, Divider, Drawer, Group, Loader, Modal, MultiSelect, SimpleGrid, Stack, Text, TextInput, Title } from '@mantine/core';
+import { Badge, Button, Card, Divider, Drawer, Group, Loader, Modal, MultiSelect, SimpleGrid, Stack, Text, TextInput } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconPlus, IconTrash, IconUsersGroup } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -68,7 +68,6 @@ export default function GroupsPage() {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-end">
         <div>
-          <Title order={2}>Groups</Title>
           <Text c="dimmed" size="sm">
             Gather users to give them rights at once.
           </Text>

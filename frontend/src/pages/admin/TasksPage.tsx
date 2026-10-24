@@ -393,7 +393,6 @@ export default function TasksPage() {
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>System tasks</Title>
         <Text c="dimmed" size="sm">
           Scheduled maintenance, monitoring, security policy and backups. Every run that does something is written to the audit log
           (and forwarded to syslog when configured).

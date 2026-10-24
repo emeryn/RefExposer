@@ -249,7 +249,150 @@ class McpSettings(BaseModel):
     user_groups: list[str] = Field(default_factory=list)
 
 
-EMAIL_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
+# Keys that make up the request itself: an option of the same name would change what is asked, not how
+RESERVED_LLM_KEYS = frozenset({
+    "model", "messages", "stream", "stream_options", "tools", "tool_choice", "prompt", "options", "format",
+    "suffix", "images", "n",
+})
+
+
+class AssistantSettings(BaseModel):
+    """In-application assistant: a chatbot answering from the referentials, optionally acting as an agent.
+
+    The model runs on a server of your own (Ollama, or anything speaking the OpenAI API: vLLM, llama.cpp,
+    LocalAI, TGI). RefExposer is its only client: the browser never calls it, and the connection uses the
+    proxy and the certificate authorities configured in *Network & proxy*.
+    """
+
+    enabled: bool = False
+    # ollama: /api/tags, /api/chat · openai: /v1/models, /v1/chat/completions
+    provider: Literal["ollama", "openai"] = "ollama"
+    base_url: str = Field("", description="Address of the inference server, e.g. http://ollama.internal:11434")
+    # Optional: most local servers have no authentication. Sent as `Authorization: Bearer <key>`.
+    api_key: str = ""
+    # Extra headers sent with every call, for a gateway that wants its own (tenant, routing, API key under
+    # another name). They never carry a value RefExposer generates: what is written here is what is sent.
+    headers: dict[str, str] = Field(default_factory=dict)
+    model: str = ""
+    verify_tls: bool = True
+    timeout: int = Field(120, ge=5, le=900)
+
+    # Generation. The effective values are shown in the interface: some servers ignore what they do not
+    # support, and the names differ between the two APIs.
+    temperature: float = Field(0.2, ge=0, le=2)
+    top_p: float = Field(0.95, ge=0, le=1)
+    # Tokens the answer may use (Ollama: num_predict · OpenAI: max_tokens)
+    max_tokens: int = Field(2048, ge=64, le=32768)
+    # Context window the model is loaded with (Ollama: num_ctx). 0: whatever the server decides, which is
+    # often small; raise it when the agent reads large tool results.
+    context_tokens: int = Field(0, ge=0, le=1_048_576)
+    # Sequences that stop the generation
+    stop: list[str] = Field(default_factory=list)
+    # Anything else the inference server accepts, sent as it is: for Ollama inside `options`
+    # (repeat_penalty, top_k, min_p, mirostat, seed, num_thread...), for an OpenAI-compatible server at the
+    # top level of the request (repetition_penalty, top_k, frequency_penalty, seed...). Set last, so a key
+    # given here wins over the fields above.
+    options: dict[str, Any] = Field(default_factory=dict)
+    # Messages of the conversation kept in the prompt (the oldest ones are dropped beyond that)
+    history_messages: int = Field(20, ge=2, le=200)
+
+    # Agent mode: the model calls the REST API through the session of the user who is chatting, so it never
+    # does anything that user could not do in the interface.
+    agent_enabled: bool = False
+    max_steps: int = Field(8, ge=1, le=30)
+    # Tools that change something (create a referential, grant a right...). They still obey the rights of
+    # the user: a reader gets the same 403 as in the interface.
+    allow_writes: bool = False
+    # Scheduled watchdogs (watchdog.py): the agent investigating on its own, on a crontab or after a
+    # synchronization. Off by default, and reserved to administrators and advanced users even when on — an
+    # ordinary account never sees the menu. Needs the agent mode.
+    watchdogs_enabled: bool = False
+    # Confidential referentials queryable by the assistant. Off: nothing of theirs ever reaches the model,
+    # neither their rows nor their names (enforced in the authorization layer, not in the prompt).
+    allow_confidential: bool = False
+    # Who may use the assistant: these groups (names) and these accounts (ids). Everyone when both are
+    # empty; administrators always. Service accounts never: they have no interface session.
+    groups: list[str] = Field(default_factory=list)
+    user_ids: list[int] = Field(default_factory=list)
+    # Empty: the default prompt shipped with the application (llm/prompts/assistant.md)
+    system_prompt: str = ""
+    # Conversations older than this are purged by the system task; 0 keeps them
+    retention_days: int = Field(30, ge=0, le=3650)
+    # Generation requests allowed per user and per minute
+    rate_per_minute: int = Field(20, ge=1, le=600)
+
+    @field_validator("base_url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if v and not re.match(r"^https?://[^\s/]+(/[^\s]*)?$", v):
+            raise ValueError("address of the inference server expected (http://host:port)")
+        return v
+
+    @field_validator("stop")
+    @classmethod
+    def _stop(cls, v: list[str]) -> list[str]:
+        out = [s for s in (str(x) for x in v) if s]
+        if len(out) > 8:
+            raise ValueError("at most 8 stop sequences")
+        if any(len(s) > 200 for s in out):
+            raise ValueError("a stop sequence is at most 200 characters")
+        return out
+
+    @field_validator("options")
+    @classmethod
+    def _options(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if len(v) > 40:
+            raise ValueError("at most 40 options")
+        out: dict[str, Any] = {}
+        for name, value in v.items():
+            name = str(name).strip()
+            if not name:
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,48}", name):
+                raise ValueError(f"invalid option name: {name!r}")
+            if name in RESERVED_LLM_KEYS:
+                raise ValueError(f"'{name}' is part of the request itself and cannot be set as an option")
+            if isinstance(value, bool) or isinstance(value, (int, float)):
+                out[name] = value
+            elif isinstance(value, str):
+                if len(value) > 500:
+                    raise ValueError(f"the value of '{name}' is too long")
+                out[name] = value
+            elif isinstance(value, list) and len(value) <= 32 and all(isinstance(x, (str, int, float)) for x in value):
+                out[name] = value
+            else:
+                raise ValueError(f"the value of '{name}' must be a number, a string, a boolean or a list")
+        return out
+
+    @field_validator("headers")
+    @classmethod
+    def _headers(cls, v: dict[str, str]) -> dict[str, str]:
+        if len(v) > 20:
+            raise ValueError("at most 20 headers")
+        out = {}
+        for name, value in v.items():
+            name, value = str(name).strip(), str(value).strip()
+            if not name:
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}", name):
+                raise ValueError(f"invalid header name: {name!r}")
+            # A newline in a value would let a second header be injected into the request
+            if len(value) > 1024 or re.search(r"[\r\n]", value):
+                raise ValueError(f"invalid value for the header {name}")
+            if name.lower() in ("host", "content-length", "transfer-encoding", "connection"):
+                raise ValueError(f"the header {name} is set by the client itself")
+            out[name] = value
+        return out
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.model)
+
+
+# Written so that each part can match in exactly one way: with the dot excluded from the character
+# classes, the engine has nothing to backtrack over (the previous form was quadratic on "a@b.b.b.b…")
+EMAIL_RE = re.compile(r"^[^@\s<>,;]{1,64}@[^@\s<>,;.]{1,63}(\.[^@\s<>,;.]{1,63}){1,8}$")
 
 
 class SmtpSettings(BaseModel):
@@ -368,10 +511,11 @@ M = TypeVar("M", bound=BaseModel)
 SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSettings, "oidc": OidcSettings, "branding": BrandingSettings,
                                          "syslog": SyslogSettings, "tasks": TasksSettings,
                                          "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
-                                         "notifications": NotificationsSettings, "federation": FederationSettings}
+                                         "notifications": NotificationsSettings, "federation": FederationSettings,
+                                         "assistant": AssistantSettings}
 SECRETS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
                                        "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
-                                       "notifications": (), "federation": ()}
+                                       "notifications": (), "federation": (), "assistant": ("api_key",)}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()
@@ -425,6 +569,23 @@ def save(db: Session, key: str, value: BaseModel, username: str | None) -> None:
     db.commit()
     with _lock:
         _cache[key] = value
+
+
+def audit_safe(key: str, value: BaseModel) -> dict[str, Any]:
+    """What a settings change may be written to the audit log and to syslog.
+
+    The encrypted fields are replaced, and so are the **values** of the free-form header maps: a gateway key
+    is routinely put in a header, and a credential has no business in a log line.
+    """
+    out: dict[str, Any] = {}
+    for name, field in value.model_dump().items():
+        if name in SECRETS[key]:
+            out[name] = "***" if field else ""
+        elif name == "headers" and isinstance(field, dict):
+            out[name] = {h: "***" for h in field}
+        else:
+            out[name] = field
+    return out
 
 
 def public(key: str, value: BaseModel) -> dict[str, Any]:

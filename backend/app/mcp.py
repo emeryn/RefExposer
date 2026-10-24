@@ -119,13 +119,18 @@ I = {"type": "integer"}
 B = {"type": "boolean"}
 O = {"type": "object"}
 REF_ID = {"type": "string", "description": "Referential id"}
-SOURCE = {"type": "object", "description": "Source: {type: http|git|local, urls: [...], headers: {...}, basic_auth, repository, "
-                                           "ref, path, token, username, extract}. Credentials: ${secret:<name>} references "
-                                           "(see list_secrets), never literal values"}
+SOURCE = {"type": "object", "description": "Source: {type: http|git|local|referential, urls: [...], headers: {...}, basic_auth, "
+                                           "repository, ref, path, token, username, extract, referentials: [...]}. "
+                                           "type 'referential' combines the published data of the listed referentials (see "
+                                           "'combine'). Credentials: ${secret:<name>} references (see list_secrets), never "
+                                           "literal values"}
 CONFIG = {"type": "object", "description": "Referential definition, as in the YAML files: name, description, category, tags, "
                                            "source, format, options, transform (DuckDB SQL over {source}), key, "
-                                           "search_columns, schedule (cron), validation, storage, confidential, enabled. "
-                                           "Use preview_source first to choose the format and options"}
+                                           "search_columns, schedule (cron), validation, storage, quality, merge, combine, "
+                                           "confidential, enabled. Use preview_source first to choose the format and options"}
+COMBINE = {"type": "object", "description": "Unified referential (source.type: referential): {mode: union|enrich, on, join_on, "
+                                            "columns, prefix, source_column}. union puts the rows of every referential "
+                                            "together; enrich adds the columns of the others to the rows of the first one"}
 
 
 def _compact_list(data: Any, args: dict[str, Any]) -> Any:
@@ -180,9 +185,11 @@ TOOLS: list[Tool] = [
     Tool("sql_schema", "Tables and columns available to run_sql.", {}, (), lambda a: ("GET", "/api/sql/schema", None, None)),
     Tool("preview_source", "Analyse a source before creating a referential: download (sampled), detected format, "
          "JSON/XML record paths, columns and first rows. Same arguments as a definition.",
-         {"source": SOURCE, "format": S, "options": O, "transform": S, "referential_id": S, "refresh": B}, ("source",),
+         {"source": SOURCE, "format": S, "options": O, "transform": S, "referential_id": S, "refresh": B,
+          "combine": COMBINE, "key": S, "confidential": B}, ("source",),
          lambda a: ("POST", "/api/admin/referentials/preview", None,
-                    {k: a[k] for k in ("source", "format", "options", "transform", "referential_id", "refresh") if a.get(k) is not None}),
+                    {k: a[k] for k in ("source", "format", "options", "transform", "referential_id", "refresh",
+                                       "combine", "key", "confidential") if a.get(k) is not None}),
          shape=_compact_preview),
     Tool("list_secrets", "Secrets of the secret manager: names, allowed hosts and referentials using them (never the values). "
          "Reference one in a source as ${secret:<name>}.", {}, (), lambda a: ("GET", "/api/admin/secrets", None, None)),
@@ -255,10 +262,14 @@ TOOLS: list[Tool] = [
          {"content": S, "apply": B, "on_existing": {"type": "string", "enum": ["skip", "update"]}, "ids": {"type": "array", "items": S},
           "grants": B, "create_groups": B, "pull": B}, ("content",),
          lambda a: ("POST", "/api/admin/config/import", None, a), write=True),
-    Tool("grant_access", "Give (or change) a right on a referential ('*' = all) to a group or a user: read or manage.",
-         {"referential_id": S, "group_id": I, "user_id": I, "level": {"type": "string", "enum": ["read", "manage"]}},
-         ("referential_id",), lambda a: ("POST", "/api/admin/grants", None,
-                                         {k: a[k] for k in ("referential_id", "group_id", "user_id", "level") if a.get(k) is not None}),
+    Tool("grant_access", "Give (or change) a right to a group or a user: read or manage. Scope: one referential, "
+         "'*' for every referential, or `category` for every referential of a category (now and as they are added "
+         "to it). Give either referential_id or category.",
+         {"referential_id": S, "category": S, "group_id": I, "user_id": I,
+          "level": {"type": "string", "enum": ["read", "manage"]}},
+         (), lambda a: ("POST", "/api/admin/grants", None,
+                        {k: a[k] for k in ("referential_id", "category", "group_id", "user_id", "level")
+                         if a.get(k) is not None}),
          write=True),
     Tool("reload_configuration", "Reload the YAML definitions and the sync folder.", {}, (),
          lambda a: ("POST", "/api/system/reload", None, None), write=True),
@@ -290,6 +301,21 @@ USER_TOOLS: list[Tool] = [
                     {"kind": a.get("kind", "added"), "limit": min(int(a.get("limit") or 50), 500)}, None)),
     Tool("get_quality", "Data quality of a referential: score, rules and their pass rates, history.", {"id": REF_ID}, ("id",),
          lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/quality", None, None)),
+    Tool("list_referential_snapshots",
+         "Past versions of a referential kept for time travel (newest first), with their date and row count. Their "
+         "identifiers are what diff_referential_snapshots compares; `latest` is the published version.",
+         {"id": REF_ID}, ("id",), lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/snapshots", None, None)),
+    Tool("diff_referential_snapshots",
+         "Compare two versions of a referential: how many rows were added, removed and modified ('summary'), or the "
+         "rows themselves ('added', 'removed', 'modified', the last one with the before / after of each column). Use "
+         "it to answer what changed, what is new or what disappeared since a date. The identifiers come from "
+         "list_referential_snapshots; `to` defaults to the published version.",
+         {"id": REF_ID, "from": S, "to": S,
+          "kind": {"type": "string", "enum": ["summary", "added", "removed", "modified"]}, "limit": I},
+         ("id", "from"),
+         lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/diff",
+                    {"from": a["from"], "to": a.get("to") or "latest", "kind": a.get("kind", "summary"),
+                     "limit": min(int(a.get("limit") or 50), 500)}, None)),
     _TOOL["list_runs"],
     _TOOL["run_sql"],
     _TOOL["sql_schema"],
@@ -299,8 +325,9 @@ SQL_TOOLS = {"run_sql", "sql_schema"}
 USER_INSTRUCTIONS = (
     "RefExposer exposes referentials (threat intelligence, IP ranges, vulnerabilities, internal lists...) as tables. "
     "Start with list_referentials, then get_referential for the columns of one. Exact values: lookup or lookup_many on the "
-    "key; filters and text search: query_rows; a value in every referential: search. You only see the referentials your "
-    "account may read."
+    "key; filters and text search: query_rows; a value in every referential: search. What changed since a past version: "
+    "list_referential_snapshots, then diff_referential_snapshots. You only see the referentials your account may read, "
+    "and the personal data columns of a referential that has any are masked."
 )
 
 INSTRUCTIONS = (
@@ -322,7 +349,7 @@ def _result(id_: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": id_, "result": result}
 
 
-def _text(data: Any) -> str:
+def as_text(data: Any) -> str:
     text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, default=str, indent=1)
     if len(text) > MAX_RESULT_CHARS:
         text = text[:MAX_RESULT_CHARS] + f"\n… truncated ({len(text):,} characters): narrow the request (filters, limit)"
@@ -366,7 +393,7 @@ class McpCaller:
     async def call(self, tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
         method, path, query, body = tool.call(args)
         if method == "ENDPOINTS":
-            return {"content": [{"type": "text", "text": _text(self.endpoints(args.get("filter") or ""))}], "isError": False}
+            return {"content": [{"type": "text", "text": as_text(self.endpoints(args.get("filter") or ""))}], "isError": False}
         if not path.startswith("/api/") or BLOCKED_PATHS.match(path) or ".." in path:
             return {"content": [{"type": "text", "text": f"path not allowed: {path}"}], "isError": True}
         if self.read_only and not is_read_request(method, path):
@@ -387,10 +414,10 @@ class McpCaller:
             data = r.text
         if r.status_code >= 400:
             detail = data.get("detail") if isinstance(data, dict) else data
-            return {"content": [{"type": "text", "text": f"HTTP {r.status_code}: {_text(detail)}"}], "isError": True}
+            return {"content": [{"type": "text", "text": f"HTTP {r.status_code}: {as_text(detail)}"}], "isError": True}
         if tool.shape:
             data = tool.shape(data, args)
-        return {"content": [{"type": "text", "text": _text(data)}], "isError": False}
+        return {"content": [{"type": "text", "text": as_text(data)}], "isError": False}
 
 
 def mcp_account(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:

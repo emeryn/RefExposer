@@ -77,6 +77,8 @@ class Engine:
         self.views: dict[str, Path] = {}
         # Encrypted tables (confidential referentials): view -> (key name, key)
         self.keys: dict[str, tuple[str, str]] = {}
+        # Tables with masked personal data columns: table -> projection applied by their views (pii.py)
+        self.masks: dict[str, str] = {}
 
         self.main = duckdb.connect()
         self._configure(self.main, memory_limit, threads)
@@ -84,7 +86,8 @@ class Engine:
 
         self._memory_limit, self._threads = memory_limit, threads
         # One sandbox connection per set of visible tables (i.e. per permission profile)
-        self._sandboxes: dict[frozenset[str], duckdb.DuckDBPyConnection] = {}
+        # Keyed by (visible tables, tables served unmasked): one connection per permission profile
+        self._sandboxes: dict[tuple[frozenset[str], frozenset[str]], duckdb.DuckDBPyConnection] = {}
 
     def _configure(self, con: duckdb.DuckDBPyConnection, memory_limit: str | None, threads: int | None, temp: str = "duckdb") -> None:
         con.execute(f"SET temp_directory = {lit(str(self.tmp_dir / temp))}")
@@ -108,8 +111,18 @@ class Engine:
 
     # ------------------------------------------------------------------ views
     @staticmethod
-    def _view_sql(table: str, parquet: Path, key: tuple[str, str] | None = None) -> str:
-        return f"CREATE OR REPLACE VIEW {qi(table)} AS SELECT * FROM {parquet_reader(str(parquet.resolve()), key[0] if key else None)}"
+    def _view_sql(table: str, parquet: Path, key: tuple[str, str] | None = None, projection: str | None = None) -> str:
+        """`projection`: what the view selects, `*` by default — `* REPLACE (...)` masks the personal data
+        columns of the referential (pii.py), so every read of the view is masked."""
+        return (f"CREATE OR REPLACE VIEW {qi(table)} AS SELECT {projection or '*'} "
+                f"FROM {parquet_reader(str(parquet.resolve()), key[0] if key else None)}")
+
+    @staticmethod
+    def raw_view(table: str) -> str:
+        """Name of the unmasked view kept beside a masked table, in the main database only."""
+        from .pii import RAW_SUFFIX
+
+        return table + RAW_SUFFIX
 
     @staticmethod
     def add_key(con: duckdb.DuckDBPyConnection, key: tuple[str, str]) -> None:
@@ -120,20 +133,34 @@ class Engine:
         return f"{table}__by_{view_suffix}"
 
     def register(self, table: str, parquet: Path, indexes: dict[str, tuple[str, Path]] | None = None,
-                 key: tuple[str, str] | None = None) -> None:
+                 key: tuple[str, str] | None = None, mask: str | None = None) -> None:
         """Expose `table`, plus one view per sorted copy: indexes = {column: (view suffix, path)}.
-        `key`: the files are encrypted (confidential referential), read with this key."""
+        `key`: the files are encrypted (confidential referential), read with this key.
+        `mask`: projection masking the personal data columns; the view then serves masked values, and an
+        unmasked view is kept beside it for the accounts allowed to reveal them (and only on request)."""
         with self._lock:
             if key:
                 self.add_key(self.main, key)
-            self.main.execute(self._view_sql(table, parquet, key))
+            self.main.execute(self._view_sql(table, parquet, key, mask))
             new_idx = {}
             for col, (suffix, path) in (indexes or {}).items():
                 view = self.index_view(table, suffix)
-                self.main.execute(self._view_sql(view, path, key))
+                self.main.execute(self._view_sql(view, path, key, mask))
                 self.views[view] = path
                 new_idx[col] = view
-            changed_key = self.keys.get(table) != key
+            # Unmasked views, in the main database only: a sandbox builds its own with the right projection
+            for name in [table, *new_idx.values()]:
+                self.main.execute(f"DROP VIEW IF EXISTS {qi(self.raw_view(name))}")
+            if mask:
+                self.main.execute(self._view_sql(self.raw_view(table), parquet, key))
+                for col, (suffix, path) in (indexes or {}).items():
+                    self.main.execute(self._view_sql(self.raw_view(self.index_view(table, suffix)), path, key))
+            changed_mask = self.masks.get(table) != mask
+            if mask:
+                self.masks[table] = mask
+            else:
+                self.masks.pop(table, None)
+            changed_key = self.keys.get(table) != key or changed_mask
             for view in [table, *new_idx.values()]:
                 if key:
                     self.keys[view] = key
@@ -153,8 +180,10 @@ class Engine:
         with self._lock:
             for view in [table, *self.index_views.pop(table, {}).values()]:
                 self.main.execute(f"DROP VIEW IF EXISTS {qi(view)}")
+                self.main.execute(f"DROP VIEW IF EXISTS {qi(self.raw_view(view))}")
                 self.views.pop(view, None)
                 self.keys.pop(view, None)
+            self.masks.pop(table, None)
             self._drop_sandboxes()
 
     def _drop_sandboxes(self) -> None:
@@ -165,24 +194,32 @@ class Engine:
                 pass
         self._sandboxes.clear()
 
-    def sandbox(self, tables: frozenset[str]) -> duckdb.DuckDBPyConnection:
+    def sandbox(self, tables: frozenset[str], reveal: frozenset[str] = frozenset()) -> duckdb.DuckDBPyConnection:
         """Locked-down connection exposing only `tables`. Only their parquet files are readable
-        (`allowed_paths`), so other referentials cannot be reached through read_parquet()."""
+        (`allowed_paths`), so other referentials cannot be reached through read_parquet().
+
+        `reveal`: tables served unmasked in this sandbox (the account may see their personal data columns and
+        asked for it). The views keep their usual names, so the same query runs either way, and a sandbox is
+        cached per (visible tables, revealed tables) — a profile never reuses another one's connection.
+        """
         with self._lock:
             # Sorted copies of a visible table are visible too
-            tables = frozenset(
-                v for t in tables if t in self.views for v in (t, *self.index_views.get(t, {}).values())
-            )
-            con = self._sandboxes.get(tables)
+            groups = [(t, *self.index_views.get(t, {}).values()) for t in tables if t in self.views]
+            tables = frozenset(v for group in groups for v in group)
+            reveal = frozenset(v for group in groups if group[0] in reveal for v in group) & tables
+            profile = (tables, reveal)
+            con = self._sandboxes.get(profile)
             if con is not None:
                 return con
             con = duckdb.connect()
             self._configure(con, self._memory_limit, self._threads, temp="duckdb-sandbox")
+            masks = {v: self.masks[t] for t, *rest in groups if t in self.masks for v in (t, *rest)}
             paths = []
             for t in sorted(tables):
                 if t in self.keys:  # before the configuration is locked
                     self.add_key(con, self.keys[t])
-                con.execute(self._view_sql(t, self.views[t], self.keys.get(t)))
+                con.execute(self._view_sql(t, self.views[t], self.keys.get(t),
+                                           None if t in reveal else masks.get(t)))
                 paths.append(str(self.views[t].resolve()))
             con.execute("SET allowed_directories = []")
             if paths:
@@ -191,7 +228,7 @@ class Engine:
             con.execute("SET lock_configuration = true")
             if len(self._sandboxes) >= 64:
                 self._drop_sandboxes()
-            self._sandboxes[tables] = con
+            self._sandboxes[profile] = con
             return con
 
     def describe(self, table: str) -> list[dict[str, str]]:
@@ -244,12 +281,16 @@ class Engine:
         finally:
             cur.close()
 
-    def run_sandboxed(self, sql: str, max_rows: int, timeout: float, tables: frozenset[str]) -> dict[str, Any]:
-        """Execute a user supplied read-only query in a sandbox exposing only `tables`."""
+    def run_sandboxed(self, sql: str, max_rows: int, timeout: float, tables: frozenset[str],
+                      reveal: frozenset[str] = frozenset()) -> dict[str, Any]:
+        """Execute a user supplied read-only query in a sandbox exposing only `tables`.
+
+        `reveal`: among them, the tables served with their personal data columns in clear.
+        """
         sql = sql.strip().rstrip(";").strip()
         if not sql:
             raise SqlError("empty query")
-        sandbox = self.sandbox(tables)
+        sandbox = self.sandbox(tables, reveal)
         try:
             statements = sandbox.extract_statements(sql)
         except duckdb.Error as e:

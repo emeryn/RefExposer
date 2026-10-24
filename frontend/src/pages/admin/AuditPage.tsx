@@ -1,4 +1,4 @@
-import { Badge, Card, Code, Group, Pagination, Select, Stack, Table, Text, TextInput, Title, Tooltip } from '@mantine/core';
+import { Badge, Card, Code, Group, Pagination, Select, Stack, Table, Text, TextInput, Tooltip } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { IconSearch } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
@@ -107,7 +107,6 @@ export default function AuditPage() {
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>Audit log</Title>
         <Text c="dimmed" size="sm">
           Sign-ins, administration, updates, exports and SQL queries.
         </Text>

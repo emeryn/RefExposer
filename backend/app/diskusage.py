@@ -29,11 +29,15 @@ MAX_ENTRIES = 2_000_000  # beyond, the walk stops and the figures are marked as 
 LARGEST_FILES = 20
 
 # What a file of data/<id>/ is, by its place (first match wins: a hard link is counted under the first one)
-CATEGORIES = ("published", "indexes", "previous", "base", "sources", "downloading", "work", "manual", "exports", "other")
+CATEGORIES = ("published", "indexes", "previous", "snapshots", "base", "sources", "downloading", "work", "manual",
+              "exports", "other")
 LABELS = {
     "published": "Published version",
     "indexes": "Indexes (sorted copies)",
     "previous": "Previous version (rollback)",
+    # Hard links on the published files: counted at their full size, although they share their blocks with
+    # the version they were taken from until that version is replaced
+    "snapshots": "Past versions kept (time travel)",
     "base": "Kept database (SQLite deltas)",
     "sources": "Source files kept",
     "downloading": "Downloads in progress or interrupted",
@@ -59,7 +63,8 @@ def _category(rel: tuple[str, ...]) -> str:
         return "other"
     if top == "raw":
         return "downloading" if len(rel) > 1 and rel[1] in (".partial", ".incoming") else "sources"
-    return {"base": "base", ".work": "work", "manual": "manual", "exports": "exports"}.get(top, "other")
+    return {"base": "base", ".work": "work", "manual": "manual", "exports": "exports",
+            "snapshots": "snapshots"}.get(top, "other")
 
 
 class _Walk:

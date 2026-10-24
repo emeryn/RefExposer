@@ -35,6 +35,7 @@ import { absoluteUrl, api, exportUrl } from '../../api/client';
 import type { ReferentialDetail, Row } from '../../api/types';
 import { DataGrid, RowDrawer, nextSort } from '../../components/DataGrid';
 import { fmtNumber } from '../../lib/format';
+import { RevealSwitch } from '../../components/Governance';
 import { LargeNotice, fastColumns } from '../../components/LargeNotice';
 import { OPERATORS, OPS_BY_KIND, filterParam, readFilters, typeKind } from '../../lib/filters';
 
@@ -204,7 +205,7 @@ export default function DataTab({ r }: { r: ReferentialDetail }) {
           <TextInput
             placeholder={`${r.large ? 'Starts with' : 'Search'}${r.search_columns.length ? ` (${r.search_columns.slice(0, 3).join(', ')}${r.search_columns.length > 3 ? '…' : ''})` : ''}`}
             leftSection={isFetching ? <Loader size={14} /> : <IconSearch size={16} />}
-            rightSection={search ? <CloseButton size="sm" onClick={() => setSearch('')} aria-label="Effacer" /> : null}
+            rightSection={search ? <CloseButton size="sm" onClick={() => setSearch('')} aria-label="Clear the search" /> : null}
             value={search}
             onChange={(e) => setSearch(e.currentTarget.value)}
             w={{ base: '100%', sm: 360 }}
@@ -212,6 +213,12 @@ export default function DataTab({ r }: { r: ReferentialDetail }) {
           <AddFilter r={r} onAdd={(c, op, v) => update((p) => p.set(filterParam(c, op), v))} />
         </Group>
         <Group gap="sm">
+          {/* The opt-in lives in the URL, so the export below carries it too */}
+          <RevealSwitch
+            pii={r.pii}
+            value={params.get('reveal') === 'true'}
+            onChange={(v) => update((p) => (v ? p.set('reveal', 'true') : p.delete('reveal')), false)}
+          />
           <ColumnPicker
             r={r}
             selected={columnsParam ? columnsParam.split(',') : null}

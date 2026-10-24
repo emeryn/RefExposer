@@ -1,0 +1,38 @@
+name: Feature request
+description: Something RefExposer should be able to do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to do, and what stops you today? Describe the situation, not the solution — the
+        best change is often not the one that first comes to mind.
+      placeholder: |
+        Our CMDB export arrives as one Excel file per site, and I have to create one referential per site to
+        get them published together.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. How you would expect it to work, if you have an idea.
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do instead today
+      description: Optional, but it tells us how much the change is worth.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before opening this
+      options:
+        - label: I looked in the README and the in-application help, and it is not there already
+          required: true
+        - label: I searched the existing issues
+          required: true

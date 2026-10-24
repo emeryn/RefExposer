@@ -181,7 +181,6 @@ export default function EndpointsPage() {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-end">
         <div>
-          <Title order={2}>Outgoing connections</Title>
           <Text c="dimmed" size="sm">
             Every URL the referentials contact, grouped by host: an API called by several referentials appears once, with all of them.
             Credentials are shown by name only.

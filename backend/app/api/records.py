@@ -19,7 +19,7 @@ from ..auth import CurrentUser, audit, require_user
 from ..config import ColumnDef, ReferentialConfig, validate_definition
 from ..db import get_db
 from ..engine import rows_to_records
-from ..models import Grant, InternalRecord, ReferentialDefinition
+from ..models import Grant, InternalRecord, ReferentialDefinition, ReferentialSnapshot
 from ..records_codec import db_key, is_encrypted, load, store
 from ..service import Service
 from ..storage import RefPaths
@@ -392,7 +392,9 @@ def import_records(
         con = duckdb.connect()
         if fmt == "xlsx":
             con.execute("LOAD excel")
-        options = {"all_varchar": True} if fmt in ("csv", "tsv") else {}
+        # Values are coerced to the column types afterwards: reading everything as text keeps leading zeros and
+        # tolerates a text cell in a spreadsheet column of numbers
+        options = {"all_varchar": True} if fmt in ("csv", "tsv", "xlsx") else {}
         res = con.execute(f"SELECT * FROM {reader_expr(fmt, [str(files[0])], options)} LIMIT {MAX_BULK + 1}")
         cols = [d[0] for d in res.description]
         records = rows_to_records(cols, res.fetchall())
@@ -458,7 +460,7 @@ def create_internal(body: InternalIn, request: Request, service: Service = Depen
     audit(db, "internal.create", user=user, target=f"ref:{ref_id}", request=request, detail={"columns": [c["name"] for c in body.columns]})
     service.reload()
     service.publish_internal(ref_id, user.username, delay=0)
-    return service.detail(service.refs[ref_id], "manage")
+    return service.detail(service.refs[ref_id], "manage", user)
 
 
 @router.put("/internal-referentials/{ref_id}", summary="Update the description and the columns of an internal referential")
@@ -494,7 +496,7 @@ def update_internal(ref_id: str, body: InternalIn, request: Request, service: Se
           detail={"columns": [c.name for c in ref.columns], "previous": [c.name for c in old.columns], "renames": body.renames})
     service.reload()
     service.publish_internal(ref_id, user.username, delay=0)
-    return service.detail(service.refs[ref_id], "manage")
+    return service.detail(service.refs[ref_id], "manage", user)
 
 
 @router.delete("/internal-referentials/{ref_id}", summary="Delete an internal referential and its rows")
@@ -505,8 +507,12 @@ def delete_internal(ref_id: str, request: Request, service: Service = Depends(ge
     service.discard_scheduled(ref_id)
     if ref_id in service.active:
         raise HTTPException(409, "a publication is running, retry in a moment")
+    used_by = service.dependents(ref_id)
+    if used_by:
+        raise HTTPException(409, f"used by the unified referential(s) {', '.join(used_by)}: change or delete them first")
     db.execute(delete(InternalRecord).where(InternalRecord.referential_id == ref_id))
     db.execute(delete(Grant).where(Grant.referential_id == ref_id))
+    db.execute(delete(ReferentialSnapshot).where(ReferentialSnapshot.referential_id == ref_id))
     d = db.get(ReferentialDefinition, ref_id)
     if d:
         db.delete(d)

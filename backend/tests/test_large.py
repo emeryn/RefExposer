@@ -68,6 +68,23 @@ def test_large_mode_guardrails(env):
     assert r["rows"] == [[1]]
 
 
+def test_large_search_without_declared_search_columns(env):
+    # A huge source cannot be analysed before the import, so its search columns are often left empty:
+    # the search then uses the sorted and indexed text columns instead of being refused
+    refresh(env, "pdns")
+    make_large(env)
+    env.app_.state.service.refs["pdns"].search_columns = []
+    r = env.get("/api/referentials/pdns/rows", params={"q": "mx.circl"})
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 1 and r.json()["rows"][0]["rrname"] == "mail.circl.lu"  # found through the rdata index
+
+    # Without any sorted or indexed column, the refusal says which columns the search can use
+    env.app_.state.service.refs["pdns"].storage.sort_by = []
+    env.app_.state.service.engine.index_views.pop("pdns", None)
+    r = env.get("/api/referentials/pdns/rows", params={"q": "mx.circl"})
+    assert r.status_code == 400 and "storage.sort_by" in r.json()["detail"]
+
+
 def test_query_timeout(env):
     refresh(env, "pdns")
     eng = env.app_.state.service.engine

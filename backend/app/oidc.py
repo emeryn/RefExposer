@@ -14,7 +14,7 @@ import re
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import jwt
 
@@ -71,10 +71,18 @@ def redirect_uri(cfg: OidcSettings, base_url: str) -> str:
 
 
 def safe_next(path: str | None) -> str:
-    """Only allow local paths (no open redirect)."""
+    """The page to open after signing in: a path of this application, or the home page.
+
+    Parsed rather than pattern-matched: anything carrying a scheme or a host, or not starting with a single
+    slash, is dropped. The result is rebuilt from its parts, so what is returned can only be a local path —
+    there is no form of it that sends the browser to another site.
+    """
     if not path or not path.startswith("/") or path.startswith("//") or "\\" in path:
         return "/"
-    return path
+    parts = urlsplit(path)
+    if parts.scheme or parts.netloc:
+        return "/"
+    return urlunsplit(("", "", parts.path or "/", parts.query, parts.fragment))
 
 
 def start(settings: Settings, cfg: OidcSettings, base_url: str, next_path: str | None) -> tuple[str, str]:

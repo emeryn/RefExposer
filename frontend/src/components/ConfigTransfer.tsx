@@ -198,7 +198,7 @@ export function ImportModal({ opened, onClose }: { opened: boolean; onClose: () 
             {plan.missing_secrets.length > 0 && (
               <Alert color="orange" icon={<IconKey size={16} />} p="sm">
                 <Text size="sm">
-                  Secrets to create first in <Link to="/admin/secrets" target="_blank">Secrets</Link> (same names), then analyse again:
+                  Secrets to create first in <Link to="/admin/settings/secrets" target="_blank">Settings › Secrets</Link> (same names), then analyse again:
                 </Text>
                 {plan.missing_secrets.map((s) => (
                   <Text key={s.name} size="xs">

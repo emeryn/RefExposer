@@ -4,13 +4,14 @@ import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..auth import CurrentUser, audit, require_admin, revoke_sessions
 from ..db import get_db
-from ..models import ALL_REFERENTIALS, SERVICE_PASSWORD, ApiToken, AuditLog, AuthSession, Grant, Group, User, WebauthnCredential, aware, now
+from ..models import (ALL_REFERENTIALS, CATEGORY_PREFIX, MAX_CATEGORY_LENGTH, SERVICE_PASSWORD, ApiToken,
+                      AuditLog, AuthSession, Grant, Group, User, WebauthnCredential, aware, now)
 from ..security import hash_password, password_problems
 from ..service import Service
 from .auth import TokenCreate, token_dict, issue_token
@@ -81,10 +82,28 @@ class GroupIn(BaseModel):
 
 
 class GrantIn(BaseModel):
-    referential_id: str = Field(..., max_length=64)
+    """Scope of a right: one referential, every referential (`*`), or a whole category."""
+
+    referential_id: str | None = Field(None, max_length=64,
+                                       description="Referential identifier, or '*' for every referential")
+    category: str | None = Field(None, max_length=MAX_CATEGORY_LENGTH,
+                                 description="Category: the right applies to the referentials it holds, now and "
+                                             "as they are added to it")
     user_id: int | None = None
     group_id: int | None = None
     level: Literal["read", "manage"] = "read"
+
+    @model_validator(mode="after")
+    def _scope(self) -> "GrantIn":
+        if (self.referential_id is None) == (self.category is None):
+            raise ValueError("give either referential_id or category")
+        if self.category is not None and not self.category.strip():
+            raise ValueError("the category cannot be empty")
+        return self
+
+    @property
+    def scope(self) -> str:
+        return f"{CATEGORY_PREFIX}{self.category.strip()}" if self.category is not None else self.referential_id  # type: ignore[return-value]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -135,11 +154,23 @@ def group_dict(g: Group, db: Session) -> dict[str, Any]:
 
 
 def grant_dict(g: Grant, service: Service) -> dict[str, Any]:
+    category = g.referential_id[len(CATEGORY_PREFIX):] if g.referential_id.startswith(CATEGORY_PREFIX) else None
     ref = service.refs.get(g.referential_id)
+    if category is not None:
+        covered = sorted(r.id for r in service.refs.values() if r.category == category)
+        scope, name = "category", f"Category “{category}”"
+    elif g.referential_id == ALL_REFERENTIALS:
+        covered, scope, name = sorted(service.refs), "all", "All referentials"
+    else:
+        covered, scope, name = ([g.referential_id] if ref else []), "referential", (ref.name if ref else None)
     return {
         "id": g.id,
         "referential_id": g.referential_id,
-        "referential_name": "All referentials" if g.referential_id == ALL_REFERENTIALS else (ref.name if ref else None),
+        "referential_name": name,
+        "scope": scope,
+        "category": category,
+        # Referentials the right covers as things stand: 0 for a category nothing is in (yet)
+        "covers": covered,
         "level": g.level,
         "subject_type": "user" if g.user_id else "group",
         "user": {"id": g.user.id, "username": g.user.username, "display_name": g.user.display_name} if g.user else None,
@@ -427,8 +458,12 @@ def list_grants(
 ):
     q = select(Grant).order_by(Grant.referential_id, Grant.id)
     if referential_id:
-        # The '*' grants also apply to every referential
-        q = q.where(Grant.referential_id.in_([referential_id, ALL_REFERENTIALS]))
+        # A referential is also covered by the '*' grants and by those on its category
+        scopes = [referential_id, ALL_REFERENTIALS]
+        ref = service.refs.get(referential_id)
+        if ref is not None:
+            scopes.append(f"{CATEGORY_PREFIX}{ref.category}")
+        q = q.where(Grant.referential_id.in_(scopes))
     if user_id:
         q = q.where(Grant.user_id == user_id)
     if group_id:
@@ -439,28 +474,32 @@ def list_grants(
 @router.post("/grants", summary="Grant (or change) a right", status_code=201)
 def upsert_grant(body: GrantIn, request: Request, db: Session = Depends(get_db), admin: CurrentUser = Depends(require_admin), service: Service = Depends(get_service)):
     if (body.user_id is None) == (body.group_id is None):
-        raise HTTPException(400, "indiquez soit user_id, soit group_id")
-    if body.referential_id != ALL_REFERENTIALS and body.referential_id not in service.refs:
-        raise HTTPException(404, f"unknown referential: '{body.referential_id}'")
+        raise HTTPException(400, "give either user_id or group_id")
+    scope = body.scope
+    if body.category is None and scope != ALL_REFERENTIALS and scope not in service.refs:
+        raise HTTPException(404, f"unknown referential: '{scope}'")
     if body.user_id and not db.get(User, body.user_id):
         raise HTTPException(404, "user not found")
     if body.group_id and not db.get(Group, body.group_id):
         raise HTTPException(404, "group not found")
     g = db.scalar(select(Grant).where(
-        Grant.referential_id == body.referential_id,
+        Grant.referential_id == scope,
         Grant.user_id.is_(None) if body.user_id is None else Grant.user_id == body.user_id,
         Grant.group_id.is_(None) if body.group_id is None else Grant.group_id == body.group_id,
     ))
     if g:
         g.level = body.level
     else:
-        g = Grant(referential_id=body.referential_id, user_id=body.user_id, group_id=body.group_id, level=body.level, created_by=admin.username)
+        g = Grant(referential_id=scope, user_id=body.user_id, group_id=body.group_id, level=body.level,
+                  created_by=admin.username)
         db.add(g)
     db.flush()
     db.refresh(g)
     subject = f"user:{g.user.username}" if g.user else f"group:{g.group.name}"
-    audit(db, "grant.set", user=admin, target=f"ref:{g.referential_id}", request=request, detail={"subject": subject, "level": g.level})
-    return grant_dict(g, service)
+    shaped = grant_dict(g, service)
+    audit(db, "grant.set", user=admin, target=f"ref:{g.referential_id}", request=request,
+          detail={"subject": subject, "level": g.level, "scope": shaped["scope"], "covers": len(shaped["covers"])})
+    return shaped
 
 
 @router.delete("/grants/{grant_id}", summary="Remove a right")

@@ -2,9 +2,7 @@ import { Alert, Anchor, Code, List, Table, Text, Title } from '@mantine/core';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { absoluteUrl } from '../../api/client';
-import type { Me } from '../../api/types';
-
-export type Section = { id: string; title: string; admin?: boolean; visible?: (me: Me) => boolean; body: (me: Me) => ReactNode };
+import type { Section } from './HelpPage';
 
 const H = ({ children }: { children: ReactNode }) => (
   <Title order={4} mt="lg" mb={6}>
@@ -51,6 +49,36 @@ export const INTEGRATIONS: Section[] = [
         <P>
           Any tool able to call an HTTP API or to download a file can use the referentials: SOAR and automation (n8n…), SIEM (Splunk,
           Elastic, Graylog…), BI tools, IDS, scripts. Choose the pattern according to the volume and the freshness you need.
+        </P>
+        <H>Ready-made applications</H>
+        <P>
+          Three applications are shipped with RefExposer, in its <Code>integrations/</Code> folder. They do the work of the recipes
+          below — catalog, live queries, enrichment, scheduled copies — without writing any code, and the first two also{' '}
+          <b>feed referentials</b> from the tool:
+        </P>
+        <Table fz="sm" maw={860} mb="sm" withTableBorder>
+          <Table.Tbody>
+            {[
+              ['Splunk app', 'integrations/splunk', 'Dashboards (catalog, detail, live query, enrichment, lookups) and the SPL commands refexlist, refexinfo, refexquery, refexlookup, refexsearch, refexsync, refexping. Queries run in RefExposer: nothing is downloaded unless you ask for a lookup table.'],
+              ['Dataiku DSS plugin', 'integrations/dss', 'A RefExposer dataset (live or synced), an enrichment recipe, a publish recipe writing a DSS dataset into a referential, catalog and import macros, and a scenario trigger on new versions.'],
+              ['n8n nodes', 'integrations/n8n', 'One node with eight resources (rows, lookup, records, referential, download, search, SQL, system) and a trigger node that starts a workflow on a new version, a failure, stale data or a quality drop.'],
+            ].map(([a, b, c]) => (
+              <Table.Tr key={a}>
+                <Table.Td w={150} fw={600}>
+                  {a}
+                </Table.Td>
+                <Table.Td w={160}>
+                  <Code>{b}</Code>
+                </Table.Td>
+                <Table.Td>{c}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+        <P>
+          Build them with <Code>integrations/package.sh</Code>, then install the files it writes in{' '}
+          <Code>integrations/dist/</Code>. Each folder has its own README with the installation and the parameters. Their own
+          sections below give the details.
         </P>
         <Table fz="sm" maw={860} mb="sm" withTableBorder>
           <Table.Thead>
@@ -296,6 +324,58 @@ esac`}</Shell>
     body: () => (
       <>
         <TokenNote />
+        <H>The RefExposer nodes (recommended)</H>
+        <P>
+          <Code>integrations/n8n</Code> is a node package written in plain JavaScript: nothing to compile, no dependency to
+          install. Copy it into the custom extensions folder of n8n and restart it:
+        </P>
+        <Shell>{`cp -r integrations/n8n ~/.n8n/custom/n8n-nodes-refexposer
+# docker: mount it instead
+#   -v /opt/refexposer/integrations/n8n:/home/node/.n8n/custom/n8n-nodes-refexposer
+# or build a package: cd integrations && ./package.sh  ->  dist/n8n-nodes-refexposer-<version>.tgz
+#   npm install /path/to/n8n-nodes-refexposer-<version>.tgz`}</Shell>
+        <P>
+          Then <b>Credentials › Add credential › RefExposer API</b>: the address of RefExposer (without <Code>/api</Code>) and the
+          token of a service account. <i>Test</i> shows which account the token belongs to. Two nodes appear:
+        </P>
+        <Table fz="sm" maw={860} mb="sm" withTableBorder>
+          <Table.Tbody>
+            {[
+              ['Row', 'Get Many (filters, search, sort, columns, pagination), Get All (every matching row in one streamed request), Get Facets'],
+              ['Lookup', 'One Value, or Many Values: up to 10,000 values in one call, one item per value with found and the columns'],
+              ['Record', 'Create, Create or Update, Update, Delete, Get, Get Many, Bulk — writes the rows of an internal referential'],
+              ['Referential', 'List, Get, Get History, Get Changes, Get Quality, Update Now, Cancel Update, Create Internal'],
+              ['Download', 'The whole referential (csv, csv.gz, xlsx, json, jsonl, parquet, source, previous), the raw file, or a filtered export, as binary data'],
+              ['Search · SQL · System', 'Search every referential at once, run a read-only SQL query, read the status of the instance'],
+              ['RefExposer Trigger', 'Starts the workflow on a new version, a failed update, a recovery, stale data or a quality drop'],
+            ].map(([a, b]) => (
+              <Table.Tr key={a}>
+                <Table.Td w={170} fw={600}>
+                  {a}
+                </Table.Td>
+                <Table.Td>{b}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+        <P>
+          The referential and its columns are drop-down lists read live from RefExposer, so a workflow only ever sees what its
+          token is granted. Two expressions cover most needs — enrich every item in one call, and write the items back:
+        </P>
+        <Shell>{`# Lookup › Many Values, field "Values"
+{{ $input.all().map(i => i.json.cve) }}
+
+# Record › Bulk, field "Rows to Add or Update"
+{{ JSON.stringify($input.all().map(i => i.json)) }}`}</Shell>
+        <P>
+          Writing rows needs the <b>manage</b> right on the referential, and <i>Create Internal</i> the administrator or
+          advanced-user role. Everything else only needs <b>read</b>.
+        </P>
+        <H>Without the package: HTTP Request nodes</H>
+        <P>
+          The same thing can be done with the generic nodes — useful on n8n Cloud, or to understand what the package does. A
+          ready-made workflow is in <Code>examples/n8n/refexposer-workflow.json</Code>.
+        </P>
         <H>1. Credential</H>
         <Steps
           items={[
@@ -346,8 +426,52 @@ return $('Previous node').all().map(item => ({
     body: () => (
       <>
         <TokenNote />
-        <P>Two approaches: a CSV lookup table refreshed on a schedule (simple, fast), or an external lookup that queries RefExposer during the search (always up to date).</P>
-        <H>1. CSV lookup table, refreshed by cron</H>
+        <H>The RefExposer app (recommended)</H>
+        <P>
+          <Code>integrations/splunk</Code> is a Splunk app: build it with <Code>integrations/package.sh</Code>, then install{' '}
+          <Code>dist/refexposer-&lt;version&gt;.tgz</Code> with <b>Apps › Install app from file</b>. Open{' '}
+          <b>RefExposer › Configuration</b> and give the address and the token of a service account: the token goes to{' '}
+          <Code>storage/passwords</Code> (encrypted), never to a <Code>.conf</Code> file. <Code>| refexping</Code> checks the
+          connection. The app only uses the Python shipped with Splunk.
+        </P>
+        <P>
+          <b>Querying live from the search bar</b> — the filters run in RefExposer (DuckDB) and only the matching rows reach
+          Splunk, so nothing has to be downloaded or kept in sync:
+        </P>
+        <Shell>{`| refexlist                                        the catalog: id, health, rows, version, schedule
+| refexinfo ref=cisa-kev                          schema, profile, history, changes, downloads
+| refexquery ref=cisa-kev filters="vendorProject=Microsoft&dateAdded__gte=2024-01-01" limit=500
+| refexquery ref=pdns filters="rrname=www.example.com"     billions of rows, answered in milliseconds
+| refexsearch value=CVE-2021-44228                a value looked for in every referential at once
+
+index=vuln sourcetype=scanner
+| refexlookup ref=cisa-kev field=cve              enrichment: batches of distinct values, live
+| where isnotnull(refex_dateAdded)`}</Shell>
+        <P>
+          <Code>| refexquery</Code> reads one API page up to <Code>REFEX_API_MAX_LIMIT</Code> rows, and streams an export beyond
+          it (<Code>limit=0</Code> for everything). <Code>| refexlookup</Code> sends only the distinct values of the search, in
+          batches, and adds the columns of the referential to each event — nothing is cached, so the enrichment is always the
+          published version.
+        </P>
+        <P>
+          <b>When a search really needs a lookup table</b> (very high event rates, or an existing search using{' '}
+          <Code>| lookup</Code>), <Code>| refexsync</Code> ingests the referential as a Splunk CSV lookup and keeps it up to
+          date: nothing is downloaded while the published version has not changed, the file is installed through the
+          lookup-table-files endpoint (replicated in a search head cluster) and the scheduled search{' '}
+          <i>RefExposer - Lookup sync</i> refreshes the registered ones.
+        </P>
+        <Shell>{`| refexsync ref=cisa-kev                    ingest + keep it up to date (lookup refex_cisa_kev)
+| refexsync ref=pdns filters="rrtype=A" columns="rrname,rdata"    a subset only
+| refexsync managed=true                    refresh every registered lookup (the scheduled search does this)
+| refexsync ref=cisa-kev action=remove
+
+... | \`refex_enrich(cisa-kev, cve)\`          macro: lookup on the ingested table, matched on the key`}</Shell>
+        <P>
+          The app also ships dashboards for the catalog, the detail of a referential, the live query, the enrichment and the
+          state of the ingested lookups. The <Code>refexposer_admin</Code> role is enough to install lookups; see{' '}
+          <Code>integrations/splunk/README.md</Code> for the roles, the air-gapped install and the troubleshooting.
+        </P>
+        <H>Without the app: a CSV lookup refreshed by cron</H>
         <P>On the search head, a script downloads the referential only when it changed, then replaces the lookup file in one move:</P>
         <Shell>{`#!/bin/sh
 # /opt/refexposer/sync-kev.sh — cron: 15 * * * *
@@ -372,14 +496,16 @@ index=vuln sourcetype=scanner
 | lookup cisa_kev cveID AS cve OUTPUT vendorProject product dateAdded knownRansomwareCampaignUse
 | where isnotnull(dateAdded)`}</Shell>
         <P>
-          Fine up to a few million rows. Beyond that, CSV downloads are not offered for large referentials: use the external lookup
-          below, or the API with filters.
+          Fine up to a few million rows. Beyond that, CSV downloads are not offered for large referentials: use{' '}
+          <Code>| refexquery</Code> or <Code>| refexlookup</Code> of the app, or the API with filters.
         </P>
-        <H>2. External lookup (live)</H>
+        <H>Without the app: an external lookup (live)</H>
         <P>
-          Splunk passes the values of the search to a script, which looks them up in batches of 10,000 and returns the columns.
-          Save it as <Code>bin/refex_lookup.py</Code> in your app, and the token in <Code>local/refexposer.token</Code> (readable by the
-          splunk account only):
+          To keep <Code>| lookup</Code> working while the data stays in RefExposer, Splunk can pass the values of the search to a
+          script. Splunk gives an external lookup script <b>no session key</b>, so the token has to sit in a file readable by the
+          splunk account only (<Code>chmod 600</Code>) instead of the encrypted <Code>storage/passwords</Code>: that is a step
+          down from <Code>| refexlookup</Code> of the app, which needs no token on disk. Save the script as{' '}
+          <Code>bin/refex_lookup.py</Code> in your app:
         </P>
         <Shell>{`#!/usr/bin/env python3
 """Splunk external lookup: refex_lookup.py <referential> <field>"""
@@ -418,11 +544,85 @@ python.version = python3
 
 # SPL
 ... | lookup refex_kev cveID AS cve OUTPUT vendorProject product dateAdded`}</Shell>
-        <H>3. GeoIP with your own MaxMind DB</H>
+        <H>GeoIP with your own MaxMind DB</H>
         <P>
           If RefExposer publishes a MaxMind DB, download its raw file (<Code>/raw</Code>, see <i>Other tools</i>) to{' '}
           <Code>$SPLUNK_HOME/share/GeoLite2-City.mmdb</Code>, or set <Code>db_path</Code> in the <Code>[iplocation]</Code> stanza of{' '}
           <Code>limits.conf</Code>: the <Code>iplocation</Code> command then uses it.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: 'integrations-dss',
+    title: 'Dataiku DSS',
+    body: () => (
+      <>
+        <TokenNote />
+        <P>
+          <Code>integrations/dss</Code> is a DSS plugin: build it with <Code>integrations/package.sh</Code>, then upload{' '}
+          <Code>dist/dss-plugin-refexposer-&lt;version&gt;.zip</Code> with <b>Plugins › Add plugin › Upload</b>. It uses the DSS
+          built-in Python, so there is no code environment to build.
+        </P>
+        <H>1. The instance preset</H>
+        <P>
+          <b>Plugins › RefExposer › Settings › RefExposer instance › Add preset</b>: the address of RefExposer (without{' '}
+          <Code>/api</Code>), the token of a service account, TLS verification, an optional company certificate authority (PEM)
+          and an optional outgoing proxy. Give the projects or groups that need it the <i>use</i> permission on the preset — the
+          token never reaches the users. Keep a <b>separate preset, with its own token</b>, for the projects allowed to write.
+        </P>
+        <H>2. Reading referentials</H>
+        <Table fz="sm" maw={860} mb="sm" withTableBorder>
+          <Table.Tbody>
+            {[
+              ['RefExposer referential (dataset)', 'New dataset › RefExposer: choose the preset and the referential, then Test & get schema. Full-text search, filters, columns and a row limit run in RefExposer, so only the matching rows reach DSS. Add a Sync recipe to keep a copy in DSS storage.'],
+              ['Enrich with RefExposer (recipe)', 'Adds the columns of a referential to a dataset, matched on one of its columns. Only the distinct values not seen yet are sent, in batches. Works with tables, Bloom filters (present / probabilistic) and MaxMind DB (country, city, AS…).'],
+              ['RefExposer: catalog (macro)', 'The referentials the token sees, with health, rows, version and last update.'],
+              ['RefExposer: import referentials (macro)', 'Creates one dataset per referential; ingest mode also adds a Sync recipe to a managed dataset and builds it.'],
+              ['RefExposer: new version published (trigger)', 'Starts a scenario when one of the selected referentials publishes a new version; the changed ids arrive in refexposer_changed.'],
+            ].map(([a, b]) => (
+              <Table.Tr key={a}>
+                <Table.Td w={230} fw={600}>
+                  {a}
+                </Table.Td>
+                <Table.Td>{b}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+        <H>3. Feeding a referential from DSS</H>
+        <P>
+          <b>Plugin recipes › RefExposer › Publish to RefExposer</b> sends the rows of a dataset into an <b>internal</b>{' '}
+          referential — the only kind whose rows RefExposer owns (a downloaded referential is rebuilt from its source and would
+          lose them, so the recipe refuses it).
+        </P>
+        <List size="sm" spacing={4} maw={860} mb="sm">
+          <List.Item>
+            <b>Add and update</b> matches the rows on the key of the referential and keeps the rows the dataset does not have;{' '}
+            <b>Replace</b> makes the referential exactly the dataset.
+          </List.Item>
+          <List.Item>
+            An optional <b>deletion column</b> removes the rows flagged <Code>true</Code> instead of writing them.
+          </List.Item>
+          <List.Item>
+            <b>Create it if it does not exist</b> builds the referential from the schema of the dataset on the first run (key
+            column, name, category, confidential). This needs an administrator or advanced-user token; writing rows only needs
+            the <b>manage</b> right.
+          </List.Item>
+          <List.Item>
+            The dataset is read in chunks, one request each (5,000 rows by default, 50,000 maximum). A chunk is all or nothing:
+            one value that does not fit its column type is reported with its row and nothing of that chunk is written. Columns
+            the referential does not have are ignored and listed in the report.
+          </List.Item>
+          <List.Item>
+            The <b>output dataset</b> holds one row per run — rows sent, created, updated, unchanged, deleted, ignored columns,
+            error — ready to use as a DSS metric or check. An empty dataset in <i>Replace</i> mode is refused, so a broken
+            upstream flow never empties a referential.
+          </List.Item>
+        </List>
+        <P>
+          Writes appear in the RefExposer audit log under the service account, and RefExposer publishes one new version a few
+          seconds after the last change. See <Code>integrations/dss/README.md</Code> for the full parameter list.
         </P>
       </>
     ),

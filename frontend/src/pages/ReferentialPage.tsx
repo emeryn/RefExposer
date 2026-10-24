@@ -16,6 +16,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import {
+  IconClockHour4,
   IconShieldCheck,
   IconAlertTriangle,
   IconDatabaseEdit,
@@ -49,10 +50,12 @@ import { DownloadMenu } from '../components/Downloads';
 import { ImportButton } from '../components/ImportButton';
 import type { ReferentialDetail } from '../api/types';
 import { EmptyState, RefreshButton } from '../components/Common';
+import { MaskedBadge, Owner, VisibilityBadge } from '../components/Governance';
 import { HealthBadge, RunProgress } from '../components/Status';
 import { describeCron, fmtBytes, fmtDate, fmtDelta, fmtNumber, fmtRelative } from '../lib/format';
 import ApiTab from './ref/ApiTab';
 import ChangesTab from './ref/ChangesTab';
+import TimeTravelTab from './ref/TimeTravelTab';
 import DataTab from './ref/DataTab';
 import EditTab from './ref/EditTab';
 import HistoryTab from './ref/HistoryTab';
@@ -79,6 +82,8 @@ function Info({ label, children, hint }: { label: string; children: ReactNode; h
 function Header({ r }: { r: ReferentialDetail }) {
   const { me } = useAuth();
   const internal = r.kind === 'internal';
+  // A unified referential is rebuilt from its sources: no file to import into it
+  const combined = r.kind === 'combined';
   const pinned = !!r.pinned;
   const delta = r.row_count != null && r.previous_row_count != null ? r.row_count - r.previous_row_count : null;
   return (
@@ -91,6 +96,7 @@ function Header({ r }: { r: ReferentialDetail }) {
               <HealthBadge health={r.health} size="md" />
             </Group>
             <Group gap={6}>
+              <VisibilityBadge visibility={r.visibility} size="md" />
               <Badge variant="light" color="grape">
                 {r.category}
               </Badge>
@@ -104,6 +110,7 @@ function Header({ r }: { r: ReferentialDetail }) {
                   </Badge>
                 </Tooltip>
               )}
+              {r.pii && <MaskedBadge pii={r.pii} size="md" />}
               {r.confidential && (
                 <Tooltip
                   multiline
@@ -119,6 +126,21 @@ function Header({ r }: { r: ReferentialDetail }) {
                 <Tooltip label="Offline membership tests: “absent” is certain, “present” is probable">
                   <Badge variant="light" color="cyan">
                     Bloom filter
+                  </Badge>
+                </Tooltip>
+              )}
+              {r.kind === 'combined' && r.combine && (
+                <Tooltip
+                  multiline
+                  maw={380}
+                  label={
+                    r.combine.mode === 'enrich'
+                      ? `Rows of ${r.combine.referentials[0]}, enriched with the columns of ${r.combine.referentials.slice(1).join(', ')}. Rebuilt whenever one of them publishes a new version.`
+                      : `Rows of ${r.combine.referentials.join(', ')} put together. Rebuilt whenever one of them publishes a new version.`
+                  }
+                >
+                  <Badge variant="light" color="teal" leftSection={<IconGitMerge size={10} />} tt="none">
+                    unified · {r.combine.referentials.length} referentials
                   </Badge>
                 </Tooltip>
               )}
@@ -167,11 +189,7 @@ function Header({ r }: { r: ReferentialDetail }) {
                   <IconExternalLink size={14} style={{ verticalAlign: -2 }} /> Reference website
                 </Anchor>
               )}
-              {r.owner && (
-                <Text size="sm" c="dimmed">
-                  Producer: {r.owner}
-                </Text>
-              )}
+              {(r.owner || r.owner_team) && <Owner owner={r.owner} team={r.owner_team} />}
               {r.license && (
                 <Text size="sm" c="dimmed">
                   License: {r.license}
@@ -191,7 +209,7 @@ function Header({ r }: { r: ReferentialDetail }) {
               </Button>
             )}
             {r.has_data && <DownloadMenu refId={r.id} />}
-            {r.access === 'manage' && !internal && !r.sync_path && <ImportButton r={r} />}
+            {r.access === 'manage' && !internal && !combined && !r.sync_path && <ImportButton r={r} />}
             {r.access === 'manage' && !internal && <RefreshButton id={r.id} running={!!r.current_run} merged={!!r.merge?.enabled} />}
           </Group>
         </Group>
@@ -374,13 +392,15 @@ function OriginNotices({ r }: { r: ReferentialDetail }) {
 // Raw files (Bloom filter, MaxMind DB): lookups only, no table
 const ARTIFACT_TABS = ['search', 'history', 'api', 'source', 'access'];
 
-const TABS: { value: string; label: string; icon: typeof IconTable; admin?: boolean; internal?: boolean }[] = [
+const TABS: { value: string; label: string; icon: typeof IconTable; admin?: boolean; internal?: boolean; travel?: boolean }[] = [
   { value: 'data', label: 'Data', icon: IconTable },
   { value: 'edit', label: 'Edit', icon: IconDatabaseEdit, internal: true },
   { value: 'search', label: 'Search', icon: IconSearch },
   { value: 'schema', label: 'Schema & profile', icon: IconListDetails },
   { value: 'quality', label: 'Quality', icon: IconShieldCheck },
   { value: 'changes', label: 'Changes', icon: IconGitCompare },
+  // Only on a referential whose past versions are kept (storage.time_travel)
+  { value: 'timetravel', label: 'History & diff', icon: IconClockHour4, travel: true },
   { value: 'history', label: 'History', icon: IconHistory },
   { value: 'api', label: 'API', icon: IconApi },
   { value: 'source', label: 'Source & configuration', icon: IconSettings },
@@ -408,7 +428,7 @@ export default function ReferentialPage() {
       </Alert>
     );
 
-  const needsData = ['data', 'search', 'schema', 'changes', 'api'].includes(tab) && r.kind !== 'internal';
+  const needsData = ['data', 'search', 'schema', 'changes', 'timetravel', 'api'].includes(tab) && r.kind !== 'internal';
   const accessBadge = !me?.is_admin && r.access && (
     <Badge variant="outline" color={r.access === 'manage' ? 'orange' : 'blue'} size="sm" leftSection={<IconLock size={10} />}>
       {r.access === 'manage' ? 'Manage' : 'Read only'}
@@ -426,7 +446,11 @@ export default function ReferentialPage() {
       <Tabs value={tab} onChange={(v) => navigate(`/r/${id}/${v === 'data' ? '' : v}`)} keepMounted={false}>
         <Tabs.List mb="md">
           {TABS.filter(
-            (t) => (!t.admin || me?.is_admin) && (!t.internal || r.kind === 'internal') && (!artifact || ARTIFACT_TABS.includes(t.value)),
+            (t) =>
+              (!t.admin || me?.is_admin) &&
+              (!t.internal || r.kind === 'internal') &&
+              (!t.travel || r.time_travel) &&
+              (!artifact || ARTIFACT_TABS.includes(t.value)),
           ).map((t) => (
             <Tabs.Tab key={t.value} value={t.value} leftSection={<t.icon size={16} />}>
               {t.label}
@@ -461,6 +485,11 @@ export default function ReferentialPage() {
             <Tabs.Panel value="changes">
               <ChangesTab r={r} />
             </Tabs.Panel>
+            {r.time_travel && (
+              <Tabs.Panel value="timetravel">
+                <TimeTravelTab r={r} />
+              </Tabs.Panel>
+            )}
             <Tabs.Panel value="history">
               <HistoryTab r={r} />
             </Tabs.Panel>

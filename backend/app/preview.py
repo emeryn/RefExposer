@@ -25,7 +25,7 @@ from .engine import rows_to_lists
 from .ingest import Run, _filename, check_source_file, download, http_client, unpack
 from .settings import Settings
 from .convert import ConvertError, json_candidates, xml_candidates
-from .sqlbuild import attach_sqlite, build_source_sql, is_sqlite_file, lit
+from .sqlbuild import attach_sqlite, build_source_sql, fallback_reason, is_sqlite_file, lit, read_fallbacks
 
 PREVIEW_TTL = 30 * 60
 PREVIEW_ROWS = 50
@@ -365,6 +365,20 @@ def detect_format(files: list[Path]) -> tuple[str, dict[str, Any]]:
     return fmt, {"sniff": sniff}
 
 
+def xlsx_sheets(path: Path) -> list[str]:
+    """Sheet names of a workbook, in the order of the tabs (read from the archive, without opening the data)."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    try:
+        with zipfile.ZipFile(path) as z:
+            root = ET.fromstring(z.read("xl/workbook.xml"))
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
+        return []
+    return [s.get("name", "") for s in root.iter(f"{ns}sheet") if s.get("name")]
+
+
 def json_records_candidates(path: Path) -> list[str]:
     """Record collections of a JSON document (records_path hints): arrays of objects, objects of records (``path.*``)."""
     head = _head(path, 2 * 1024 * 1024)
@@ -376,20 +390,17 @@ def json_records_candidates(path: Path) -> list[str]:
 
 
 def records_candidates(path: Path, fmt: str) -> list[str]:
+    """What the source offers to read: record paths (JSON), record elements (XML), sheets (Excel)."""
     try:
         if fmt == "json":
             return json_records_candidates(path)
         if fmt == "xml":
             return [tag for tag, _ in xml_candidates(path)][:10]
+        if fmt == "xlsx":
+            return xlsx_sheets(path)
     except (ConvertError, OSError):
         pass
     return []
-
-
-def _duplicate_keys_fix(error: Exception, fmt: str, options: dict[str, Any]) -> list[int] | None:
-    if fmt not in ("json", "jsonl", "xml") or "maximum_depth" in options or "Duplicate name" not in str(error):
-        return None
-    return [3, 2, 1]
 
 
 # --------------------------------------------------------------------------- preview
@@ -510,25 +521,67 @@ def preview(
         try:
             res = con.execute(f"SELECT * FROM ({sql}) LIMIT {PREVIEW_ROWS}")
         except duckdb.Error as e:
-            retry = _duplicate_keys_fix(e, fmt, options)
-            if retry is None:
+            retry = read_fallbacks(str(e), fmt, options)
+            if not retry:
                 raise
-            # Nested objects with keys differing only by case: keep the deeper levels as JSON
-            for depth in retry:
+            # Options that recover from a read error (a mistyped spreadsheet column, duplicate nested keys):
+            # kept in the definition so that the import reads the source the same way
+            for extra in retry:
                 try:
-                    sql = build_source_sql(fmt, [[str(f) for f in g] for g in groups], {**options, "maximum_depth": depth}, transform)
+                    sql = build_source_sql(fmt, [[str(f) for f in g] for g in groups], {**options, **extra}, transform)
                     res = con.execute(f"SELECT * FROM ({sql}) LIMIT {PREVIEW_ROWS}")
                     break
                 except duckdb.Error:
-                    if depth == retry[-1]:
+                    if extra is retry[-1]:
                         raise
-            result["applied_options"] = {"maximum_depth": depth}
+            result["applied_options"] = extra
             result["sql"] = sql
-            result["logs"].append(f"nested objects with duplicate keys: reading with maximum_depth={depth} (deeper levels kept as JSON)")
+            result["logs"].append(fallback_reason(extra))
         result["columns"] = [{"name": d[0], "type": str(d[1])} for d in res.description]
         result["rows"] = rows_to_lists(res.fetchall())
         if not result["sampled"] and sum(f.stat().st_size for f in all_files) <= COUNT_MAX_BYTES:
             result["total_rows"] = con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0]
+    except duckdb.Error as e:
+        result["error"] = str(e)
+    finally:
+        timer.cancel()
+        con.close()
+    return result
+
+
+def preview_combined(settings: Settings, refs: dict[str, Any], metas: dict[str, Any], ref: Any,
+                     timeout: float = 60) -> dict[str, Any]:
+    """Preview of a unified referential: the published data of its sources, combined as its definition says."""
+    from .combine import CombineError, build_sql, parts
+
+    result: dict[str, Any] = {
+        "files": [], "logs": [], "detected_format": "parquet", "format": "parquet", "sniff": None,
+        "records_path_candidates": [], "applied_options": {}, "sampled": False,
+        "columns": [], "rows": [], "total_rows": None, "error": None, "sql": None,
+    }
+    try:
+        items = parts(settings, refs, metas, ref)
+        result["sql"] = build_sql(ref, items)
+    except CombineError as e:
+        result["error"] = str(e)
+        return result
+    mode = (ref.combine.mode if ref.combine else "union")
+    result["logs"].append(f"{'Enrichment' if mode == 'enrich' else 'Union'} of "
+                          + ", ".join(f"{p.id} (v{p.version}, {p.row_count:,} rows)" if p.row_count else f"{p.id} (v{p.version})"
+                                      for p in items))
+    result["files"] = [{"name": f"{p.id} v{p.version}", "size": p.path.stat().st_size, "url": None, "sampled": False}
+                       for p in items]
+    con = duckdb.connect()
+    con.execute(f"SET temp_directory = {lit(str(settings.tmp_dir / 'duckdb'))}")
+    for key in {p.key for p in items if p.key}:
+        con.execute(f"PRAGMA add_parquet_key({lit(key[0])}, {lit(key[1])})")
+    timer = threading.Timer(timeout, con.interrupt)
+    timer.start()
+    try:
+        res = con.execute(f"SELECT * FROM ({result['sql']}) LIMIT {PREVIEW_ROWS}")
+        result["columns"] = [{"name": d[0], "type": str(d[1])} for d in res.description]
+        result["rows"] = rows_to_lists(res.fetchall())
+        result["total_rows"] = con.execute(f"SELECT count(*) FROM ({result['sql']})").fetchone()[0]
     except duckdb.Error as e:
         result["error"] = str(e)
     finally:

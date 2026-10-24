@@ -1,2 +1,33 @@
+# Build context of the frontend image. The build stage does `COPY . .`, so everything not excluded here
+# ends up in a layer — and Vite reads .env files at build time, which would bake their values into the bundle.
 node_modules
 dist
+.vite
+*.tsbuildinfo
+
+# Local environment: Vite would read it and inline it into the built assets
+.env
+.env.*
+
+# Credentials of a registry, and anything that looks like a key
+.npmrc
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Leftovers and logs
+*.log
+npm-debug.log*
+*.bak
+*.orig
+*.tmp
+*~
+coverage
+
+# Assistant context: never in an image layer
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md

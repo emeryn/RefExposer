@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import ssl
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -23,6 +25,58 @@ def current_proxy() -> ProxySettings:
     return _proxy
 
 
+class UnsafeUrl(ValueError):
+    """The address cannot be requested: wrong scheme, credentials in it, or a host RefExposer refuses."""
+
+
+# Addresses that answer with the credentials of the machine itself, and are never a legitimate target:
+# the cloud metadata services and anything that loops back to this container.
+_METADATA = (ipaddress.ip_network("169.254.0.0/16"), ipaddress.ip_network("fd00:ec2::254/128"),
+             ipaddress.ip_network("fe80::/10"))
+
+
+def validate_outbound(url: str, *, what: str = "URL", allow_loopback: bool = True) -> str:
+    """Check an address an administrator asked RefExposer to call, before calling it.
+
+    Refuses anything but http(s), credentials embedded in the URL, a host that does not resolve, and any
+    host resolving to a **link-local address** — the cloud metadata services among them, which answer with
+    the credentials of the instance and are never a legitimate target.
+
+    Private addresses are allowed, and so is loopback unless the caller says otherwise: an inference server,
+    a syslog collector, a peer or a proxy on the internal network — or another instance on the same host —
+    are the normal case, not an attack.
+
+    This is **not** a defence against DNS rebinding: the HTTP client resolves the name again when it
+    connects. It removes the targets that turn an outbound request into an escalation; the address itself is
+    chosen by an administrator, who can already point a referential source anywhere.
+    """
+    value = (url or "").strip()
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https"):
+        raise UnsafeUrl(f"{what}: http:// or https:// expected")
+    if parts.username or parts.password:
+        raise UnsafeUrl(f"{what}: no credentials in the address")
+    host = parts.hostname or ""
+    if not host:
+        raise UnsafeUrl(f"{what}: no host in the address")
+    try:
+        resolved = {info[4][0] for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)}
+    except OSError:
+        # A name reached through a proxy is resolved by the proxy, not here: not resolving locally is normal
+        # and is not a reason to refuse the address
+        resolved = {host}
+    for address in resolved:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:  # pragma: no cover - getaddrinfo returns addresses
+            continue
+        if ip.is_loopback and not allow_loopback:
+            raise UnsafeUrl(f"{what}: '{host}' points at this machine")
+        if any(ip in net for net in _METADATA):
+            raise UnsafeUrl(f"{what}: '{host}' points at a link-local or metadata address ({ip})")
+    return value
+
+
 def _with_credentials(url: str, username: str, password: str) -> str:
     if not username:
         return url
@@ -37,6 +91,7 @@ def ssl_context(settings: Settings, cfg: ProxySettings, verify_tls: bool = True)
     if not verify_tls or not cfg.verify_tls or settings.verify is False:
         return False
     ctx = ssl.create_default_context(cafile=certifi.where())
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     if isinstance(settings.verify, str):
         ctx.load_verify_locations(cafile=settings.verify)
     if cfg.ca_bundle:

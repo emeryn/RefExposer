@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from . import __version__
 from . import appsettings, logsetup, network, syslog
 from . import mcp
-from .api import admin, admin_referentials, auth, config_transfer, discovery_api, endpoints_api, federation_api, notifications_api, branding, catalog, records, referentials, secrets_api, settings_api, system, tasks_api
+from .api import admin, admin_referentials, alerts_api, assistant_api, auth, config_transfer, discovery_api, endpoints_api, federation_api, notifications_api, branding, catalog, records, referentials, secrets_api, settings_api, system, tasks_api, watchdog_api
 from .auth import bootstrap_admin, purge_expired_sessions
 from .crypto import check_key
 from . import secretstore
@@ -104,6 +104,8 @@ async def lifespan(app: FastAPI):
         syslog.install(appsettings.load(db, "syslog"), appsettings.load(db, "proxy"))
     service = Service(settings)
     app.state.service = service
+    # The scheduled watchdogs call the REST API in process, with no request to start from (watchdog.py)
+    service.app = app
     service.start()  # also schedules the system tasks (session purge, backups...: tasks.py)
     _record_stop_on_sigterm(service)
     try:
@@ -143,6 +145,9 @@ app.include_router(admin.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(secrets_api.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
+app.include_router(assistant_api.router, prefix="/api")
+app.include_router(watchdog_api.router, prefix="/api")
+app.include_router(alerts_api.router, prefix="/api")
 app.include_router(discovery_api.router, prefix="/api")
 app.include_router(notifications_api.router, prefix="/api")
 app.include_router(config_transfer.router, prefix="/api")

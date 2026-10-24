@@ -458,7 +458,6 @@ export default function UsersPage() {
     <Stack gap="lg">
       <Group justify="space-between" align="flex-end">
         <div>
-          <Title order={2}>Users</Title>
           <Text c="dimmed" size="sm">
             Local accounts, service accounts, roles, groups and referential access.
           </Text>

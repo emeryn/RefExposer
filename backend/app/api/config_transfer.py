@@ -47,6 +47,11 @@ def _definition(ref: Any, credentials: str) -> dict[str, Any]:
     config = _clean(ref.model_dump(mode="json"))
     for f in _ORIGIN_FIELDS:
         config.pop(f, None)
+    # Accounts allowed to reveal the personal data columns are named by their id, which belongs to this
+    # instance: carried over, it would point at whoever happens to have that id on the other one. The groups
+    # (named) travel; the accounts are given again where the definition lands.
+    if isinstance(config.get("pii"), dict):
+        config["pii"] = {**config["pii"], "reveal_users": []}
     return config if credentials == "included" else mask_config(config)
 
 
@@ -71,8 +76,11 @@ def build_export(db: Session, service: Service, ids: list[str] | None, grants: b
                            "used_by": sorted(r.id for r in refs if n in secret_names(r.source.model_dump()))} for n in names]
     if grants:
         ref_ids = {r.id for r in refs}
+        # Grants on a category of the exported referentials travel with them, like the '*' ones
+        categories = {f"category:{r.category}" for r in refs}
         rows = [g for g in db.scalars(select(Grant).order_by(Grant.referential_id, Grant.id))
-                if g.referential_id in ref_ids or (g.referential_id == "*" and not ids)]
+                if g.referential_id in ref_ids or g.referential_id in categories
+                or (g.referential_id == "*" and not ids)]
         out, groups = [], {}
         for g in rows:
             entry: dict[str, Any] = {"referential": g.referential_id, "level": g.level}
@@ -265,7 +273,8 @@ def import_config(body: ImportRequest, request: Request, db: Session = Depends(g
             if not isinstance(g, dict) or g.get("level") not in ("read", "manage"):
                 continue
             ref_id = g.get("referential")
-            if ref_id != "*" and ref_id not in targets:
+            # '*' and a category apply to whatever is there: only a named referential has to be imported too
+            if ref_id != "*" and not str(ref_id).startswith("category:") and ref_id not in targets:
                 continue
             group = groups.get(g.get("group")) if g.get("group") else None
             user = users.get(g.get("user")) if g.get("user") else None

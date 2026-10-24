@@ -1,3 +1,5 @@
+import os
+
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
@@ -5,6 +7,13 @@ from app.models import Base
 
 config = context.config
 target_metadata = Base.metadata
+
+# Run against the database of the application when it says which one (the URL of alembic.ini is a throwaway
+# SQLite file, so that `alembic` works with nothing configured). The application itself passes its own
+# connection, and never comes through here.
+if os.environ.get("REFEX_DATABASE_URL"):
+    # set_main_option reads the value as a ConfigParser interpolation: a '%' in a password must survive
+    config.set_main_option("sqlalchemy.url", os.environ["REFEX_DATABASE_URL"].replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:

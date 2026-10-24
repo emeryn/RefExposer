@@ -15,11 +15,13 @@ from ..auth import CurrentUser, audit, require_admin
 from ..crypto import key_source
 from ..db import get_db
 from ..service import Service
+from ..llm.agent import default_prompt as assistant_default_prompt
+from ..llm.provider import parameters_for
 from .deps import get_service, public_base
 
 router = APIRouter(prefix="/admin/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
-Section = Literal["proxy", "ldap", "oidc", "branding", "syslog", "mfa", "mcp", "smtp"]
+Section = Literal["proxy", "ldap", "oidc", "branding", "syslog", "mfa", "mcp", "smtp", "assistant"]
 
 
 
@@ -47,6 +49,10 @@ def get_settings_all(request: Request, db: Session = Depends(get_db), service: S
         "mfa": appsettings.public("mfa", appsettings.load(db, "mfa")),
         "mcp": appsettings.public("mcp", appsettings.load(db, "mcp")),
         "smtp": appsettings.public("smtp", appsettings.load(db, "smtp")),
+        "assistant": appsettings.public("assistant", appsettings.load(db, "assistant")),
+        "assistant_default_prompt": assistant_default_prompt(),
+        # What the chosen API would receive, so the effective parameters are visible without a call
+        "assistant_parameters": parameters_for(appsettings.load(db, "assistant")),
         "mcp_url": public_base(request).rstrip("/") + "/api/mcp",
         "mcp_user_url": public_base(request).rstrip("/") + "/api/mcp/user",
         "local_login": service.settings.local_login,
@@ -68,29 +74,50 @@ def put_section(section: Section, request: Request, data: dict[str, Any] = Body(
             u = db.get(User, uid)
             if not u or u.auth_source != "service":
                 raise HTTPException(422, f"account {uid}: only service accounts may use the MCP server")
+    if section == "assistant":  # the assistant needs an interface session: a service account has none
+        from ..models import User
+
+        for uid in value.user_ids:
+            u = db.get(User, uid)
+            if not u:
+                raise HTTPException(422, f"account {uid}: unknown")
+            if u.auth_source == "service":
+                raise HTTPException(422, f"account {u.username}: a service account has no interface session "
+                                         "and cannot use the assistant")
     appsettings.save(db, section, value, admin.username)
     if section == "proxy":
         network.set_proxy(value)
+    if section == "assistant":
+        # Turning watchdogs (or the agent mode) off stops their schedules at once, not at the next restart
+        from .. import watchdog
+
+        watchdog.schedule_all(get_service(request))
     if section in ("syslog", "proxy"):  # the collector may trust the company CAs of the network settings
         syslog.install(appsettings.load(db, "syslog"), appsettings.load(db, "proxy"))
     oidc.clear_cache()
-    changed = {k: ("***" if k in appsettings.SECRETS[section] else v) for k, v in value.model_dump().items()}
-    audit(db, f"settings.{section}", user=admin, target=f"settings:{section}", request=request, detail=changed)
+    audit(db, f"settings.{section}", user=admin, target=f"settings:{section}", request=request,
+          detail=appsettings.audit_safe(section, value))
     return appsettings.public(section, value)
 
 
 class ProxyTest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
-    url: str = "https://www.cisa.gov/"
+    url: str = Field("https://www.cisa.gov/", max_length=2048)
 
 
 @router.post("/proxy/test", summary="Test access to a URL with these network settings")
 def test_proxy(body: ProxyTest, db: Session = Depends(get_db), service: Service = Depends(get_service)):
     cfg = _validated(db, "proxy", body.config) if body.config else appsettings.load(db, "proxy")
+    # The address comes from the form: checked before it is called, so the test cannot be turned into a way
+    # of reaching this machine or a metadata service
+    try:
+        target = network.validate_outbound(body.url, what="address to test")
+    except network.UnsafeUrl as e:
+        raise HTTPException(422, str(e)) from e
     t0 = time.perf_counter()
     try:
         with network.client(service.settings, cfg, timeout=20) as c:
-            r = c.get(body.url)
+            r = c.get(target)
         return {"ok": r.status_code < 400, "status": r.status_code, "elapsed_ms": round((time.perf_counter() - t0) * 1000),
                 "route": network.describe(cfg), "error": None}
     except Exception as e:  # noqa: BLE001
@@ -121,7 +148,7 @@ def test_oidc(request: Request, config: dict[str, Any] = Body(default_factory=di
 
 class SmtpTest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
-    to: str = Field(..., description="Recipient of the test e-mail")
+    to: str = Field(..., max_length=320, description="Recipient of the test e-mail")
 
 
 @router.post("/smtp/test", summary="Send a test e-mail with these settings")

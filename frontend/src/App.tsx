@@ -9,6 +9,7 @@ import {
   UnstyledButton,
   Burger,
   Group,
+  Indicator,
   NavLink,
   ScrollArea,
   Text,
@@ -21,24 +22,18 @@ import { useDisclosure, useHotkeys } from '@mantine/hooks';
 import {
   IconApi,
   IconChevronDown,
-  IconCalendarTime,
-  IconClipboardList,
   IconDatabaseCog,
+  IconBell,
   IconDatabasePlus,
+  IconDog,
   IconHelp,
   IconDownload,
-  IconBell,
-  IconFolderSearch,
-  IconWorldUpload,
-  IconWorldShare,
-  IconDatabase,
-  IconKey,
   IconSettings,
   IconLogout,
   IconUserCircle,
   IconUsers,
-  IconUsersGroup,
   IconLayoutDashboard,
+  IconRobot,
   IconMoon,
   IconCheck,
   IconDeviceDesktop,
@@ -48,8 +43,8 @@ import {
   IconSun,
 } from '@tabler/icons-react';
 import { Suspense, lazy, useMemo, useRef, useState } from 'react';
-import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { useBranding, useReferentials } from './api/hooks';
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { useAlerts, unreadAlerts, useAssistant, useBranding, useReferentials } from './api/hooks';
 import { BrandHeader } from './components/Brand';
 import { useAuth } from './auth/AuthContext';
 import LoginPage from './auth/LoginPage';
@@ -61,24 +56,19 @@ import ReferentialPage from './pages/ReferentialPage';
 import SearchPage from './pages/SearchPage';
 import NotFound from './pages/NotFound';
 
-// Loaded on demand: rarely visited, admin-only or heavy pages (CodeMirror...)
+// Loaded on demand: rarely visited, admin-only or heavy pages (CodeMirror...). The administration pages are
+// grouped into three sections, each loading its own tabs when one is opened.
+const ReferentialsSection = lazy(() => import('./pages/admin/ReferentialsSection'));
+const AccessSection = lazy(() => import('./pages/admin/AccessSection'));
+const SystemSection = lazy(() => import('./pages/admin/SystemSection'));
 const SettingsPage = lazy(() => import('./pages/admin/SettingsPage'));
-const AccountPage = lazy(() => import('./pages/AccountPage'));
-const AuditPage = lazy(() => import('./pages/admin/AuditPage'));
-const TasksPage = lazy(() => import('./pages/admin/TasksPage'));
-const GroupsPage = lazy(() => import('./pages/admin/GroupsPage'));
-const UsersPage = lazy(() => import('./pages/admin/UsersPage'));
-const ReferentialsAdminPage = lazy(() => import('./pages/admin/ReferentialsAdminPage'));
 const ReferentialEditor = lazy(() => import('./pages/admin/ReferentialEditor'));
-const SecretsPage = lazy(() => import('./pages/admin/SecretsPage'));
-const DiscoveryPage = lazy(() => import('./pages/admin/DiscoveryPage'));
-const NotificationsPage = lazy(() => import('./pages/admin/NotificationsPage'));
-const EndpointsPage = lazy(() => import('./pages/admin/EndpointsPage'));
-const PeersPage = lazy(() => import('./pages/admin/PeersPage'));
-const StoragePage = lazy(() => import('./pages/admin/StoragePage'));
+const AccountPage = lazy(() => import('./pages/AccountPage'));
 const DownloadsPage = lazy(() => import('./pages/DownloadsPage'));
 const SqlConsole = lazy(() => import('./pages/SqlConsole'));
-const SystemPage = lazy(() => import('./pages/SystemPage'));
+const ChatPage = lazy(() => import('./pages/ChatPage'));
+const WatchdogPage = lazy(() => import('./pages/WatchdogPage'));
+const AlertsPage = lazy(() => import('./pages/AlertsPage'));
 const InternalEditor = lazy(() => import('./pages/InternalEditor'));
 const HelpPage = lazy(() => import('./pages/help/HelpPage'));
 
@@ -139,6 +129,29 @@ function GlobalSearch() {
       w={{ base: 200, sm: 340, md: 440 }}
       radius="xl"
     />
+  );
+}
+
+/** What needs a look, with what arrived since the alerts page was last opened. */
+function AlertsBell() {
+  const { data } = useAlerts(200);
+  const unread = unreadAlerts(data);
+  const total = data?.counts.total ?? 0;
+  return (
+    <Tooltip label={total ? `${total} alert(s)${unread ? `, ${unread} new` : ''}` : 'No alert'}>
+      <Indicator
+        disabled={!unread}
+        label={unread > 99 ? '99+' : unread}
+        size={16}
+        offset={4}
+        color="red"
+        aria-label={`${unread} new alert(s)`}
+      >
+        <ActionIcon variant="default" size="lg" component={Link} to="/alerts" aria-label="Alerts">
+          <IconBell size={18} />
+        </ActionIcon>
+      </Indicator>
+    </Tooltip>
   );
 }
 
@@ -204,6 +217,8 @@ function Shell() {
   const [opened, { toggle, close }] = useDisclosure();
   const location = useLocation();
   const { data: refs } = useReferentials();
+  const { data: assistant } = useAssistant();
+  const { data: alerts } = useAlerts(200);
 
   const byCategory = useMemo(() => {
     const groups = new Map<string, typeof refs>();
@@ -215,10 +230,15 @@ function Shell() {
   }, [refs]);
 
   const path = location.pathname;
-  const main = [
+  const main: { to: string; label: string; icon: typeof IconBell; active: boolean; badge?: number }[] = [
     { to: '/', label: 'Dashboard', icon: IconLayoutDashboard, active: path === '/' },
     { to: '/search', label: 'Global search', icon: IconSearch, active: path.startsWith('/search') },
     ...(me?.can_use_sql ? [{ to: '/sql', label: 'SQL console', icon: IconSql, active: path.startsWith('/sql') }] : []),
+    // Only when an administrator enabled the assistant for this account
+    ...(assistant?.available ? [{ to: '/chat', label: 'Assistant', icon: IconRobot, active: path.startsWith('/chat') }] : []),
+    // Scheduled investigations: the same agent, so the same condition — plus its agent mode
+    ...(assistant?.watchdogs ? [{ to: '/watchdogs', label: 'Watchdogs', icon: IconDog, active: path.startsWith('/watchdogs') }] : []),
+    { to: '/alerts', label: 'Alerts', icon: IconBell, active: path.startsWith('/alerts'), badge: alerts?.counts.total },
     { to: '/downloads', label: 'Downloads', icon: IconDownload, active: path.startsWith('/downloads') },
     ...(me?.can_create_internal
       ? [{ to: '/internal/new', label: 'New internal referential', icon: IconDatabasePlus, active: path === '/internal/new' }]
@@ -226,6 +246,8 @@ function Shell() {
     { to: '/help', label: 'Help', icon: IconHelp, active: path.startsWith('/help') },
   ];
   const inError = (refs ?? []).filter((r) => r.health === 'error').length;
+  // Four entries, each holding its related pages as tabs: the sidebar stays readable as the
+  // administration grows, and related screens are reached without going back to it
   const admin = [
     {
       to: inError ? '/admin/referentials?status=error' : '/admin/referentials',
@@ -236,23 +258,14 @@ function Shell() {
       badgeColor: 'red',
       badgeLabel: `${inError} referential(s) in error`,
     },
-    { to: '/admin/discovery', label: 'Bulk discovery', icon: IconFolderSearch, active: path.startsWith('/admin/discovery') },
-    { to: '/admin/peers', label: 'Synchronized instances', icon: IconWorldShare, active: path.startsWith('/admin/peers') },
-    { to: '/admin/storage', label: 'Disk space', icon: IconDatabase, active: path.startsWith('/admin/storage') },
-    { to: '/admin/endpoints', label: 'Outgoing connections', icon: IconWorldUpload, active: path.startsWith('/admin/endpoints') },
-    { to: '/admin/secrets', label: 'Secrets', icon: IconKey, active: path.startsWith('/admin/secrets') },
-    { to: '/admin/notifications', label: 'Notifications', icon: IconBell, active: path.startsWith('/admin/notifications') },
     {
       to: '/admin/users',
-      label: 'Users',
+      label: 'Users and access',
       icon: IconUsers,
       active: path.startsWith('/admin/users'),
       badge: me?.pending_requests,
       badgeLabel: `${me?.pending_requests} pending access request(s)`,
     },
-    { to: '/admin/groups', label: 'Groups', icon: IconUsersGroup, active: path.startsWith('/admin/groups') },
-    { to: '/admin/audit', label: 'Audit log', icon: IconClipboardList, active: path.startsWith('/admin/audit') },
-    { to: '/admin/tasks', label: 'Tasks', icon: IconCalendarTime, active: path.startsWith('/admin/tasks') },
     { to: '/admin/settings', label: 'Settings', icon: IconSettings, active: path.startsWith('/admin/settings') },
     { to: '/system', label: 'System', icon: IconServer, active: path.startsWith('/system') },
   ] as { to: string; label: string; icon: typeof IconUsers; active: boolean; badge?: number; badgeColor?: string; badgeLabel?: string }[];
@@ -280,6 +293,7 @@ function Shell() {
                 <IconApi size={18} />
               </ActionIcon>
             </Tooltip>
+            <AlertsBell />
             <ColorSchemeMenu />
             <UserMenu />
           </Group>
@@ -295,6 +309,13 @@ function Shell() {
               to={item.to}
               label={item.label}
               leftSection={<item.icon size={18} stroke={1.6} />}
+              rightSection={
+                item.badge ? (
+                  <Badge size="sm" color="orange" circle>
+                    {item.badge}
+                  </Badge>
+                ) : null
+              }
               active={item.active}
               onClick={close}
               style={{ borderRadius: 8 }}
@@ -378,6 +399,9 @@ function Shell() {
           <Route path="/r/:id/:tab?" element={<ReferentialPage />} />
           <Route path="/search" element={<SearchPage />} />
           {me?.can_use_sql && <Route path="/sql" element={<SqlConsole />} />}
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/watchdogs" element={<WatchdogPage />} />
+          <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/account" element={<AccountPage />} />
           <Route path="/downloads" element={<DownloadsPage />} />
           <Route path="/help/:section?" element={<HelpPage />} />
@@ -389,21 +413,22 @@ function Shell() {
           )}
           {me?.is_admin && (
             <>
-              <Route path="/system" element={<SystemPage />} />
-              <Route path="/admin/users" element={<UsersPage />} />
-              <Route path="/admin/referentials" element={<ReferentialsAdminPage />} />
-              <Route path="/admin/settings/:tab?" element={<SettingsPage />} />
               <Route path="/admin/referentials/new" element={<ReferentialEditor />} />
               <Route path="/admin/referentials/:id/edit" element={<ReferentialEditor />} />
-              <Route path="/admin/groups" element={<GroupsPage />} />
-              <Route path="/admin/secrets" element={<SecretsPage />} />
-              <Route path="/admin/discovery" element={<DiscoveryPage />} />
-              <Route path="/admin/notifications" element={<NotificationsPage />} />
-              <Route path="/admin/endpoints" element={<EndpointsPage />} />
-              <Route path="/admin/peers" element={<PeersPage />} />
-              <Route path="/admin/storage" element={<StoragePage />} />
-              <Route path="/admin/audit" element={<AuditPage />} />
-              <Route path="/admin/tasks" element={<TasksPage />} />
+              <Route path="/admin/referentials/:tab?" element={<ReferentialsSection />} />
+              <Route path="/admin/users/:tab?" element={<AccessSection />} />
+              <Route path="/admin/settings/:tab?" element={<SettingsPage />} />
+              <Route path="/system/:tab?" element={<SystemSection />} />
+              {/* Paths of the pages that are a tab of a section: links and bookmarks naming them keep working */}
+              <Route path="/admin/discovery" element={<Navigate to="/admin/referentials/discovery" replace />} />
+              <Route path="/admin/peers" element={<Navigate to="/admin/referentials/peers" replace />} />
+              <Route path="/admin/groups" element={<Navigate to="/admin/users/groups" replace />} />
+              <Route path="/admin/endpoints" element={<Navigate to="/admin/settings/endpoints" replace />} />
+              <Route path="/admin/notifications" element={<Navigate to="/admin/settings/notifications" replace />} />
+              <Route path="/admin/secrets" element={<Navigate to="/admin/settings/secrets" replace />} />
+              <Route path="/admin/storage" element={<Navigate to="/system/storage" replace />} />
+              <Route path="/admin/tasks" element={<Navigate to="/system/tasks" replace />} />
+              <Route path="/admin/audit" element={<Navigate to="/system/audit" replace />} />
             </>
           )}
           <Route path="*" element={<NotFound />} />

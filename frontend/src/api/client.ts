@@ -8,9 +8,17 @@ import type {
   BatchLookup,
   Branding,
   BulkResult,
+  AlertDetail,
+  AlertFeed,
   CatalogEntry,
   ChangesResponse,
   ColumnStats,
+  DiffRows,
+  DiffSummary,
+  SnapshotListing,
+  WatchdogRun,
+  WatchdogTask,
+  WatchdogTemplate,
   Definition,
   ConfigImportResult,
   EndpointInventory,
@@ -41,6 +49,11 @@ import type {
   Run,
   SearchResult,
   SourceSecret,
+  AssistantStatus,
+  Conversation,
+  ConversationDetail,
+  SqlReferentialCreated,
+  SqlReferentialRequest,
   SqlResult,
   SqlTable,
   SystemInfo,
@@ -112,14 +125,59 @@ export const api = {
     request<Run>(`/api/referentials/${enc(id)}/refresh?force=${force}${replace ? '&replace=true' : ''}`, json('POST')),
   cancel: (id: string) => request<{ cancelled: boolean }>(`/api/referentials/${enc(id)}/run`, json('DELETE')),
   rows: (id: string, params: URLSearchParams) => request<RowsResponse>(`/api/referentials/${enc(id)}/rows?${params}`),
-  columnStats: (id: string, column: string) =>
-    request<ColumnStats>(`/api/referentials/${enc(id)}/columns/${enc(column)}/stats`),
-  changes: (id: string, kind: string, limit: number, offset: number) =>
-    request<ChangesResponse>(`/api/referentials/${enc(id)}/changes?kind=${kind}&limit=${limit}&offset=${offset}`),
+  columnStats: (id: string, column: string, reveal = false) =>
+    request<ColumnStats>(`/api/referentials/${enc(id)}/columns/${enc(column)}/stats${reveal ? '?reveal=true' : ''}`),
+  changes: (id: string, kind: string, limit: number, offset: number, reveal = false) =>
+    request<ChangesResponse>(
+      `/api/referentials/${enc(id)}/changes?kind=${kind}&limit=${limit}&offset=${offset}${reveal ? '&reveal=true' : ''}`,
+    ),
   search: (q: string, limit = 5) => request<{ q: string; results: SearchResult[] }>(`/api/search?q=${enc(q)}&limit=${limit}`),
-  sql: (sql: string) => request<SqlResult>('/api/sql', json('POST', { sql })),
+  sql: (sql: string, reveal = false) => request<SqlResult>('/api/sql', json('POST', { sql, reveal })),
   sqlSchema: () => request<SqlTable[]>('/api/sql/schema'),
+  sqlReferential: (body: SqlReferentialRequest) =>
+    request<SqlReferentialCreated>('/api/sql/referential', json('POST', body)),
   system: () => request<SystemInfo>('/api/system'),
+
+  // Time travel: past versions kept for a referential, and the comparison of two of them
+  snapshots: (id: string) => request<SnapshotListing>(`/api/referentials/${enc(id)}/snapshots`),
+  diff: (id: string, from: string, to: string, kind: 'summary' = 'summary') =>
+    request<DiffSummary>(`/api/referentials/${enc(id)}/diff?from=${enc(from)}&to=${enc(to)}&kind=${kind}`),
+  diffRows: (id: string, from: string, to: string, kind: 'added' | 'removed' | 'modified', limit = 50, offset = 0, reveal = false) =>
+    request<DiffRows>(
+      `/api/referentials/${enc(id)}/diff?from=${enc(from)}&to=${enc(to)}&kind=${kind}&limit=${limit}&offset=${offset}` +
+        (reveal ? '&reveal=true' : ''),
+    ),
+  deleteSnapshot: (id: string, snapshotId: number) =>
+    request<{ deleted: number; version: number }>(`/api/referentials/${enc(id)}/snapshots/${snapshotId}`, json('DELETE')),
+
+  // Alerts: watchdog findings and referential drifts, newest first
+  alerts: (limit = 50, kinds?: string[]) =>
+    request<AlertFeed>(`/api/alerts?limit=${limit}${(kinds ?? []).map((k) => `&kind=${enc(k)}`).join('')}`),
+  alert: (id: string) => request<AlertDetail>(`/api/alerts/${enc(id)}`),
+
+  // Watchdogs: scheduled investigations run by the assistant on a fixed scope
+  watchdogs: () => request<WatchdogTask[]>('/api/watchdogs'),
+  watchdogTemplates: () => request<WatchdogTemplate[]>('/api/watchdogs/templates'),
+  createWatchdog: (body: Record<string, unknown>) => request<WatchdogTask>('/api/watchdogs', json('POST', body)),
+  updateWatchdog: (id: number, body: Record<string, unknown>) =>
+    request<WatchdogTask>(`/api/watchdogs/${id}`, json('PATCH', body)),
+  deleteWatchdog: (id: number) => request<{ deleted: number }>(`/api/watchdogs/${id}`, json('DELETE')),
+  runWatchdog: (id: number) => request<{ started: boolean; id: number }>(`/api/watchdogs/${id}/run`, json('POST')),
+  watchdogRuns: (id: number, limit = 30) => request<WatchdogRun[]>(`/api/watchdogs/${id}/runs?limit=${limit}`),
+  recentWatchdogRuns: (limit = 50) => request<WatchdogRun[]>(`/api/watchdogs/runs?limit=${limit}`),
+
+  // Assistant
+  assistant: () => request<AssistantStatus>('/api/assistant'),
+  assistantTest: () => request<{ ok: boolean; models?: string[]; model_found?: boolean; error?: string }>(
+    '/api/assistant/test', json('POST')),
+  conversations: () => request<Conversation[]>('/api/assistant/conversations'),
+  conversation: (id: string) => request<ConversationDetail>(`/api/assistant/conversations/${enc(id)}`),
+  newConversation: () => request<Conversation>('/api/assistant/conversations', json('POST', {})),
+  renameConversation: (id: string, title: string) =>
+    request<Conversation>(`/api/assistant/conversations/${enc(id)}`, json('PATCH', { title })),
+  deleteConversation: (id: string) =>
+    request<{ deleted: string }>(`/api/assistant/conversations/${enc(id)}`, json('DELETE')),
+  resetConversations: () => request<{ deleted: number }>('/api/assistant/conversations', json('DELETE')),
   reload: () =>
     request<{ loaded: number; errors: { file: string; error: string }[]; removed: string[] }>('/api/system/reload', json('POST')),
   activity: (limit = 30) => request<Run[]>(`/api/activity?limit=${limit}`),
@@ -217,7 +275,7 @@ export const api = {
     const p = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]));
     return request<GrantInfo[]>(`/api/admin/grants?${p}`);
   },
-  setGrant: (body: { referential_id: string; user_id?: number; group_id?: number; level: string }) =>
+  setGrant: (body: { referential_id?: string; category?: string; user_id?: number; group_id?: number; level: string }) =>
     request<GrantInfo>('/api/admin/grants', json('POST', body)),
   deleteGrant: (id: number) => request<{ ok: boolean }>(`/api/admin/grants/${id}`, json('DELETE')),
   audit: (params: URLSearchParams) => request<{ total: number; rows: AuditEntry[] }>(`/api/admin/audit?${params}`),
@@ -231,7 +289,12 @@ export const api = {
     return res.text();
   },
   definitionMeta: () =>
-    request<{ formats: string[]; categories: string[]; groups: { id: number; name: string }[] }>('/api/admin/referentials/_meta'),
+    request<{
+      formats: string[];
+      categories: string[];
+      groups: { id: number; name: string }[];
+      referentials: { id: string; name: string; confidential: boolean; row_count: number | null; columns: string[] }[];
+    }>('/api/admin/referentials/_meta'),
   previewSource: (body: Record<string, unknown>) => request<PreviewResult>('/api/admin/referentials/preview', json('POST', body)),
 
   // Secret manager (values are write-only)

@@ -106,6 +106,12 @@ def catalog_entry(service: "Service", ref: "ReferentialConfig") -> dict[str, Any
         "homepage": ref.homepage,
         "license": ref.license,
         "owner": ref.owner,
+        "owner_team": ref.owner_team,
+        "visibility": ref.visibility,
+        # Columns the published file holds masked: the replica receives them masked (the parquet it downloads is
+        # generated from the masked view) and says so, instead of presenting pseudonyms as real values
+        "pii_columns": [c["name"] for c in (meta.get("columns") or [])
+                        if c["name"].lower() in {m.lower() for m in (ref.pii.columns if ref.pii else [])}] or None,
         "kind": "bloom" if ref.is_bloom else "mmdb" if ref.is_mmdb else "internal" if ref.is_internal else "table",
         "format": ref.format,
         "source_type": ref.source.type,
@@ -193,7 +199,14 @@ def fetch_catalog(service: "Service", url: str, token: str) -> dict[str, Any]:
 
     from .ingest import http_client
 
-    target = url.rstrip("/") + CATALOG_PATH
+    from .network import UnsafeUrl, validate_outbound
+
+    # The address of the peer is configured by an administrator: checked before each call, so a peer whose
+    # name later resolves to this machine or to a metadata service is refused rather than followed
+    try:
+        target = validate_outbound(url.rstrip("/") + CATALOG_PATH, what="address of the peer")
+    except UnsafeUrl as e:
+        raise FederationError(str(e)) from e
     try:
         with http_client(service.settings) as client:
             r = client.get(target, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=60)
@@ -231,14 +244,24 @@ def local_definition(peer: Peer, ds: dict[str, Any]) -> dict[str, Any]:
     """Definition of the replica: everything of the remote referential but its source, replaced by its published file."""
     data = ds.get("data") or {}
     fmt = data.get("format") or "parquet"
+    masked = list(ds.get("pii_columns") or [])
+    description = ds.get("description") or ""
+    if masked:
+        # The peer served the data masked: those columns hold what it chose to show, not the real values. No
+        # masking is applied again here — that would mask a pseudonym — but it is said in plain sight.
+        note = (f"Personal data received masked from {peer.name}: {', '.join(masked)}. "
+                "Their real values stay on that instance.")
+        description = f"{description}\n\n{note}" if description else note
     config: dict[str, Any] = {
         "name": ds["name"],
-        "description": ds.get("description") or "",
+        "description": description,
         "category": peer.category or ds.get("category") or "General",
         "tags": list(ds.get("tags") or []),
         "homepage": ds.get("homepage"),
         "license": ds.get("license"),
         "owner": ds.get("owner"),
+        "owner_team": ds.get("owner_team"),
+        "visibility": ds.get("visibility") or "internal",
         "format": fmt,
         "source": {"type": "http", "urls": [peer.url + data.get("path", "")],
                    "headers": {"Authorization": f"Bearer ${{secret:{peer.secret}}}"}},

@@ -39,12 +39,15 @@ def host_key(url: str) -> str:
 
 
 @lru_cache(maxsize=512)
-def calls_per_day(schedule: str | None, timezone: str = "UTC") -> float:
-    """Average number of runs per day of a cron expression (over the next 7 days)."""
+def calls_per_day(schedule: str | None) -> float:
+    """Average number of runs per day of a cron expression (over the next 7 days).
+
+    Counted in UTC: a cron expression fires as often whatever the time zone, except on the two days a year a
+    daylight saving change adds or removes an hour, which does not matter for an estimate."""
     if not schedule:
         return 0.0
     try:
-        trig = CronTrigger.from_crontab(schedule, timezone=timezone)
+        trig = CronTrigger.from_crontab(schedule, timezone="UTC")
     except ValueError:
         return 0.0
     now = datetime.now(trig.timezone)
@@ -67,11 +70,11 @@ def _auth(source: dict[str, Any]) -> tuple[list[str], list[str]]:
     return kinds, sorted(secret_names([source.get("headers"), source.get("basic_auth"), source.get("token")]))
 
 
-def referential_endpoints(ref: Any, meta: dict[str, Any], tz: str) -> list[dict[str, Any]]:
+def referential_endpoints(ref: Any, meta: dict[str, Any]) -> list[dict[str, Any]]:
     src = ref.source.model_dump()
     kinds, secrets = _auth(src)
     seen = {s.get("url"): s for s in meta.get("sources") or [] if s.get("url")}
-    per_day = calls_per_day(ref.schedule, tz) if ref.enabled else 0.0
+    per_day = calls_per_day(ref.schedule) if ref.enabled else 0.0
     base = {"referential": ref.id, "name": ref.name, "category": ref.category, "enabled": ref.enabled, "schedule": ref.schedule,
             "health_status": meta.get("status"), "last_error": meta.get("last_error"), "auth": kinds, "secrets": secrets}
     out = []
@@ -129,8 +132,7 @@ def other_connections(db: Any) -> list[dict[str, Any]]:
 
 
 def inventory(service: Any, db: Any) -> dict[str, Any]:
-    tz = getattr(service.settings, "timezone", "UTC") or "UTC"
-    entries = [e for ref in service.refs.values() for e in referential_endpoints(ref, service.metas.get(ref.id, {}), tz)]
+    entries = [e for ref in service.refs.values() for e in referential_endpoints(ref, service.metas.get(ref.id, {}))]
     hosts: dict[str, dict[str, Any]] = {}
     for e in entries:
         h = hosts.setdefault(host_key(e["url"]), {"host": host_key(e["url"]), "urls": {}, "referentials": set(), "calls_per_day": 0.0,

@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to the same branch cancels the run in progress
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the test image
+        run: docker build --target test -t refexposer-tests ./backend
+
+      # The three excluded files build data sets of tens of GB to check the behaviour of the ingestion on
+      # very large sources. They are meant to be run on a machine with the disk for it, not on a runner.
+      - name: Run the test suite
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo/backend refexposer-tests \
+            pytest -q -p no:cacheprovider \
+              --ignore=tests/test_huge_sources.py \
+              --ignore=tests/test_parquet_large.py \
+              --ignore=tests/test_large.py
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install exactly what the lock file says
+        run: npm ci
+        working-directory: frontend
+
+      # `npm run build` is `tsc -b && vite build`: the type-check is the lint gate here
+      - name: Type-check and build
+        run: npm run build
+        working-directory: frontend
+
+  images:
+    name: Images build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runtime images are what gets deployed: a build failure there must not wait for a release
+      - name: Backend image
+        run: docker build --target runtime -t refexposer-backend ./backend
+
+      - name: Frontend image
+        run: docker build -t refexposer-frontend ./frontend
+
+  migrations:
+    name: Migrations on PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: refexposer
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the test image
+        run: docker build --target test -t refexposer-tests ./backend
+
+      # Every migration has to run on PostgreSQL as well as on SQLite, and come back down again
+      - name: Upgrade, downgrade, upgrade
+        run: |
+          docker run --rm --network host -v "$PWD:/repo" -w /repo/backend \
+            -e REFEX_DATABASE_URL=postgresql+psycopg://postgres:ci@127.0.0.1:5432/refexposer \
+            refexposer-tests sh -c '
+              alembic upgrade head &&
+              alembic downgrade base &&
+              alembic upgrade head'

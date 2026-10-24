@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/emeryn/RefExposer/security/advisories/new
+    about: Report it privately. Please do not open a public issue.
+  - name: Question about using or operating RefExposer
+    url: https://github.com/emeryn/RefExposer/discussions
+    about: Ask in Discussions. The README and the in-application help (Help menu) cover most of it.

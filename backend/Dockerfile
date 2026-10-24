@@ -12,8 +12,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     REFEX_DATA_DIR=/data \
     REFEX_CONFIG_DIR=/app/config
 
+# Security updates of the base image (the tag is rebuilt less often than the Debian advisories), then
 # git: Git repository sources (GitHub, GitLab, Gitea...)
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid "$REFEX_GID" refex \
     && useradd --uid "$REFEX_UID" --gid refex --home-dir /home/refex --create-home --shell /usr/sbin/nologin refex
@@ -21,7 +25,10 @@ RUN groupadd --gid "$REFEX_GID" refex \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+# pip itself is part of the image and gets its own advisories: updated before it installs anything.
+# --require-hashes: the lock file (scripts/lock.sh) pins every version and every file hash, so the build
+# either installs exactly what was reviewed or fails - it never picks a newer release by itself.
+RUN pip install --upgrade pip && pip install --require-hashes -r requirements.txt
 
 # Application code owned by root: read-only for the account running it
 COPY app ./app
@@ -48,7 +55,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-
 FROM base AS test
 USER root
 COPY requirements-dev.txt .
-RUN pip install -r requirements-dev.txt
+RUN pip install --require-hashes -r requirements-dev.txt
 COPY pytest.ini .
 COPY tests ./tests
 USER refex
@@ -56,3 +63,10 @@ CMD ["pytest", "-q", "-p", "no:cacheprovider"]
 
 # --- runtime image (default target, keep last)
 FROM base AS runtime
+# No package manager in the image that runs in production: nothing installs anything at runtime, and the
+# libraries pip vendors (urllib3, msgpack, setuptools) are reported by scanners although they are unreachable
+USER root
+RUN python -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.12/ensurepip /usr/local/lib/python3.12/site-packages/pip* \
+    && find / -name "*.whl" -path "*ensurepip*" -delete
+USER refex

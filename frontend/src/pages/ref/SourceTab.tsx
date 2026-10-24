@@ -1,11 +1,75 @@
 import { Anchor, Badge, Card, Code, Group, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
-import type { ReferentialDetail } from '../../api/types';
-import { describeCron, fmtBytes, fmtDate } from '../../lib/format';
+import { Link } from 'react-router-dom';
+import type { ReferentialDetail, SourceInfo } from '../../api/types';
+import { describeCron, fmtBytes, fmtDate, fmtNumber } from '../../lib/format';
 
 export default function SourceTab({ r }: { r: ReferentialDetail }) {
   const validation = (r.config.validation ?? {}) as Record<string, unknown>;
   return (
     <Stack gap="md">
+      {r.kind === 'combined' && (
+        <Card>
+          <Title order={5} mb="sm">
+            Referentials combined
+          </Title>
+          <Text size="sm" c="dimmed" mb="sm">
+            {r.combine?.mode === 'enrich'
+              ? `Rows of ${r.combine.referentials[0]}, enriched with the columns of the others (joined on ${r.combine.on ?? r.key ?? 'the key'}).`
+              : 'Rows of every referential below, columns matched by name.'}{' '}
+            Rebuilt whenever one of them publishes a new version.
+          </Text>
+          <Table fz="sm" verticalSpacing="xs">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Referential</Table.Th>
+                <Table.Th>Version used</Table.Th>
+                <Table.Th>Rows</Table.Th>
+                <Table.Th>Data updated</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {(r.sources.length
+                ? r.sources
+                : (r.combine?.referentials ?? []).map((id): SourceInfo => ({ url: null, files: [], referential: id }))
+              ).map((s, i) => (
+                <Table.Tr key={i}>
+                  <Table.Td>
+                    <Anchor component={Link} to={`/r/${s.referential}`} size="sm">
+                      {s.name ?? s.referential}
+                    </Anchor>
+                    <Text size="xs" c="dimmed" ff="monospace">
+                      {s.referential}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td>{s.version ? `v${s.version}` : '—'}</Table.Td>
+                  <Table.Td>{fmtNumber(s.row_count)}</Table.Td>
+                  <Table.Td>{fmtDate(s.data_updated_at)}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Card>
+      )}
+      {r.dependents?.length > 0 && (
+        <Card>
+          <Title order={5} mb="xs">
+            Used by
+          </Title>
+          <Group gap="xs">
+            {r.dependents.map((id) => (
+              <Anchor key={id} component={Link} to={`/r/${id}`} size="sm">
+                <Badge variant="light" tt="none" size="lg">
+                  {id}
+                </Badge>
+              </Anchor>
+            ))}
+          </Group>
+          <Text size="xs" c="dimmed" mt="xs">
+            These unified referentials are built from this one and rebuilt after each of its new versions.
+          </Text>
+        </Card>
+      )}
+      {r.kind !== 'combined' && (
       <Card>
         <Title order={5} mb="sm">
           Sources
@@ -28,7 +92,7 @@ export default function SourceTab({ r }: { r: ReferentialDetail }) {
                 <Table.Tr>
                   <Table.Th>Source</Table.Th>
                   <Table.Th>Produced files</Table.Th>
-                  <Table.Th>Date distante</Table.Th>
+                  <Table.Th>Remote date</Table.Th>
                   <Table.Th>Downloaded</Table.Th>
                   <Table.Th>Last check</Table.Th>
                 </Table.Tr>
@@ -80,6 +144,7 @@ export default function SourceTab({ r }: { r: ReferentialDetail }) {
           </Table.ScrollContainer>
         )}
       </Card>
+      )}
 
       <SimpleGrid cols={{ base: 1, md: 3 }}>
         <Card>

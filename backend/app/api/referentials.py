@@ -72,22 +72,56 @@ def _columns(service: Service, ref: ReferentialConfig) -> dict[str, str]:
     return {c["name"]: c["type"] for c in cols}
 
 
-def _table_query(service: Service, ref: ReferentialConfig, request: Request, q: str | None, sort: str | None, columns: str | None) -> TableQuery:
+def _source(service: Service, ref: ReferentialConfig, reveal: bool = False) -> str:
+    """The view to read: the masked one (always, by default), or the unmasked one when the request asked to
+    reveal the personal data columns and `_reveal` allowed it."""
+    masked = ref.table in service.engine.masks
+    return service.engine.raw_view(ref.table) if reveal and masked else ref.table
+
+
+def _views(service: Service, ref: ReferentialConfig, reveal: bool = False) -> dict[str, str]:
+    """Sorted copies of the referential ({column: view}), in the same masked or unmasked flavour."""
+    indexes = service.engine.index_views.get(ref.table, {})
+    if reveal and ref.table in service.engine.masks:
+        return {c: service.engine.raw_view(v) for c, v in indexes.items()}
+    return indexes
+
+
+def _reveal(db: Session, request: Request, ref: ReferentialConfig, user: CurrentUser, asked: bool) -> bool:
+    """Whether this request serves the personal data columns in clear.
+
+    Masked is the default for everyone: it takes the right **and** an explicit `reveal=true`, and the request
+    is written to the audit log. A referential with nothing masked answers the same either way.
+    """
+    from .. import pii
+
+    if not asked or not pii.columns_of(ref):
+        return False
+    if not pii.may_reveal(ref, user):
+        raise HTTPException(403, "you are not allowed to see the personal data columns of this referential "
+                                 "in clear (ask the owner of the referential)")
+    audit(db, "pii.reveal", user=user, target=f"ref:{ref.id}", request=request,
+          detail={"columns": pii.columns_of(ref), "path": request.url.path})
+    return True
+
+
+def _table_query(service: Service, ref: ReferentialConfig, request: Request, q: str | None, sort: str | None,
+                 columns: str | None, reveal: bool = False) -> TableQuery:
     return TableQuery(
-        table=ref.table,
+        table=_source(service, ref, reveal),
         columns=_columns(service, ref),
         search=q,
         search_columns=ref.search_columns,
         filters=parse_filters(request.query_params.multi_items()),
         sort=sort,
         select=[c for c in columns.split(",") if c] if columns else None,
-        **_layout(service, ref),
+        **_layout(service, ref, reveal),
     )
 
 
-def _layout(service: Service, ref: ReferentialConfig) -> dict[str, Any]:
+def _layout(service: Service, ref: ReferentialConfig, reveal: bool = False) -> dict[str, Any]:
     return {
-        "indexes": service.engine.index_views.get(ref.table, {}),
+        "indexes": _views(service, ref, reveal),
         "sorted_by": ref.storage.sort_by,
         "large": service.is_large(ref.id),
         "huge": _huge(service, ref),
@@ -118,10 +152,10 @@ def _refuse_full_scan(service: Service, ref: ReferentialConfig, column: str) -> 
         raise HTTPException(400, full_scan_message(huge, column, fast))
 
 
-def _key_source(service: Service, ref: ReferentialConfig) -> tuple[str, str]:
+def _key_source(service: Service, ref: ReferentialConfig, reveal: bool = False) -> tuple[str, str]:
     """(table or sorted copy to read, condition template) for exact lookups on the key."""
     cols = _columns(service, ref)
-    view = service.engine.index_views.get(ref.table, {}).get(ref.key) or ref.table
+    view = _views(service, ref, reveal).get(ref.key) or _source(service, ref, reveal)
     direct = type_kind(cols.get(ref.key, "VARCHAR")) == "text"
     return view, (qi(ref.key) if direct else f"CAST({qi(ref.key)} AS VARCHAR)")
 
@@ -143,12 +177,12 @@ def _run_query(fn):
 
 @router.get("/referentials", summary="Referentials and their status")
 def list_referentials(service: Service = Depends(get_service), user: CurrentUser = Depends(require_user)) -> list[dict[str, Any]]:
-    return [service.summary(r, user.access(r.id)) for r in service.refs.values() if user.can_read(r.id)]
+    return [service.summary(r, user.access(r.id), user) for r in service.refs.values() if user.can_read(r.id)]
 
 
 @router.get("/referentials/{ref_id}", summary="Referential detail (schema, profile, configuration)")
 def get_referential(ref_id: str, service: Service = Depends(get_service), user: CurrentUser = Depends(require_user)) -> dict[str, Any]:
-    return service.detail(get_ref(service, ref_id, user), user.access(ref_id))
+    return service.detail(get_ref(service, ref_id, user), user.access(ref_id), user)
 
 
 @router.get("/referentials/{ref_id}/runs", summary="Update history")
@@ -218,6 +252,8 @@ def manual_import(
     ref = get_ref(service, ref_id, user, "manage")
     if ref.source.type == "internal":
         raise HTTPException(400, "internal referential: feed it with the editor or the records API")
+    if ref.is_combined:
+        raise HTTPException(400, "unified referential: it is rebuilt from the referentials it combines, import into one of them")
     from ..preview import store_upload
     from ..service import BusyError
 
@@ -275,12 +311,14 @@ def get_rows(
     limit: int = Query(50, ge=0),
     offset: int = Query(0, ge=0),
     count: bool = True,
+    reveal: bool = Query(False, description="Serve the personal data columns in clear (needs the right; audited)"),
     service: Service = Depends(get_service),
     user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
 ):
     ref = require_table(get_ref_with_data(service, ref_id, user))
     limit = min(limit, service.settings.api_max_limit)
-    tq = _table_query(service, ref, request, q, sort, columns)
+    tq = _table_query(service, ref, request, q, sort, columns, _reveal(db, request, ref, user, reveal))
     t0 = time.perf_counter()
 
     def run():
@@ -317,6 +355,7 @@ def export(
     sort: str | None = None,
     columns: str | None = None,
     limit: int | None = Query(None, ge=1),
+    reveal: bool = Query(False, description="Export the personal data columns in clear (needs the right; audited)"),
     service: Service = Depends(get_service),
     user: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
@@ -326,7 +365,7 @@ def export(
     if format == "xlsx":
         max_rows = min(max_rows, 1_048_575)
     limit = min(limit or max_rows, max_rows)
-    tq = _table_query(service, ref, request, q, sort, columns)
+    tq = _table_query(service, ref, request, q, sort, columns, _reveal(db, request, ref, user, reveal))
     path = _run_query(lambda: service.engine.export(tq.select_sql(limit, 0), format))
     filename = f"{ref.id}-{date.today().isoformat()}.{path.suffix.lstrip('.')}"
     audit(db, "referential.export", user=user, target=f"ref:{ref.id}", request=request,
@@ -342,9 +381,11 @@ def export(
 
 
 @router.get("/referentials/{ref_id}/lookup/{value:path}", summary="Exact lookup by key (IP address for a MaxMind DB)")
-def lookup(ref_id: str, value: str, all: bool = False, enrich: bool = False,
+def lookup(ref_id: str, request: Request, value: str, all: bool = False, enrich: bool = False,
            flat: bool = Query(False, description="MaxMind DB: dotted keys (country.iso_code...), English names only"),
-           service: Service = Depends(get_service), user: CurrentUser = Depends(require_user)):
+           reveal: bool = Query(False, description="Serve the personal data columns in clear (needs the right; audited)"),
+           service: Service = Depends(get_service), user: CurrentUser = Depends(require_user),
+           db: Session = Depends(get_db)):
     ref = get_ref_with_data(service, ref_id, user)
     if ref.is_mmdb:
         rec = mmdb_lookup(service, ref, [value], flat, strict=True)[value]
@@ -359,7 +400,7 @@ def lookup(ref_id: str, value: str, all: bool = False, enrich: bool = False,
     if not ref.key:
         raise HTTPException(400, f"the referential '{ref_id}' has no key")
     _refuse_full_scan(service, ref, ref.key)
-    view, cond = _key_source(service, ref)
+    view, cond = _key_source(service, ref, _reveal(db, request, ref, user, reveal))
     sql = f"SELECT * FROM {qi(view)} WHERE {cond} = {lit(value)} LIMIT 100"
     cols, rows = _run_query(lambda: service.engine.fetch(sql))
     if not rows:
@@ -375,8 +416,12 @@ def lookup_batch(
     column: str | None = Body(None, embed=True, description="Lookup column (the key by default)"),
     enrich: bool = Body(False, embed=True, description="Bloom filter: complete the present values with the configured online API"),
     flat: bool = Body(False, embed=True, description="MaxMind DB: dotted keys (country.iso_code...), English names only"),
+    reveal: bool = Body(False, embed=True,
+                        description="Serve the personal data columns in clear (needs the right; audited)"),
+    request: Request = None,  # type: ignore[assignment]
     service: Service = Depends(get_service),
     user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
 ):
     ref = get_ref_with_data(service, ref_id, user)
     if ref.is_mmdb:
@@ -398,7 +443,8 @@ def lookup_batch(
         return {"found": 0, "missing": [], "results": {}, "column": column}
     k = qi(column)
     cols = _columns(service, ref)
-    view = service.engine.index_views.get(ref.table, {}).get(column) or ref.table
+    shown = _reveal(db, request, ref, user, reveal)
+    view = _views(service, ref, shown).get(column) or _source(service, ref, shown)
     if type_kind(cols[column]) == "text":
         # Constant IN list: pushed down to the parquet scan (row groups skipped on sorted data)
         sql = f"SELECT {k} AS __key, * FROM {qi(view)} WHERE {k} IN ({', '.join(lit(v) for v in wanted)})"
@@ -588,22 +634,28 @@ def _compute_facets(eng, table: str, cols: dict[str, str], tq: TableQuery, facet
 
 
 @router.get("/referentials/{ref_id}/columns/{column:path}/stats", summary="Column statistics")
-def column_stats(ref_id: str, column: str = PathParam(...), top: int = Query(20, ge=1, le=200), service: Service = Depends(get_service), user: CurrentUser = Depends(require_user)):
+def column_stats(ref_id: str, request: Request, column: str = PathParam(...), top: int = Query(20, ge=1, le=200),
+                 reveal: bool = Query(False, description="Statistics on the real values of a personal data column "
+                                                         "(needs the right; audited)"),
+                 service: Service = Depends(get_service), user: CurrentUser = Depends(require_user),
+                 db: Session = Depends(get_db)):
     ref = require_table(get_ref_with_data(service, ref_id, user))
     cols = _columns(service, ref)
     if column not in cols:
         raise HTTPException(404, f"unknown column: '{column}'")
+    shown = _reveal(db, request, ref, user, reveal)
     version = service.metas.get(ref_id, {}).get("version")
-    cache_key = (ref_id, version, column, top)
+    cache_key = (ref_id, version, column, top, shown)
     if cache_key in _stats_cache:
         return _stats_cache[cache_key]
 
     ctype = cols[column]
     kind = type_kind(ctype)
-    c, t = qi(column), qi(ref.table)
+    source = _source(service, ref, shown)
+    c, t = qi(column), qi(source)
     sampled = service.is_large(ref_id)
     if sampled:  # statistics on a ~1 % sample of the row groups
-        t = f"(SELECT * FROM {qi(ref.table)} USING SAMPLE 1% (system))"
+        t = f"(SELECT * FROM {qi(source)} USING SAMPLE 1% (system))"
     eng = service.engine
     total, non_null = eng.fetch(f"SELECT count(*), count({c}) FROM {t}")[1][0]
     distinct = eng.scalar(f"SELECT approx_count_distinct({c}) FROM {t}")
@@ -662,11 +714,14 @@ def column_stats(ref_id: str, column: str = PathParam(...), top: int = Query(20,
 @router.get("/referentials/{ref_id}/changes", summary="Differences with the previous version")
 def changes(
     ref_id: str,
+    request: Request,
     kind: Literal["added", "removed", "modified"] = "added",
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    reveal: bool = Query(False, description="Serve the personal data columns in clear (needs the right; audited)"),
     service: Service = Depends(get_service),
     user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
 ):
     ref = require_table(get_ref_with_data(service, ref_id, user))
     paths = RefPaths(service.settings.data_dir, ref_id)
@@ -680,7 +735,12 @@ def changes(
         from ..crypto import parquet_key
 
         key_name = parquet_key(ref_id)[0]
+    from ..pii import projection
+
+    mask = None if _reveal(db, request, ref, user, reveal) else projection(ref, _columns(service, ref))
     cur, prev = parquet_reader(str(paths.current), key_name), parquet_reader(str(paths.previous), key_name)
+    if mask:  # both versions are read with the personal data columns masked, as everywhere else
+        cur, prev = f"(SELECT {mask} FROM {cur})", f"(SELECT {mask} FROM {prev})"
     if kind == "added":
         base = f"SELECT c.* FROM {cur} c ANTI JOIN {prev} p ON c.{k} = p.{k}"
     elif kind == "removed":
@@ -714,6 +774,81 @@ def changes(
         ]
         out.append({"key": str(key), "changes": diff})
     return {"kind": kind, "available": True, "total": total, "columns": [], "rows": out}
+
+
+# --------------------------------------------------------------------------- time travel
+
+@router.get("/referentials/{ref_id}/snapshots", summary="Past versions kept for time travel")
+def list_snapshots(ref_id: str, service: Service = Depends(get_service), user: CurrentUser = Depends(require_user),
+                   db: Session = Depends(get_db)) -> dict[str, Any]:
+    """The snapshots of a referential, newest first, plus the version published right now (`latest`).
+
+    Empty when time travel is off for this referential: nothing was kept, and nothing can be compared.
+    """
+    from .. import snapshots
+
+    ref = require_table(get_ref(service, ref_id, user))
+    meta = service.metas.get(ref_id, {})
+    return {
+        "enabled": ref.storage.time_travel,
+        "max_snapshots": ref.storage.max_snapshots,
+        "keys": ref.primary_key_columns or ([ref.key] if ref.key else []),
+        "latest": {"id": snapshots.LATEST, "version": meta.get("version"), "row_count": meta.get("row_count"),
+                   "created_at": meta.get("data_updated_at"), "size": meta.get("parquet_size")},
+        "snapshots": snapshots.listing(db, service.settings.data_dir, ref_id),
+        "stored_size": snapshots.stored_size(db, service.settings.data_dir, ref_id),
+    }
+
+
+@router.get("/referentials/{ref_id}/diff", summary="Compare two versions of a referential")
+def diff_snapshots(
+    ref_id: str,
+    request: Request,
+    from_: str = Query(..., alias="from", max_length=32, description="Snapshot identifier of the older version"),
+    to: str = Query("latest", max_length=32, description="Snapshot identifier, or `latest` for the published version"),
+    kind: Literal["summary", "added", "removed", "modified"] = "summary",
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    reveal: bool = Query(False, description="Serve the personal data columns in clear (needs the right; audited)"),
+    service: Service = Depends(get_service),
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Rows added, removed and modified between the two versions, computed in DuckDB over their Parquet files.
+
+    A row is identified by `primary_key_columns`, failing that by the key of the referential; with neither,
+    rows are compared whole and a change reads as one removal and one addition.
+    """
+    from .. import snapshots
+
+    ref = require_table(get_ref(service, ref_id, user))
+    meta = service.metas.get(ref_id, {})
+    shown = _reveal(db, request, ref, user, reveal)
+    try:
+        a = snapshots.side(db, service.settings.data_dir, ref, meta, from_)
+        b = snapshots.side(db, service.settings.data_dir, ref, meta, to)
+        return _run_query(lambda: snapshots.diff(service.engine, ref, a, b, kind=kind, limit=limit,
+                                                 offset=offset, reveal=shown))
+    except snapshots.SnapshotError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.delete("/referentials/{ref_id}/snapshots/{snapshot_id}", summary="Delete a snapshot")
+def delete_snapshot(ref_id: str, snapshot_id: int, request: Request, service: Service = Depends(get_service),
+                    user: CurrentUser = Depends(require_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    from ..models import ReferentialSnapshot
+    from ..snapshots import folder
+
+    get_ref(service, ref_id, user, "manage")
+    snap = db.get(ReferentialSnapshot, snapshot_id)
+    if snap is None or snap.referential_id != ref_id:
+        raise HTTPException(404, "unknown snapshot")
+    (folder(service.settings.data_dir, ref_id) / snap.file).unlink(missing_ok=True)
+    version = snap.version
+    db.delete(snap)
+    audit(db, "referential.snapshot_delete", user=user, target=f"ref:{ref_id}", request=request,
+          detail={"version": version})
+    return {"deleted": snapshot_id, "version": version}
 
 
 # --------------------------------------------------------------------------- global search

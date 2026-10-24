@@ -1,12 +1,14 @@
 import { ActionIcon, Alert, Badge, Button, Group, Loader, SegmentedControl, Select, Stack, Table, Text, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconTrash, IconUser, IconUsersGroup, IconWorld } from '@tabler/icons-react';
+import { IconCategory, IconTrash, IconUser, IconUsersGroup, IconWorld } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { GrantInfo } from '../api/types';
 import { useReferentials } from '../api/hooks';
+
+const CATEGORY = 'category:';
 
 export const LEVELS = [
   { value: 'read', label: 'Read' },
@@ -50,11 +52,14 @@ export default function GrantsEditor({ scope }: { scope: Scope }) {
   const save = useMutation({ mutationFn: api.setGrant, onSuccess: invalidate, onError });
   const remove = useMutation({ mutationFn: api.deleteGrant, onSuccess: invalidate, onError });
 
+  /** Scope of an existing grant, in the shape the API expects. */
+  const scopeOf = (g: GrantInfo) => (g.category !== null ? { category: g.category } : { referential_id: g.referential_id });
+
   const add = () => {
-    const body: { referential_id: string; user_id?: number; group_id?: number; level: string } = {
-      referential_id: fixedRef ? scope.referentialId : refId!,
-      level,
-    };
+    // Outside a referential page the picker holds a referential id, '*', or 'category:<name>'
+    const chosen = fixedRef ? scope.referentialId : refId!;
+    const body: { referential_id?: string; category?: string; user_id?: number; group_id?: number; level: string } =
+      chosen.startsWith(CATEGORY) ? { category: chosen.slice(CATEGORY.length), level } : { referential_id: chosen, level };
     if ('userId' in scope) body.user_id = scope.userId;
     else if ('groupId' in scope) body.group_id = scope.groupId;
     else if (subjectType === 'user') body.user_id = Number(subject);
@@ -62,7 +67,8 @@ export default function GrantsEditor({ scope }: { scope: Scope }) {
     save.mutate(body, { onSuccess: () => (fixedRef ? setSubject(null) : setRefId(null)) });
   };
 
-  const isInherited = (g: GrantInfo) => fixedRef && g.referential_id === '*';
+  // On the page of one referential, a right coming from '*' or from its category is shown but edited elsewhere
+  const isInherited = (g: GrantInfo) => fixedRef && g.scope !== 'referential';
   const subjectLabel = (g: GrantInfo) =>
     g.user ? (
       <Group gap={6} wrap="nowrap">
@@ -75,25 +81,55 @@ export default function GrantsEditor({ scope }: { scope: Scope }) {
         <Text size="sm">{g.group?.name}</Text>
       </Group>
     );
-  const refLabel = (g: GrantInfo) =>
-    g.referential_id === '*' ? (
-      <Group gap={6} wrap="nowrap">
-        <IconWorld size={14} />
-        <Text size="sm" fw={600}>
-          All referentials
-        </Text>
-      </Group>
-    ) : (
+  const refLabel = (g: GrantInfo) => {
+    if (g.scope === 'all')
+      return (
+        <Group gap={6} wrap="nowrap">
+          <IconWorld size={14} />
+          <Text size="sm" fw={600}>
+            All referentials
+          </Text>
+        </Group>
+      );
+    if (g.scope === 'category')
+      return (
+        <Group gap={6} wrap="nowrap">
+          <IconCategory size={14} />
+          <Text size="sm" fw={600}>
+            {g.category}
+          </Text>
+          <Tooltip label={g.covers.length ? g.covers.join(', ') : 'No referential in this category yet'}>
+            <Badge size="xs" variant="light" color={g.covers.length ? 'blue' : 'orange'}>
+              {g.covers.length}
+            </Badge>
+          </Tooltip>
+        </Group>
+      );
+    return (
       <Text size="sm" component={Link} to={`/r/${g.referential_id}`} c="inherit">
         {g.referential_name ?? g.referential_id}
       </Text>
     );
+  };
 
   const subjectOptions =
     subjectType === 'user'
       ? (users ?? []).filter((u) => u.role !== 'admin').map((u) => ({ value: String(u.id), label: u.display_name ? `${u.display_name} (${u.username})` : u.username }))
       : (groups ?? []).map((g) => ({ value: String(g.id), label: g.name }));
-  const refOptions = [{ value: '*', label: '★ All referentials' }, ...(refs ?? []).map((r) => ({ value: r.id, label: r.name }))];
+  // One searchable picker for the three scopes: everything, a whole category, or one referential
+  const categories = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of refs ?? []) counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [refs]);
+  const refOptions = [
+    { group: 'Everything', items: [{ value: '*', label: '★ All referentials' }] },
+    {
+      group: 'By category',
+      items: categories.map(([name, count]) => ({ value: `${CATEGORY}${name}`, label: `${name} (${count})` })),
+    },
+    { group: 'One referential', items: (refs ?? []).map((r) => ({ value: r.id, label: r.name })) },
+  ];
 
   return (
     <Stack gap="sm">
@@ -111,11 +147,17 @@ export default function GrantsEditor({ scope }: { scope: Scope }) {
                 <Table.Td>{fixedRef ? subjectLabel(g) : refLabel(g)}</Table.Td>
                 <Table.Td w={150}>
                   {isInherited(g) ? (
-                    <Tooltip label="Global right on all referentials: edit it from the user or group page">
+                    <Tooltip
+                      label={
+                        g.scope === 'category'
+                          ? `Right on the whole “${g.category}” category: edit it from the user or group page`
+                          : 'Global right on all referentials: edit it from the user or group page'
+                      }
+                    >
                       <Group gap={4} wrap="nowrap">
                         <LevelBadge level={g.level} />
                         <Badge size="xs" variant="outline" color="gray">
-                          global
+                          {g.scope === 'category' ? 'category' : 'global'}
                         </Badge>
                       </Group>
                     </Tooltip>
@@ -126,8 +168,7 @@ export default function GrantsEditor({ scope }: { scope: Scope }) {
                       value={g.level}
                       allowDeselect={false}
                       onChange={(v) =>
-                        v &&
-                        save.mutate({ referential_id: g.referential_id, user_id: g.user?.id, group_id: g.group?.id, level: v })
+                        v && save.mutate({ ...scopeOf(g), user_id: g.user?.id, group_id: g.group?.id, level: v })
                       }
                     />
                   )}
@@ -174,7 +215,16 @@ export default function GrantsEditor({ scope }: { scope: Scope }) {
             />
           </>
         ) : (
-          <Select size="xs" placeholder="Choose a referential" data={refOptions} value={refId} onChange={setRefId} searchable w={280} />
+          <Select
+            size="xs"
+            placeholder="Choose a scope"
+            data={refOptions}
+            value={refId}
+            onChange={setRefId}
+            searchable
+            w={320}
+            nothingFoundMessage="No match"
+          />
         )}
         <Select size="xs" data={LEVELS} value={level} onChange={(v) => setLevel(v ?? 'read')} allowDeselect={false} w={110} />
         <Button size="xs" onClick={add} disabled={fixedRef ? !subject : !refId} loading={save.isPending}>
@@ -183,6 +233,11 @@ export default function GrantsEditor({ scope }: { scope: Scope }) {
       </Group>
       <Text size="xs" c="dimmed">
         {LEVEL_HELP}
+      </Text>
+      <Text size="xs" c="dimmed">
+        A right on a category applies to the referentials it holds <b>now and later</b>: one added to the category
+        is covered without touching the rights, and one moved out of it stops being. Changing the category of a
+        referential therefore changes who may read it.
       </Text>
       {fixedRef && subjectType === 'user' && (
         <Alert variant="light" color="gray" p="xs">

@@ -18,13 +18,15 @@ import {
 } from '@mantine/core';
 import { sql as sqlLang, PostgreSQL } from '@codemirror/lang-sql';
 import CodeMirror from '@uiw/react-codemirror';
-import { IconBook, IconDownload, IconHistory, IconPlayerPlay, IconTable } from '@tabler/icons-react';
+import { IconBook, IconDatabasePlus, IconDownload, IconHistory, IconPlayerPlay, IconTable } from '@tabler/icons-react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Column, Row, SqlResult } from '../api/types';
 import { DataGrid, RowDrawer } from '../components/DataGrid';
+import { MaskedBadge, RevealSwitch } from '../components/Governance';
+import { SqlReferentialModal, readsFrom } from '../components/SqlReferentialModal';
 import { fmtNumber } from '../lib/format';
 
 const HISTORY_KEY = 'refexposer-sql-history';
@@ -60,11 +62,11 @@ LIMIT 50`,
   {
     title: 'Most frequent CWEs in the KEV catalog',
     tables: ['cisa_kev', 'cwe'],
-    sql: `SELECT c AS cwe_id, w.Name, count(*) AS vulnerabilites
+    sql: `SELECT c AS cwe_id, w.Name, count(*) AS vulnerabilities
 FROM (SELECT unnest(cwes) AS c FROM cisa_kev)
 LEFT JOIN cwe w ON w.cwe_id = c
 GROUP BY ALL
-ORDER BY vulnerabilites DESC
+ORDER BY vulnerabilities DESC
 LIMIT 20`,
   },
   {
@@ -81,10 +83,10 @@ LIMIT 100`,
     title: 'CVE breakdown by severity and month',
     tables: ['nvd_cve'],
     sql: `PIVOT (
-  SELECT strftime(published, '%Y-%m') AS mois, coalesce(cvss3_severity, 'N/A') AS severite
+  SELECT strftime(published, '%Y-%m') AS month, coalesce(cvss3_severity, 'N/A') AS severity
   FROM nvd_cve
-) ON severite USING count(*)
-ORDER BY mois DESC`,
+) ON severity USING count(*)
+ORDER BY month DESC`,
   },
   {
     title: 'Best rated movies (IMDb, > 100,000 votes)',
@@ -98,19 +100,19 @@ LIMIT 50`,
   {
     title: 'Average IMDb rating by genre',
     tables: ['imdb_titles'],
-    sql: `SELECT genre, count(*) AS films, round(avg(rating), 2) AS note_moyenne
+    sql: `SELECT genre, count(*) AS movies, round(avg(rating), 2) AS average_rating
 FROM (SELECT unnest(genres) AS genre, rating FROM imdb_titles
       WHERE title_type = 'movie' AND votes >= 1000)
 GROUP BY genre
-ORDER BY note_moyenne DESC`,
+ORDER BY average_rating DESC`,
   },
   {
     title: 'Countries by region and sub-region',
     tables: ['iso_countries'],
-    sql: `SELECT region, "sub-region", count(*) AS pays, string_agg("alpha-2", ', ' ORDER BY "alpha-2") AS codes
+    sql: `SELECT region, "sub-region", count(*) AS countries, string_agg("alpha-2", ', ' ORDER BY "alpha-2") AS codes
 FROM iso_countries
 GROUP BY ALL
-ORDER BY region, pays DESC`,
+ORDER BY region, countries DESC`,
   },
   {
     title: 'Internationalized TLDs (IDN)',
@@ -152,16 +154,24 @@ function asRecords(result: SqlResult): { columns: Column[]; rows: Row[] } {
 export default function SqlConsole() {
   const scheme = useComputedColorScheme('light');
   const { data: tables } = useQuery({ queryKey: ['sql-schema'], queryFn: api.sqlSchema });
-  const [code, setCode] = useState<string>(() => load(DRAFT_KEY, ''));
+  // ?sql=... prefills the editor: the assistant hands over a query this way
+  const [params, setParams] = useSearchParams();
+  const handed = params.get('sql');
+  const [code, setCode] = useState<string>(() => handed ?? load(DRAFT_KEY, ''));
   const [history, setHistory] = useState<string[]>(() => load(HISTORY_KEY, []));
   const [selected, setSelected] = useState<Row | null>(null);
+  const [saving, setSaving] = useState(false);
+  // Personal data columns in clear: off by default, as everywhere else, and each query that asks is audited
+  const [reveal, setReveal] = useState(false);
+  const masked = useMemo(() => (tables ?? []).filter((t) => t.pii?.columns.length), [tables]);
+  const canReveal = masked.some((t) => t.pii?.can_reveal);
 
   const available = useMemo(() => new Set(tables?.map((t) => t.table)), [tables]);
   const examples = EXAMPLES.filter((e) => e.tables.every((t) => available.has(t)));
   const initial = !code && tables?.length ? `SELECT *\nFROM ${tables[0].table}\nLIMIT 100` : code;
 
   const run = useMutation({
-    mutationFn: (sql: string) => api.sql(sql),
+    mutationFn: (sql: string) => api.sql(sql, reveal),
     onSuccess: (_, sql) => {
       const next = [sql, ...history.filter((h) => h !== sql)].slice(0, 25);
       setHistory(next);
@@ -179,6 +189,12 @@ export default function SqlConsole() {
     return [sqlLang({ dialect: PostgreSQL, schema, upperCaseKeywords: true })];
   }, [tables]);
 
+  useEffect(() => {
+    if (!handed) return;
+    setEditor(handed);
+    setParams({}, { replace: true });
+  }, [handed]);
+
   const execute = () => {
     const sql = (code || initial).trim();
     if (sql) run.mutate(sql);
@@ -189,12 +205,15 @@ export default function SqlConsole() {
   };
 
   const result = run.data ? asRecords(run.data) : null;
+  // Only a query reading referentials can become one: the server checks it again before storing anything
+  const ran = run.variables ?? '';
+  const canSave = !!run.data && !!ran && readsFrom(ran, tables ?? []).length > 0;
 
   return (
     <Stack gap="md">
       <Group justify="space-between" align="flex-end">
         <div>
-          <Title order={2}>Console SQL</Title>
+          <Title order={2}>SQL console</Title>
           <Text c="dimmed" size="sm">
             Read-only queries (DuckDB dialect) over all referentials, joins included.
           </Text>
@@ -203,7 +222,7 @@ export default function SqlConsole() {
           <Menu position="bottom-end" width={420} shadow="md">
             <Menu.Target>
               <Button variant="default" leftSection={<IconBook size={16} />} disabled={!examples.length}>
-                Exemples
+                Examples
               </Button>
             </Menu.Target>
             <Menu.Dropdown>
@@ -217,7 +236,7 @@ export default function SqlConsole() {
           <Menu position="bottom-end" width={480} shadow="md">
             <Menu.Target>
               <Button variant="default" leftSection={<IconHistory size={16} />} disabled={!history.length}>
-                Historique
+                History
               </Button>
             </Menu.Target>
             <Menu.Dropdown>
@@ -252,9 +271,12 @@ export default function SqlConsole() {
                             {t.table}
                           </Text>
                         </Tooltip>
-                        <Badge size="xs" variant="default">
-                          {fmtNumber(t.row_count)}
-                        </Badge>
+                        <Group gap={4} wrap="nowrap">
+                          {t.pii?.columns.length ? <MaskedBadge pii={t.pii} /> : null}
+                          <Badge size="xs" variant="default">
+                            {fmtNumber(t.row_count)}
+                          </Badge>
+                        </Group>
                       </Group>
                     </Accordion.Control>
                     <Accordion.Panel>
@@ -278,7 +300,7 @@ export default function SqlConsole() {
                         ))}
                         {t.columns.map((c) => (
                           <Group key={c.name} justify="space-between" wrap="nowrap" gap={4}>
-                            <Text size="xs" ff="monospace" truncate>
+                            <Text size="xs" ff="monospace" truncate c={t.pii?.columns.includes(c.name) ? 'orange' : undefined}>
                               {c.name}
                             </Text>
                             <Text size="10px" c="dimmed" ff="monospace" truncate maw={90}>
@@ -315,12 +337,22 @@ export default function SqlConsole() {
             </div>
             <Group justify="space-between" px="sm" py={8} style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}>
               <Text size="xs" c="dimmed">
-                <Kbd size="xs">Ctrl</Kbd> + <Kbd size="xs">Enter</Kbd> to run · <Kbd size="xs">Ctrl</Kbd> + <Kbd size="xs">Espace</Kbd>{' '}
+                <Kbd size="xs">Ctrl</Kbd> + <Kbd size="xs">Enter</Kbd> to run · <Kbd size="xs">Ctrl</Kbd> + <Kbd size="xs">Space</Kbd>{' '}
                 for autocompletion
               </Text>
-              <Button leftSection={<IconPlayerPlay size={16} />} onClick={execute} loading={run.isPending}>
-                Run
-              </Button>
+              <Group gap="sm">
+                {canReveal && (
+                  <RevealSwitch
+                    pii={masked.find((t) => t.pii?.can_reveal)?.pii}
+                    value={reveal}
+                    onChange={setReveal}
+                    label="Personal data in clear"
+                  />
+                )}
+                <Button leftSection={<IconPlayerPlay size={16} />} onClick={execute} loading={run.isPending}>
+                  Run
+                </Button>
+              </Group>
             </Group>
           </Card>
         </Grid.Col>
@@ -350,7 +382,7 @@ export default function SqlConsole() {
                 size="xs"
                 variant="default"
                 leftSection={<IconDownload size={14} />}
-                onClick={() => download(toCsv(run.data!.columns, run.data!.rows), 'requete.csv', 'text/csv')}
+                onClick={() => download(toCsv(run.data!.columns, run.data!.rows), 'query.csv', 'text/csv')}
               >
                 CSV
               </Button>
@@ -358,14 +390,38 @@ export default function SqlConsole() {
                 size="xs"
                 variant="default"
                 leftSection={<IconDownload size={14} />}
-                onClick={() => download(JSON.stringify(result.rows, null, 2), 'requete.json', 'application/json')}
+                onClick={() => download(JSON.stringify(result.rows, null, 2), 'query.json', 'application/json')}
               >
                 JSON
               </Button>
+              <Tooltip
+                label={
+                  canSave
+                    ? 'Keep this query as a referential, rebuilt whenever its sources publish a new version'
+                    : 'Only a query reading the referentials of the left panel can become one'
+                }
+              >
+                <Button
+                  size="xs"
+                  variant="light"
+                  leftSection={<IconDatabasePlus size={14} />}
+                  disabled={!canSave}
+                  onClick={() => setSaving(true)}
+                >
+                  Save as referential
+                </Button>
+              </Tooltip>
             </Group>
           </Group>
           <DataGrid columns={result.columns} rows={result.rows} onRowClick={setSelected} />
           <RowDrawer row={selected} columns={result.columns} onClose={() => setSelected(null)} />
+          <SqlReferentialModal
+            sql={ran}
+            columns={run.data.columns}
+            tables={tables ?? []}
+            opened={saving}
+            onClose={() => setSaving(false)}
+          />
         </Stack>
       )}
 

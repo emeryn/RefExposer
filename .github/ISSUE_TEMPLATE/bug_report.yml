@@ -1,0 +1,70 @@
+name: Bug report
+description: Something does not work the way it is documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If this is a **security** issue, please close this and use
+        [Report a vulnerability](https://github.com/emeryn/RefExposer/security/advisories/new) instead.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what happened, and what you expected instead.
+      placeholder: |
+        I added a referential with a CSV source over HTTP; the update ends as "rejected" with
+        "minimum rows not reached", although the file has 12,000 lines.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: The shortest sequence you know of. A redacted referential definition helps a lot.
+      placeholder: |
+        1. Administration › Referentials › New
+        2. Source: https://… , format CSV, delimiter ;
+        3. Publish, then Refresh
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From `GET /api/system`, or the footer of the interface.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How it runs
+      options:
+        - docker compose (the shipped one)
+        - Podman / Quadlet
+        - Images, another orchestrator
+        - From source, for development
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        The relevant lines of `docker compose logs backend`, or the log of the run
+        (Referential › History). Remove any token, password or personal data first.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else about the setup
+      description: >
+        Behind a reverse proxy? An outgoing HTTP proxy, company certificate authorities? OpenID Connect or
+        LDAP? A confidential referential, masked columns, the assistant? Say what is unusual.

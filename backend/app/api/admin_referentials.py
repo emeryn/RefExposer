@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 from ..auth import CurrentUser, audit, require_admin
 from ..config import FORMATS, validate_definition
 from ..db import get_db
-from ..models import Grant, Group, ReferentialDefinition
-from ..preview import PreviewError, adopt_upload, preview, store_upload
+from ..models import Grant, Group, ReferentialDefinition, ReferentialSnapshot
+from ..preview import PreviewError, adopt_upload, preview, preview_combined, store_upload
 from ..secretstore import SecretError, check_references, mask_config, mask_source, unmask_source
 from ..service import Service
 from ..storage import RefPaths
@@ -26,7 +26,7 @@ router = APIRouter(prefix="/admin/referentials", tags=["referential administrati
 
 
 class PreviewSource(BaseModel):
-    type: Literal["http", "upload", "local", "git"] = "http"
+    type: Literal["http", "upload", "local", "git", "referential"] = "http"
     repository: str | None = None
     ref: str | None = None
     token: str | None = None
@@ -37,6 +37,7 @@ class PreviewSource(BaseModel):
     extract: str | None = None
     upload_id: str | None = None
     path: str | None = None
+    referentials: list[str] = Field(default_factory=list, description="Unified referential: the referentials to combine")
 
 
 class PreviewRequest(BaseModel):
@@ -46,6 +47,10 @@ class PreviewRequest(BaseModel):
     transform: str | None = None
     referential_id: str | None = Field(None, description="For a local source: existing referential")
     refresh: bool = Field(False, description="Download again instead of using the cached copy")
+    # Unified referential: how the sources are combined, and the key used as the default join column
+    combine: dict[str, Any] | None = None
+    key: str | None = None
+    confidential: bool = False
 
 
 class DefinitionIn(BaseModel):
@@ -73,14 +78,20 @@ def _definition_dict(service: Service, ref_id: str) -> dict[str, Any]:
     ref = service.refs.get(ref_id)
     if not ref:
         raise HTTPException(404, f"unknown referential: '{ref_id}'")
+    summary = service.summary(ref, "manage")
     return {
         "id": ref.id,
         "origin": ref.origin,
         "config_file": ref.config_file,
         "editable": ref.origin == "database",
+        # Kind and layout of the published version: the editor and the list show them without reading the summary
+        "kind": summary["kind"],
+        "large": summary["large"],
+        "sort_by": summary["sort_by"],
+        "indexes": summary["indexes"],
         # Literal credentials are masked (sent back unchanged, they keep their value); ${secret:...} references are shown
         "config": mask_config(ref.model_dump(mode="json", exclude_defaults=False)),
-        "summary": service.summary(ref, "manage"),
+        "summary": summary,
     }
 
 
@@ -95,6 +106,13 @@ def form_options(db: Session = Depends(get_db), service: Service = Depends(get_s
         "formats": list(FORMATS),
         "categories": sorted({r.category for r in service.refs.values()}),
         "groups": [{"id": g.id, "name": g.name} for g in db.scalars(select(Group).order_by(Group.name))],
+        # Candidates for a unified referential: those with rows, published at least once
+        "referentials": [
+            {"id": r.id, "name": r.name, "confidential": r.confidential,
+             "row_count": (service.metas.get(r.id) or {}).get("row_count"),
+             "columns": [c["name"] for c in (service.metas.get(r.id) or {}).get("columns") or []]}
+            for r in service.refs.values() if not r.is_artifact and service.has_data(r.id)
+        ],
     }
 
 
@@ -125,6 +143,22 @@ def run_preview(body: PreviewRequest, service: Service = Depends(get_service)):
     ref_root = RefPaths(service.settings.data_dir, body.referential_id).root if body.referential_id else None
     if body.format and body.format not in FORMATS:
         raise HTTPException(400, f"unknown format: {body.format}")
+    if body.source.type == "referential":
+        draft = {
+            "id": body.referential_id or "combined-preview",
+            "name": "preview",
+            "source": {"type": "referential", "referentials": body.source.referentials},
+            "format": "parquet",
+            "combine": body.combine or {},
+            "key": body.key or None,
+            "transform": body.transform or None,
+            "confidential": body.confidential,
+        }
+        try:
+            ref = validate_definition(draft)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        return preview_combined(service.settings, service.refs, service.metas, ref)
     source = body.source.model_dump()
     stored = service.refs.get(body.referential_id) if body.referential_id else None
     try:  # masked credentials of the edited referential: its stored values
@@ -139,7 +173,8 @@ def run_preview(body: PreviewRequest, service: Service = Depends(get_service)):
         raise HTTPException(400, f"{type(e).__name__}: {e}") from e
 
 
-def _validate(db: Session, config: dict[str, Any], ref_id: str | None = None, stored: dict[str, Any] | None = None) -> dict[str, Any]:
+def _validate(db: Session, config: dict[str, Any], ref_id: str | None = None, stored: dict[str, Any] | None = None,
+              service: Service | None = None) -> dict[str, Any]:
     data = {**config}
     if ref_id:
         data["id"] = ref_id
@@ -148,6 +183,10 @@ def _validate(db: Session, config: dict[str, Any], ref_id: str | None = None, st
             data["source"] = unmask_source(data["source"], (stored or {}).get("source"))
         check_references(db, data)
         ref = validate_definition(data)
+        if ref.is_combined and service is not None:
+            from ..combine import check_sources
+
+            check_sources(service.refs, ref)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     return _clean(ref.model_dump(mode="json", exclude={"id"}))
@@ -163,13 +202,18 @@ def _adopt(service: Service, ref_id: str, upload_id: str, config: dict[str, Any]
 
 
 def store_definition(db: Session, service: Service, admin: CurrentUser, request: Request, raw_config: dict[str, Any],
-                     grant_group_ids: list[int], upload_id: str | None = None, origin: str | None = None) -> str:
-    """Validate and store a new definition (with its read grants); the caller reloads the service. Returns the id."""
+                     grant_group_ids: list[int], upload_id: str | None = None, origin: str | None = None,
+                     manager_id: int | None = None) -> str:
+    """Validate and store a new definition (with its read grants); the caller reloads the service. Returns the id.
+
+    `manager_id`: account getting the manage right, for a creator who is not an administrator and would
+    otherwise not see what it just created.
+    """
     ref_id = str(raw_config.get("id") or "").strip()
     config = {k: v for k, v in raw_config.items() if k != "id"}
     if upload_id:
         config["source"] = {"type": "local", "path": "raw/**/*"}
-    config = _validate(db, config, ref_id)
+    config = _validate(db, config, ref_id, service=service)
     if ref_id in service.refs or db.get(ReferentialDefinition, ref_id):
         raise HTTPException(409, f"identifier '{ref_id}' is already used")
     if RefPaths(service.settings.data_dir, ref_id).root.exists() and not upload_id and config.get("source", {}).get("type") != "local":
@@ -182,6 +226,8 @@ def store_definition(db: Session, service: Service, admin: CurrentUser, request:
     for gid in grant_group_ids:
         if db.get(Group, gid):
             db.add(Grant(referential_id=ref_id, group_id=gid, level="read", created_by=admin.username))
+    if manager_id is not None:
+        db.add(Grant(referential_id=ref_id, user_id=manager_id, level="manage", created_by=admin.username))
     detail = {"source": mask_source(config.get("source")), "format": config.get("format")}
     if origin:
         detail["origin"] = origin
@@ -216,15 +262,21 @@ def update_definition(ref_id: str, body: DefinitionIn, request: Request, db: Ses
     config = {k: v for k, v in body.config.items() if k != "id"}
     if body.upload_id:
         config["source"] = {"type": "local", "path": "raw/**/*"}
-    config = _validate(db, config, ref_id, d.config)
+    config = _validate(db, config, ref_id, d.config, service)
     if body.upload_id:
         config = _adopt(service, ref_id, body.upload_id, config)
+    masking_changed = (d.config or {}).get("pii") != config.get("pii")
     d.config = config
     d.updated_by = admin.username
     audit(db, "referential.update", user=admin, target=f"ref:{ref_id}", request=request,
-          detail={"upload": bool(body.upload_id)})
+          detail={"upload": bool(body.upload_id), "masking_changed": masking_changed})
     service.reload()
     run = service.submit(ref_id, "manual", False, admin.username).to_dict() if body.pull and service.refs[ref_id].enabled else None
+    if masking_changed:
+        # A unified referential reads this one masked (combine.py): its own published data has to be built
+        # again, which the usual "a source published a new version" path would not do here
+        for dependent in service.dependents(ref_id):
+            service.submit(dependent, "upstream", True, admin.username)
     return {**_definition_dict(service, ref_id), "run": run}
 
 
@@ -247,8 +299,13 @@ def delete_definition(
         raise HTTPException(404, f"unknown referential: '{ref_id}'")
     if ref_id in service.active:
         raise HTTPException(409, "an update is running: cancel it before deleting the referential")
+    used_by = service.dependents(ref_id)
+    if used_by:
+        raise HTTPException(409, f"used by the unified referential(s) {', '.join(used_by)}: change or delete them first")
     db.delete(d)
     db.execute(delete(Grant).where(Grant.referential_id == ref_id))
+    # The snapshots kept for time travel go with the referential (their files go with the data, when purged)
+    db.execute(delete(ReferentialSnapshot).where(ReferentialSnapshot.referential_id == ref_id))
     audit(db, "referential.delete", user=admin, target=f"ref:{ref_id}", request=request, detail={"purge": purge})
     service.reload()
     if purge:

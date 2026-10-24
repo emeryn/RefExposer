@@ -1,4 +1,41 @@
+# Build context of the backend image. Only requirements*.txt, app/, pytest.ini and tests/ are copied, so
+# this is about what never reaches the daemon at all — a local environment or a database above all.
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 .venv/
+venv/
+*.egg-info/
+
+# Local environment, data and credentials
+.env
+.env.*
+*.db
+*.sqlite*
+*.sql
+*.dump
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.secret_key
+
+# Leftovers and logs
+*.log
+*.bak
+*.orig
+*.tmp
+*~
+
+# Assistant context: never in an image layer
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+
+# tests/ and pytest.ini are deliberately NOT excluded: the `test` target of the Dockerfile copies them.

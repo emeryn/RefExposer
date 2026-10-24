@@ -1,11 +1,17 @@
 import { Alert, Anchor, Badge, Code, Grid, Group, List, NavLink, Paper, Stack, Table, Text, Title } from '@mantine/core';
-import { IconBook, IconPlugConnected, IconShieldCog } from '@tabler/icons-react';
+import { IconBook, IconShieldCog } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { absoluteUrl } from '../../api/client';
+import type { Me } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { HEALTH, RUN_STATUS } from '../../components/Status';
-import { INTEGRATIONS, type Section } from './IntegrationsHelp';
+/** One page of a guide: the user guide, the administrator guide, or a guide added by a release. */
+export type Section = { id: string; title: string; admin?: boolean; visible?: (me: Me) => boolean; body: (me: Me) => ReactNode };
+
+// The guide for the applications for other tools lives in IntegrationsHelp.tsx, which is not part of the
+// published repository yet: import its INTEGRATIONS here and put them in this list to show the group.
+const PLUGINS: Section[] = [];
 
 const H = ({ children }: { children: ReactNode }) => (
   <Title order={4} mt="lg" mb={6}>
@@ -84,6 +90,11 @@ const USER: Section[] = [
             (<Code>/raw</Code>, with an API token), only when it changed.
           </List.Item>
           <List.Item>
+            <b>Unified</b> <Badge size="xs" variant="light" color="teal">unified</Badge> — built from several other referentials:
+            their rows put together, or the rows of one enriched with the columns of the others. It is rebuilt whenever one of
+            them is updated; its <b>Source</b> tab lists them with the version used.
+          </List.Item>
+          <List.Item>
             <b>Large volume</b> — hundreds of millions of rows (e.g. passive DNS). Lookups on the sorted and indexed columns stay fast;
             some features (exact totals, facets, change tracking, CSV/Excel downloads) are limited.
           </List.Item>
@@ -105,6 +116,7 @@ const USER: Section[] = [
               ['Search', 'Multi-criteria search with facets (most frequent values per column, ranges for numbers and dates), and search by a list of values: paste up to 10,000 values to know which ones exist.'],
               ['Schema & profile', 'Columns, types, fill rate, distinct values, min/max. Click a column for its distribution and most frequent values.'],
               ['Changes', 'Rows added, removed and modified by the last version (requires a key).'],
+              ['History & diff', 'Only when the referential keeps its past versions: pick any two and see what was added, removed and modified, with the before and after of each column.'],
               ['History', 'Every update: when, why (schedule, manual, upload, import folder, edit), how long, how many rows, and its log.'],
               ['API', 'Documentation generated from the actual schema, with a request builder you can run in the page.'],
               ['Source & configuration', 'Where the data comes from, the validation rules and the definition.'],
@@ -129,6 +141,88 @@ const USER: Section[] = [
     ),
   },
   {
+    id: 'governance',
+    title: 'Visibility, owner and personal data',
+    body: () => (
+      <>
+        <P>
+          Three things on a referential tell you how to handle the data in it. They are on every card in the{' '}
+          <Anchor component={Link} to="/">dashboard</Anchor> and in the header of the referential.
+        </P>
+        <H>Internal or public</H>
+        <P>
+          A violet <b>Internal</b> badge (padlock) means company data: it is not published anywhere else, so think
+          before copying it into a ticket, a chat or an outside tool. A teal <b>Public</b> badge (globe) means open
+          data or an external feed — already public, quote it freely. The dashboard has an{' '}
+          <b>All / Internal / Public</b> filter.
+        </P>
+        <H>Who answers for it</H>
+        <P>
+          The owner is shown with their initials, with their team on hover. That is who to ask when a value looks
+          wrong, when a column needs explaining, or when you need access.
+        </P>
+        <H>Masked columns</H>
+        <P>
+          An orange <b>N masked</b> badge means the referential holds personal data. Those columns come back masked
+          everywhere — in the table, in exports, in downloads, in the SQL console and to the assistant — either as{' '}
+          <Code>***</Code>, as a first and last character, or as a pseudonym that is always the same for the same
+          value (so you can still count and group on it). Hover the badge to see which columns, how, and why.
+        </P>
+        <P>
+          If you are allowed to see the real values, a <b>Show personal data</b> switch appears in the Data tab, in
+          the SQL console and in the diff view. It is off every time: turning it on is a deliberate act, and each
+          request is recorded in the audit log. If the switch is not there, ask the owner of the referential — the
+          assistant cannot lift the masking for you, whatever you ask it.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: 'alerts',
+    title: 'Alerts',
+    body: () => (
+      <>
+        <P>
+          The bell in the header and the <Anchor component={Link} to="/alerts">Alerts</Anchor> page list what
+          needs a look, newest first. The badge counts what arrived since you last opened the page.
+        </P>
+        <Table fz="sm" maw={860} mb="sm" withTableBorder>
+          <Table.Tbody>
+            {[
+              ['Watchdog', 'A scheduled investigation found something, or could not finish. Only its owner sees it.'],
+              ['Update', 'The last update of a referential failed, was rejected by its validation, or found a corrupted source.'],
+              ['Quality', 'The published version no longer passes its quality rules.'],
+              ['Stale', 'No new version within the expected delay: the source may have stopped publishing.'],
+              ['Drift', 'The last version changed the number of rows a lot. A drop counts for more than growth.'],
+            ].map(([k, v]) => (
+              <Table.Tr key={k}>
+                <Table.Td w={120} fw={600}>
+                  {k}
+                </Table.Td>
+                <Table.Td>{v}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+        <P>
+          Click an entry to see what it takes to act on it: the <b>report the watchdog wrote</b> with the items
+          it found, the <b>log of the failed update</b>, the <b>rules that are failing</b> and by how much, or
+          the <b>figures</b> of the drift — plus a link straight to the referential.
+        </P>
+        <H>Nothing to tick off</H>
+        <P>
+          The list is built from the current state, not from a mailbox: an alert disappears on its own once the
+          thing behind it is fixed, and there is nothing to acknowledge or clean up. You only ever see alerts
+          about referentials you may read.
+        </P>
+        <P>
+          This is the view inside the application. Getting the same events by e-mail or in a chat channel is a
+          separate setting an administrator configures per channel.
+        </P>
+      </>
+    ),
+  },
+  {
     id: 'search',
     title: 'Searching',
     body: () => (
@@ -146,10 +240,32 @@ const USER: Section[] = [
           default) and get the matches with their details, the missing values, and a CSV export. On a Bloom filter, the test runs offline
           and only probable matches can optionally be confirmed with the online API.
         </P>
+        <H>Searching a large referential</H>
+        <P>
+          On hundreds of millions of rows, a search over everything would read the whole file, so only the <b>sorted and indexed</b>{' '}
+          columns of the referential are searched, and only on the <b>beginning</b> of the values (“starts with”, case-sensitive).
+          Those columns are shown in the header of the referential and in its <b>Source</b> tab. What works, in order of comfort:
+        </P>
+        <List size="sm" spacing={4} maw={860} mb="sm">
+          <List.Item>
+            the text search and <b>Search by list</b> on a sorted or indexed column — instant, even for 10,000 values at once;
+          </List.Item>
+          <List.Item>
+            a column filter in the <b>Data</b> tab with <i>equals</i> or <i>starts with</i> on one of those columns;
+          </List.Item>
+          <List.Item>
+            a filter on any other column: the rows come back, but without an exact total, and it is refused on the very largest
+            referentials with the list of the columns that would work;
+          </List.Item>
+          <List.Item>
+            the <b>SQL console</b>, which can also read the sorted copies directly (the extra tables marked ⚡).
+          </List.Item>
+        </List>
         <Alert color="gray" maw={860} p="sm">
           <Text size="sm">
-            On large referentials, the text search matches the <b>beginning</b> of the values (“starts with”) on the sorted and indexed
-            columns, which keeps it fast on billions of rows. Use filters or the API for other patterns.
+            If a search on such a referential answers that it is not available, the column you need is neither sorted nor indexed:
+            ask an administrator to add it (<i>Large volume › Sort on / Indexes</i> in its definition). It takes a rebuild, and
+            each index takes about the size of the data.
           </Text>
         </Alert>
       </>
@@ -173,6 +289,113 @@ ORDER BY e.epss DESC LIMIT 20`}</Shell>
         <P>
           Large referentials also expose their indexes as extra tables (shown with ⚡ in the side panel): querying the copy sorted on the
           column you filter on is much faster.
+        </P>
+        <H>Keep a query as a referential</H>
+        <P>
+          <b>Save as referential</b>, next to the CSV and JSON exports, turns the query that has just run into a referential of its
+          own. The <b>query is stored, not its rows</b>: the referential is rebuilt from the published data of the referentials it
+          reads, every time one of them publishes a new version. It then behaves like any other referential — explorer, filters,
+          lookups, downloads, API, access rights, quality rules.
+        </P>
+        <P>
+          Give it a name, an identifier and, when a column identifies a row, a key (which enables{' '}
+          <Code>/lookup/{'{value}'}</Code>). No schedule is needed: a referential built from others follows them. Only a query reading
+          the tables of the side panel can become one, and only the referentials you may read are available to it.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: 'assistant',
+    title: 'Assistant',
+    body: () => (
+      <>
+        <P>
+          The <Anchor component={Link} to="/chat">Assistant</Anchor> answers questions about the referentials from a
+          model hosted on your own infrastructure. In <b>agent mode</b> it does the looking up itself: it lists the
+          referentials, queries them, runs SQL and reports what it found.
+        </P>
+        <H>It has exactly your rights</H>
+        <P>
+          Everything it does goes through the API <b>with your session</b>: a referential you cannot read does not
+          exist for it either, and it can only change what you could change yourself from the interface. Nothing is
+          elevated. Confidential referentials are out of its reach unless an administrator allowed them.
+        </P>
+        <H>What it can hand you</H>
+        <List size="sm" spacing={4} maw={860} mb="sm">
+          <List.Item>
+            <b>Rows</b> in the answer, as a table, with the total.
+          </List.Item>
+          <List.Item>
+            <b>A query</b> to open in the <Anchor component={Link} to="/sql">SQL console</Anchor> with one click:
+            useful when you want to adjust it, or keep it as a referential.
+          </List.Item>
+          <List.Item>
+            <b>A file</b> to download (JSON, CSV) when the result is meant to be passed on.
+          </List.Item>
+          <List.Item>
+            <b>A referential of its own</b> from a query, when you ask for a unified referential: the query is
+            stored, not its rows, so it follows the referentials it reads.
+          </List.Item>
+        </List>
+        <H>Conversations</H>
+        <P>
+          A conversation is kept and is yours alone: ask several questions in a row, come back to it later. It lasts
+          until you delete it — one conversation, or all of them, from the menu at the top right. Each tool call is
+          shown with its result, so you can see where an answer comes from.
+        </P>
+        <P>
+          Answers come from a language model: check anything that matters. The assistant is told never to invent a
+          referential, a column or a number, and a row it reports can always be checked in the explorer.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: 'watchdogs',
+    title: 'Watchdogs',
+    visible: (me) => me.is_admin || me.role === 'advanced',
+    body: () => (
+      <>
+        <P>
+          A <Anchor component={Link} to="/watchdogs">watchdog</Anchor> is the assistant asking itself the same
+          question again and again, over referentials you choose, and telling you <b>only when it finds
+          something</b>. Nothing arrives when there is nothing to report.
+        </P>
+        <P>
+          They are off until an administrator turns them on, and they are reserved to administrators and
+          advanced users. Findings also show up in <Anchor component={Link} to="/alerts">Alerts</Anchor>, with
+          the report attached.
+        </P>
+        <H>What you set up</H>
+        <List size="sm" spacing={4} maw={860} mb="sm">
+          <List.Item>
+            <b>The referentials</b> it may read. Only those: the agent cannot reach anything else, however the
+            question is worded.
+          </List.Item>
+          <List.Item>
+            <b>When</b> it runs: on a schedule, or right after one of those referentials publishes a new version.
+          </List.Item>
+          <List.Item>
+            <b>The investigation</b> itself. Three examples are pre-filled for you: shadow IT against the CMDB,
+            external exposure drift, and orphan accounts crossed with the HR referential.
+          </List.Item>
+          <List.Item>
+            <b>Who is told</b>, and from which severity upwards. A finding below it is recorded without waking
+            anyone.
+          </List.Item>
+        </List>
+        <H>What it can and cannot do</H>
+        <P>
+          It runs with the rights of its own account and <b>never writes</b>: it looks, correlates and reports. An
+          answer that does not come back as a proper verdict is recorded as a <b>failure</b>, never as an
+          all-clear — so a quiet watchdog really means nothing was found.
+        </P>
+        <H>Following them</H>
+        <P>
+          Each watchdog lists its executions: what started it, the verdict with its severity, the report the agent
+          wrote, the queries it went through, and whether each alert was delivered. <b>Run now</b> starts one on the
+          spot; it takes a moment, since the model is called several times.
         </P>
       </>
     ),
@@ -262,17 +485,111 @@ curl -H "Authorization: Bearer $REFEX_TOKEN" -H "Content-Type: application/json"
           new version a few seconds later. The <b>Columns</b> button changes the schema; existing rows are migrated (renames keep the
           values) and the change is refused if a row does not fit.
         </P>
-        <H>Feeding it through the API</H>
-        <Shell>{`# Add or replace a row (by key)
-curl -X PUT -H "Authorization: Bearer $REFEX_TOKEN" -H "Content-Type: application/json" \\
-     -d '{"cidr": "10.12.0.0/16", "site": "Lyon", "owner": "network"}' \\
-     "${origin()}/api/referentials/internal-ranges/records/10.12.0.0%2F16"
-# Change some columns only
-curl -X PATCH ... -d '{"owner": "secops"}' ".../records/10.12.0.0%2F16"
-# Synchronise many rows at once (upsert + delete, or upsert and drop every other row)
-curl -X POST ... -d '{"upsert": [{...}, {...}], "delete": ["10.9.0.0/16"]}' ".../records/_bulk"
-curl -X POST ... -d '{"upsert": [{...}, {...}], "replace_all": true}' ".../records/_bulk"`}</Shell>
-        <P>The exact endpoints and the row format are documented in the API tab of each internal referential.</P>
+        <H>Complete example: create a referential and fill it from a script</H>
+        <P>
+          Everything below uses one token (<Anchor component={Link} to="/account">My account › API tokens</Anchor>, or a{' '}
+          <b>service account</b> for an unattended script). Creating a referential needs the administrator or advanced-user role;
+          writing rows needs the <b>manage</b> right on it.
+        </P>
+        <Shell>{`export REFEX_TOKEN=rfx_…
+export REFEX_URL=${origin()}
+H="Authorization: Bearer $REFEX_TOKEN"
+J="Content-Type: application/json"
+
+# 1. Create the referential: its columns, and the key that identifies a row
+curl -X POST -H "$H" -H "$J" "$REFEX_URL/api/internal-referentials" -d '{
+  "id": "sites", "name": "Sites", "category": "Internal", "key": "code",
+  "search_columns": ["label", "owner"],
+  "columns": [
+    {"name": "code",    "type": "text",    "required": true},
+    {"name": "label",   "type": "text"},
+    {"name": "owner",   "type": "text"},
+    {"name": "people",  "type": "integer"},
+    {"name": "opened",  "type": "date"},
+    {"name": "active",  "type": "boolean"},
+    {"name": "tags",    "type": "list"},
+    {"name": "comment", "type": "text"}
+  ]}'
+
+# 2. One row at a time
+#    POST   = add (409 if the key exists; add ?upsert=true to update it instead)
+curl -X POST -H "$H" -H "$J" "$REFEX_URL/api/referentials/sites/records" \\
+     -d '{"code": "LYO", "label": "Lyon", "owner": "network", "people": 120,
+          "opened": "2019-04-01", "active": true, "tags": ["prod", "eu"]}'
+#    PATCH  = change only these columns          PUT = replace the whole row
+curl -X PATCH -H "$H" -H "$J" "$REFEX_URL/api/referentials/sites/records/LYO" -d '{"owner": "secops"}'
+curl -X PUT   -H "$H" -H "$J" "$REFEX_URL/api/referentials/sites/records/LYO" -d '{"label": "Lyon Part-Dieu"}'
+curl -X DELETE -H "$H" "$REFEX_URL/api/referentials/sites/records/LYO"
+#    A key with / or # is URL-encoded: .../records/10.12.0.0%2F16
+
+# 3. Many rows at once: upsert (matched on the key), delete, or full synchronisation
+curl -X POST -H "$H" -H "$J" "$REFEX_URL/api/referentials/sites/records/_bulk" -d '{
+  "upsert": [{"code": "NTE", "label": "Nantes", "people": 40},
+             {"code": "BDX", "label": "Bordeaux", "people": 25}],
+  "delete": ["LYO"]}'
+# replace_all: the rows sent become the whole content, every other row is deleted
+curl -X POST -H "$H" -H "$J" "$REFEX_URL/api/referentials/sites/records/_bulk" \\
+     -d '{"upsert": [{"code": "NTE", "label": "Nantes"}], "replace_all": true}'
+
+# 4. Or load a file directly (CSV, TSV, Excel, JSON, JSON Lines, Parquet)
+curl -X POST -H "$H" -F file=@sites.csv -F mode=upsert \\
+     "$REFEX_URL/api/referentials/sites/records/_import"   # mode=replace: the file becomes the whole content`}</Shell>
+        <P>
+          Answers: a single-row call returns the row as stored (with its generated key, if any); a bulk call returns{' '}
+          <Code>{'{"created": n, "updated": n, "unchanged": n, "deleted": n}'}</Code>. A batch is <b>all or nothing</b>: one value
+          that does not fit its column type is reported with the row number and nothing is written. At most 50,000 changes per
+          request, so split larger files. Each change publishes a new version a few seconds later; a burst of calls gives one
+          version.
+        </P>
+        <Table fz="sm" maw={860} mb="sm" withTableBorder>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th w={110}>Column type</Table.Th>
+              <Table.Th>Accepted values</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {[
+              ['text', 'any text; a number is turned into its text form'],
+              ['integer', 'whole number, or its text form ("120")'],
+              ['number', 'decimal number; a comma is accepted as the decimal separator'],
+              ['boolean', 'true / false, yes / no, 1 / 0, oui / non, x'],
+              ['date', 'YYYY-MM-DD (the date part of a timestamp is kept)'],
+              ['datetime', 'ISO 8601, e.g. 2026-04-01T09:30:00Z'],
+              ['list', 'JSON array ["a", "b"], or comma separated values in a CSV cell'],
+            ].map(([k, v]) => (
+              <Table.Tr key={k}>
+                <Table.Td>
+                  <Code>{k}</Code>
+                </Table.Td>
+                <Table.Td>{v}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+        <P>
+          An empty value is stored as empty, except on a <b>required</b> column and on the key, where the row is refused — unless
+          the key column is <i>generated</i> (<Code>auto</Code>), which gives a UUID to a text key and the next number to an
+          integer key.
+        </P>
+        <H>The same thing as a ready-made script</H>
+        <P>
+          <Code>examples/scripts/refex-internal.py</Code> (standard library only) wraps exactly these calls:
+        </P>
+        <Shell>{`export REFEX_TOKEN=rfx_…   REFEX_URL=${origin()}
+
+./refex-internal.py create sites "Sites" --key code \\
+    --column code:text:required --column label:text --column owner:text \\
+    --column people:integer --column opened:date --column active:boolean --column tags:list
+./refex-internal.py add    sites code=LYO label=Lyon owner=network people=120 active=true tags=prod,eu
+./refex-internal.py patch  sites LYO owner=secops
+./refex-internal.py load   sites sites.csv      # add / update in batches of 10,000 rows
+./refex-internal.py sync   sites sites.csv      # same, and delete every row absent from the file
+./refex-internal.py rows   sites --limit 20`}</Shell>
+        <P>
+          <Code>sites.csv</Code> is an ordinary CSV whose header holds the column names; columns the referential does not have are
+          left out with a warning. The exact endpoints, with the schema of this referential, are in its <b>API</b> tab.
+        </P>
       </>
     ),
   },
@@ -318,7 +635,7 @@ const ADMIN: Section[] = [
             </Table.Tr>
             <Table.Tr>
               <Table.Td fw={600}>Advanced user</Table.Td>
-              <Table.Td>The referentials they are granted, the SQL console, and the creation of internal referentials (they manage the ones they create).</Table.Td>
+              <Table.Td>The referentials they are granted, the SQL console, and the creation of referentials — internal, or a console query kept as one (they manage the ones they create).</Table.Td>
             </Table.Tr>
             <Table.Tr>
               <Table.Td fw={600}>User</Table.Td>
@@ -327,13 +644,21 @@ const ADMIN: Section[] = [
           </Table.Tbody>
         </Table>
         <P>
-          Rights are given per referential (or on <i>all referentials</i>) to a user or a group, at two levels: <b>Read</b> (browse,
-          search, API, downloads, SQL for advanced users) and <b>Manage</b> (read + run or cancel updates, manual imports, editing internal referentials).
-          Manage them from the Access tab of a referential, or from a user or group page.
+          Rights are given to a user or a group at two levels: <b>Read</b> (browse, search, API, downloads, SQL for advanced users)
+          and <b>Manage</b> (read + run or cancel updates, manual imports, editing internal referentials). Manage them from the
+          Access tab of a referential, or from a user or group page.
+        </P>
+        <P>
+          The scope of a right is <b>one referential</b>, <b>a whole category</b>, or <i>all referentials</i>. A right on a
+          category covers the referentials it holds <b>now and later</b>: handing a team a dozen referentials is one row, and one
+          added to the category afterwards is covered without touching the rights. The other way round too — moving a referential
+          to another category changes who may read it, so a category is a permission boundary and not only a way to sort the list.
+          On the Access tab of a referential, a right that comes from its category is shown marked <Code>category</Code> and is
+          edited from the user or the group it was given to.
         </P>
         <H>System tasks</H>
         <P>
-          <Anchor component={Link} to="/admin/tasks">Tasks</Anchor> lists the scheduled background tasks:
+          <Anchor component={Link} to="/system/tasks">System › Tasks</Anchor> lists the scheduled background tasks:
           maintenance (sessions, audit retention, disk cleanup), integrity and monitoring (published data, stale referentials,
           sources, TLS certificate), security policy (inactive accounts, expired tokens, pending requests, LDAP resynchronisation)
           and configuration backups. Enable them, change their schedule and parameters, run them now and read their history. Backups
@@ -363,7 +688,7 @@ const ADMIN: Section[] = [
         <P>
           The first administrator is created from <Code>REFEX_ADMIN_USERNAME</Code> / <Code>REFEX_ADMIN_PASSWORD</Code> and must change
           the password at first sign-in. Passwords are hashed with Argon2id; session and API tokens are stored as SHA3-256 fingerprints;
-          every sign-in, change and export is recorded in the <Anchor component={Link} to="/admin/audit">audit log</Anchor>.
+          every sign-in, change and export is recorded in the <Anchor component={Link} to="/system/audit">audit log</Anchor>.
         </P>
       </>
     ),
@@ -429,6 +754,27 @@ const ADMIN: Section[] = [
             case. Several large documents (all NVD years…) are read one document at a time to keep memory bounded.
           </List.Item>
         </List>
+        <H>Excel workbooks</H>
+        <P>
+          The analysis lists the <b>sheets</b> of the workbook: choose the one to read (the first one by default), and a{' '}
+          <b>range</b> (<Code>A1:F500</Code>) when the data does not start at the first cell.
+        </P>
+        <P>
+          A column takes the type of its <b>first value</b>: a column of numbers holding one piece of text further down (a note in
+          a “comment” column) cannot be read, and Excel gives no type for the column itself. RefExposer then reads{' '}
+          <b>every column as text</b> by itself, keeps the option <Code>all_varchar</Code> in the definition — so the next updates
+          read the file the same way — and says so in the preview and in the run log. Cast the columns that really are numbers or
+          dates with a SQL transformation:
+        </P>
+        <Shell>{`SELECT * REPLACE (
+         TRY_CAST(score AS DOUBLE) AS score,      -- NULL instead of an error on a bad cell
+         TRY_CAST(day AS DATE)     AS day
+       ) FROM {source}`}</Shell>
+        <P>
+          Other options: <b>Ignore cells that do not fit their column</b> (<Code>ignore_errors</Code>, they become empty — it
+          loses data, so prefer reading as text), <b>Stop at the first empty row</b> (on by default, switch it off when the sheet
+          has blank rows in the middle) and the header row, when the first row holds data rather than column names.
+        </P>
         <H>SQLite databases and SQL deltas (NIST NSRL)</H>
         <P>
           <b>NIST NSRL</b>: paste the URL of the NIST download page as the source. The NSRL mode is detected: choose the set in{' '}
@@ -491,6 +837,40 @@ const ADMIN: Section[] = [
           the definition, choose <b>Sort on</b> (the column most lookups use) and <b>Indexes</b> (extra sorted copies for other columns,
           each about the size of the data). Exact, prefix and range lookups on these columns then read only the relevant blocks.
         </P>
+        <H>Choosing the columns when the source cannot be analysed</H>
+        <P>
+          A source of tens of GB is not downloaded by the preview, so the editor has no column list to offer. The{' '}
+          <b>key</b>, the <b>search columns</b>, <b>Sort on</b> and the <b>indexes</b> are plain text fields: type the column names as
+          they appear in the file (the header of a CSV, the fields of a JSON record, the columns of the Parquet file or of the SQLite
+          table). The import checks them: an unknown sort or index column is refused with its name, a missing search column is only a
+          warning in the log, and the columns actually produced are listed in the <b>Schema</b> tab afterwards.
+        </P>
+        <Alert color="gray" maw={860} p="sm" mb="sm">
+          <Text size="sm">
+            Above <Code>REFEX_LARGE_ROWS</Code> rows, the text search and the sort only work on the <b>sorted and indexed</b>{' '}
+            columns, because anything else would read the whole file. A large referential with none of them can be browsed page by
+            page and filtered with the <Code>startswith</Code> / <Code>eq</Code> operators, but not searched: that is why the sort
+            column is the first thing to set on a passive DNS referential. When the search columns are left empty, the search uses
+            every sorted and indexed text column.
+          </Text>
+        </Alert>
+        <Shell>{`# Passive DNS: lookups on the name and on the address, both nearly instant
+storage:
+  sort_by: [rrname]       # the data is written in this order
+  indexes: [rdata]        # a second copy, sorted on rdata
+search_columns: [rrname, rdata]
+
+# After the import, any of these works in milliseconds:
+GET /api/referentials/pdns/rows?rrname=www.example.com
+GET /api/referentials/pdns/rows?rrname__startswith=www.exam
+GET /api/referentials/pdns/rows?q=www.exam          # prefix search on rrname and rdata
+GET /api/referentials/pdns/lookup/www.example.com
+POST /api/referentials/pdns/lookup  {"values": [...], "column": "rdata"}`}</Shell>
+        <P>
+          A filter on a column that is neither sorted nor indexed is still answered (without an exact total), unless the published
+          file is above <Code>REFEX_FULL_SCAN_MAX</Code>: it is then refused at once, with the columns that would work, instead of
+          running until the timeout.
+        </P>
         <P>
           Measured on 1 billion passive DNS rows (30 GB of Parquet): import in about 65 minutes with two indexes, lookups and first pages
           in 120–270 ms, batches of 1,000 values in about 2.5 s, against 5–8 s for a full scan without sorting. Above{' '}
@@ -507,6 +887,155 @@ const ADMIN: Section[] = [
     ),
   },
   {
+    id: 'admin-governance',
+    title: 'Governance, personal data and history',
+    admin: true,
+    body: () => (
+      <>
+        <P>
+          Three blocks of the <b>Description</b> step of the referential editor decide how its data is handled. They
+          cost nothing to set and save a lot of questions later.
+        </P>
+        <H>Visibility and owner</H>
+        <P>
+          <b>Internal</b> (the default) or <b>Public</b>, plus who answers for the data and their team. It is shown
+          on every card and page, filterable in the dashboard, and an e-mail notification channel can send the
+          alerts of a referential to its owner. None of it rebuilds the referential.
+        </P>
+        <H>Personal data</H>
+        <P>
+          Name the columns that hold it. They are then masked <b>everywhere</b>, because the masking is applied by
+          the DuckDB view the referential is read through: the table, the exports, the generated downloads, the
+          column statistics, the search, the diffs, the SQL console, the MCP servers and the assistant. There is no
+          caller to remember it, and anything added later is covered too.
+        </P>
+        <Table fz="sm" maw={860} mb="sm" withTableBorder>
+          <Table.Tbody>
+            {[
+              ['Partial', 'a***e — the first and last characters. Enough to recognise a value you already know.'],
+              ['Pseudonym', 'A stable 16-character hash, salted with the instance secret: rows can still be counted, grouped and joined on the column without the value. Pick this when the column is used in a join, or when a change in it must still show up in the diffs.'],
+              ['Hidden', '*** — when even the shape must not leak.'],
+            ].map(([k, v]) => (
+              <Table.Tr key={k}>
+                <Table.Td w={150} fw={600}>
+                  {k}
+                </Table.Td>
+                <Table.Td>{v}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+        <P>
+          Seeing the real values takes the <b>right</b> (the groups you choose, or an administrator) <b>and</b> an
+          explicit request from the person (<Code>reveal=true</Code>, the switch in the interface), which is written
+          to the audit log as <Code>pii.reveal</Code>. The assistant and the MCP servers can never reveal: they act
+          for a model or a tool, which cannot give the consent.
+        </P>
+        <Alert color="orange" variant="light" mb="sm" maw={860}>
+          <Text size="sm">
+            Masking is <b>not</b> encryption: the published Parquet file still holds the real values, and the source
+            files and the previous version are refused to anyone who may not reveal them. When the data must not be
+            readable on disk either, tick <b>Confidential</b> as well — the two combine. A unified referential reads
+            its sources <b>masked</b>, so personal data does not spread into a derived referential.
+          </Text>
+        </Alert>
+        <H>Time travel</H>
+        <P>
+          Keeping every published version adds a <b>History &amp; diff</b> tab where any two of them can be
+          compared. A kept version is a hard link on the Parquet file, so it costs no space until that version is
+          replaced; the retention policy drops the oldest ones. Set <b>the columns identifying a row</b> (the key by
+          default) so a modified row is told from a new one — without them, a change reads as one removal and one
+          addition. The assistant can read these differences too, which is how it answers "what is new since
+          Monday".
+        </P>
+        <H>Watchdogs</H>
+        <P>
+          A <Anchor component={Link} to="/watchdogs">watchdog</Anchor> runs the assistant on a schedule over a scope
+          you choose and alerts only on a finding. It needs the agent mode of the assistant. It is confined to the
+          referentials it names, runs with the rights of its own account through a session opened for the run, and
+          never writes — whatever <b>Allow writes</b> permits in the chat. Administrators and advanced users can
+          create one.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: 'admin-combine',
+    title: 'Unified referentials',
+    admin: true,
+    body: () => (
+      <>
+        <P>
+          A <b>unified referential</b> is built from the published data of other referentials instead of a source of its own:{' '}
+          <i>New referential › Other referentials</i>. Two shapes:
+        </P>
+        <List size="sm" spacing={6} maw={860} mb="sm">
+          <List.Item>
+            <b>Union</b> — the rows of every referential, one after the other, columns matched by name (a column one of them does
+            not have is empty for its rows). The case of one list maintained by your team and the same kind of list replicated
+            from another instance or another team: one referential covers both. An optional column records which referential each
+            row comes from.
+          </List.Item>
+          <List.Item>
+            <b>Enrichment</b> — the first referential gives the rows, the others add their columns, joined on a shared value (a
+            left join: a row without a match keeps empty values). Choose the join column, which column of each other referential
+            matches it when the names differ, and which columns to bring in. Added columns are named{' '}
+            <Code>&lt;referential&gt;_&lt;column&gt;</Code> unless you switch the prefix off.
+          </List.Item>
+        </List>
+        <P>
+          Each source is read from its published version, so it has already passed its own validation and quality rules. The
+          unified referential is <b>rebuilt automatically</b> whenever one of them publishes a new version (trigger{' '}
+          <i>Source referential updated</i>), and it is skipped when nothing changed. It has its own key, search columns,
+          indexes, quality rules, downloads and rights, and can be queried in SQL like any other. A <b>SQL transformation</b>{' '}
+          applies on top of the combination: <Code>{'{source}'}</Code> is the combined result, <Code>{'{source0}'}</Code>,{' '}
+          <Code>{'{source1}'}</Code>… each referential on its own.
+        </P>
+        <Shell>{`# Union of the lists of two teams, keeping where each row comes from
+source:
+  type: referential
+  referentials: [team1-assets, team2-assets]
+combine:
+  mode: union
+  source_column: _team
+
+# Assets enriched with their owner and the criticality of their site
+source:
+  type: referential
+  referentials: [assets, owners, sites]
+combine:
+  mode: enrich
+  on: hostname                      # column of 'assets' holding the value to join on
+  join_on: {sites: site_code}       # 'sites' matches it with its own column
+  columns: {owners: [owner, team]}  # only these columns are added
+  prefix: true                      # -> owners_owner, owners_team, sites_criticality…
+key: hostname
+transform: SELECT * EXCLUDE (sites_internal_note) FROM {source}`}</Shell>
+        <List size="sm" spacing={4} maw={860} mb="sm">
+          <List.Item>
+            A source must have been <b>published at least once</b>: its columns and its file are what the build reads.
+          </List.Item>
+          <List.Item>
+            A <b>confidential</b> source can only be combined into a confidential referential — otherwise its data would be
+            published unencrypted, and the definition is refused.
+          </List.Item>
+          <List.Item>
+            A referential cannot read itself, directly or through another unified referential, and a referential used by one
+            cannot be deleted until the unified referential is changed or deleted (the <b>Source</b> tab lists both directions).
+          </List.Item>
+          <List.Item>
+            Bloom filters and MaxMind DB files have no rows to combine. A unified referential has no reading options, no deltas
+            and no source files of its own: it is rebuilt from its sources every time.
+          </List.Item>
+          <List.Item>
+            Its own <b>schedule</b> is still useful as a safety net (e.g. daily) when a source is updated by a path that does not
+            publish a new version, and it is skipped when the versions it read have not changed.
+          </List.Item>
+        </List>
+      </>
+    ),
+  },
+  {
     id: 'admin-peers',
     title: 'Synchronized instances',
     admin: true,
@@ -515,7 +1044,7 @@ const ADMIN: Section[] = [
         <P>
           An instance can replicate the referentials of another RefExposer instance, with their definitions (description, key, quality
           rules, SQL transformation, indexes, downloads). <b>On the instance that shares</b>: create a service account, give its group the
-          read right on the referentials to share, and an API token. <b>Here</b>: <b>Administration › Synchronized instances › Add a peer</b>,
+          read right on the referentials to share, and an API token. <b>Here</b>: <b>Administration › Referentials › Synchronized instances › Add a peer</b>,
           with its URL and the token, then choose the referentials (or all of them) and a prefix for the local identifiers.
         </P>
         <P>
@@ -645,7 +1174,7 @@ cp nvd-2026.json.gz import/nvd-cve/
             the limits and the import folder, and reloads the YAML configuration.
           </List.Item>
           <List.Item>
-            <b>Audit</b> — the <Anchor component={Link} to="/admin/audit">audit log</Anchor> records sign-ins, administration, updates,
+            <b>Audit</b> — the <Anchor component={Link} to="/system/audit">audit log</Anchor> records sign-ins, administration, updates,
             imports, row edits, exports and SQL queries.
           </List.Item>
           <List.Item>
@@ -679,7 +1208,7 @@ export default function HelpPage() {
   const { me } = useAuth();
   if (!me) return null;
   const shown = (list: Section[]) => list.filter((s) => !s.visible || s.visible(me));
-  const all = shown([...USER, ...INTEGRATIONS, ...(me.is_admin ? ADMIN : [])]);
+  const all = shown([...USER, ...PLUGINS, ...(me.is_admin ? ADMIN : [])]);
   const current = all.find((s) => s.id === section) ?? all[0];
   const link = (s: Section) => (
     <NavLink key={s.id} component={Link} to={`/help/${s.id}`} label={s.title} active={s.id === current.id} style={{ borderRadius: 8 }} />
@@ -695,13 +1224,6 @@ export default function HelpPage() {
             </Text>
           </Group>
           {shown(USER).map(link)}
-          <Group gap={6} px="sm" py={6} mt="sm">
-            <IconPlugConnected size={16} />
-            <Text size="xs" fw={700} tt="uppercase" c="dimmed">
-              Integrations
-            </Text>
-          </Group>
-          {INTEGRATIONS.map(link)}
           {me.is_admin && (
             <>
               <Group gap={6} px="sm" py={6} mt="sm">
@@ -718,7 +1240,7 @@ export default function HelpPage() {
       <Grid.Col span={{ base: 12, md: 9 }}>
         <Stack gap={0}>
           <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-            {current.admin ? 'Administrator guide' : INTEGRATIONS.includes(current) ? 'Integrations' : 'User guide'}
+            {current.admin ? 'Administrator guide' : 'User guide'}
           </Text>
           <Title order={2} mb="md">
             {current.title}
