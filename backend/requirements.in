@@ -15,7 +15,7 @@ python-multipart>=0.0.9,<1
 ldap3>=2.9,<3
 PyJWT[crypto]>=2.8,<3
 cryptography>=42
-maxminddb>=2.6,<3
+maxminddb>=3.2.0,<4
 segno>=1.6,<2
 webauthn>=2.2,<3
 # Trust store used by httpx: earlier bundles ship emSign roots whose intermediate CA keys are compromised
