@@ -17,6 +17,6 @@ PyJWT[crypto]>=2.8,<3
 cryptography>=42
 maxminddb>=2.6,<3
 segno>=1.6,<2
-webauthn>=2.2,<3
+webauthn>=3.0.1,<4
 # Trust store used by httpx: earlier bundles ship emSign roots whose intermediate CA keys are compromised
 certifi>=2026.10.19
