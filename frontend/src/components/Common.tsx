@@ -1,6 +1,9 @@
 import { ActionIcon, Button, Card, Code, CopyButton, Group, Menu, Paper, Stack, Text, ThemeIcon, Tooltip } from '@mantine/core';
-import { IconCheck, IconChevronDown, IconCopy, IconPlayerStop, IconRefresh } from '@tabler/icons-react';
+import { notifications } from '@mantine/notifications';
+import { IconCheck, IconChevronDown, IconCopy, IconPin, IconPlayerStop, IconRefresh } from '@tabler/icons-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
+import { api } from '../api/client';
 import { useCancel, useRefresh } from '../api/hooks';
 
 export function StatCard({
@@ -70,9 +73,34 @@ export function CodeSnippet({ code, title }: { code: string; title?: string }) {
   );
 }
 
-export function RefreshButton({ id, running, size = 'sm', merged = false }: { id: string; running: boolean; size?: 'xs' | 'sm'; merged?: boolean }) {
+export function RefreshButton({
+  id,
+  running,
+  size = 'sm',
+  merged = false,
+  pinned = false,
+}: {
+  id: string;
+  running: boolean;
+  size?: 'xs' | 'sm';
+  merged?: boolean;
+  /** Frozen: automatic updates are suspended, and the menu offers to resume them */
+  pinned?: boolean;
+}) {
   const refresh = useRefresh();
   const cancel = useCancel();
+  const qc = useQueryClient();
+  const freeze = useMutation({
+    mutationFn: async (on: boolean) => {
+      await (on ? api.pin(id) : api.unpin(id));
+    },
+    onSuccess: (_, on) => {
+      notifications.show({ message: on ? 'Version frozen: automatic updates suspended' : 'Automatic updates resumed', color: 'teal' });
+      qc.invalidateQueries({ queryKey: ['referential', id] });
+      qc.invalidateQueries({ queryKey: ['referentials'] });
+    },
+    onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
+  });
   if (running)
     return (
       <Button
@@ -123,6 +151,20 @@ export function RefreshButton({ id, running, size = 'sm', merged = false }: { id
               </Text>
             </Menu.Item>
           )}
+          <Menu.Divider />
+          <Menu.Item
+            leftSection={<IconPin size={14} />}
+            color={pinned ? 'teal' : undefined}
+            onClick={() => freeze.mutate(!pinned)}
+            disabled={freeze.isPending}
+          >
+            {pinned ? 'Resume automatic updates' : 'Freeze this version'}
+            <Text size="xs" c="dimmed">
+              {pinned
+                ? 'The schedule, the startup check and the sync folder update it again'
+                : 'The schedule, the startup check and the sync folder leave it alone'}
+            </Text>
+          </Menu.Item>
         </Menu.Dropdown>
       </Menu>
     </Group>

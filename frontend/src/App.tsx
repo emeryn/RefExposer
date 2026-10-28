@@ -44,7 +44,7 @@ import {
 } from '@tabler/icons-react';
 import { Suspense, lazy, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { useAlerts, unreadAlerts, useAssistant, useBranding, useReferentials } from './api/hooks';
+import { useAlerts, useAssistant, useBranding, useReferentials } from './api/hooks';
 import { BrandHeader } from './components/Brand';
 import { useAuth } from './auth/AuthContext';
 import LoginPage from './auth/LoginPage';
@@ -132,20 +132,20 @@ function GlobalSearch() {
   );
 }
 
-/** What needs a look, with what arrived since the alerts page was last opened. */
+/** What needs a look, with what this account has not marked as read. */
 function AlertsBell() {
   const { data } = useAlerts(200);
-  const unread = unreadAlerts(data);
+  const unread = data?.counts.unread ?? 0;
   const total = data?.counts.total ?? 0;
   return (
-    <Tooltip label={total ? `${total} alert(s)${unread ? `, ${unread} new` : ''}` : 'No alert'}>
+    <Tooltip label={total ? `${total} alert(s)${unread ? `, ${unread} unread` : ', all read'}` : 'No alert'}>
       <Indicator
         disabled={!unread}
         label={unread > 99 ? '99+' : unread}
         size={16}
         offset={4}
         color="red"
-        aria-label={`${unread} new alert(s)`}
+        aria-label={`${unread} unread alert(s)`}
       >
         <ActionIcon variant="default" size="lg" component={Link} to="/alerts" aria-label="Alerts">
           <IconBell size={18} />

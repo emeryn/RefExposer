@@ -202,13 +202,15 @@ def fetch_catalog(service: "Service", url: str, token: str) -> dict[str, Any]:
     from .network import UnsafeUrl, validate_outbound
 
     # The address of the peer is configured by an administrator: checked before each call, so a peer whose
-    # name later resolves to this machine or to a metadata service is refused rather than followed
+    # name later resolves to this machine or to a metadata service is refused rather than followed. This call
+    # carries the API token of the service account on the peer, so redirects are not followed: the catalog is
+    # at a known path, and a 302 would hand that token to whoever answers next.
     try:
         target = validate_outbound(url.rstrip("/") + CATALOG_PATH, what="address of the peer")
     except UnsafeUrl as e:
         raise FederationError(str(e)) from e
     try:
-        with http_client(service.settings) as client:
+        with http_client(service.settings, follow_redirects=False) as client:
             r = client.get(target, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=60)
     except httpx.HTTPError as e:
         raise FederationError(f"peer unreachable ({target}): {e}") from e

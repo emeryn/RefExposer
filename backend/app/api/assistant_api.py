@@ -3,6 +3,11 @@
 A conversation belongs to one account: every query filters on `user_id`, and someone else's conversation is
 reported as unknown. Answers are streamed as server-sent events; the exchange is stored once it is finished, so
 a conversation survives a reload and keeps going until the user resets it.
+
+A conversation can be narrowed to a few referentials (`referential_ids`), which is a filter the user chooses to
+stop the agent exploring a catalogue of a hundred referentials to answer a question about two of them. It is
+carried as the signed scope of every tool call, like the scope of a watchdog — with one difference: a
+referential the assistant creates for the user joins the filter instead of being refused (llm/agent.py).
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ router = APIRouter(prefix="/assistant", tags=["assistant"])
 
 MAX_MESSAGE_CHARS = 8000
 MAX_CONVERSATIONS = 100
+# Referentials a conversation may be narrowed to. Beyond a handful the filter saves nothing.
+MAX_SCOPE = 20
 _rate: dict[int, deque[float]] = {}
 _rate_lock = threading.Lock()
 
@@ -53,6 +60,8 @@ class ConversationIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(None, max_length=200)
+    # The referentials this conversation is about. Absent: unchanged · empty list: no filter at all.
+    referential_ids: list[str] | None = Field(None, max_length=MAX_SCOPE)
 
 
 # --------------------------------------------------------------------------- access
@@ -83,6 +92,19 @@ def _throttle(user: CurrentUser, per_minute: int) -> None:
         hits.append(now)
 
 
+def _scope(service: Service, user: CurrentUser, ids: list[str]) -> list[str]:
+    """The filter of a conversation: referentials that exist and that this account may read.
+
+    A referential it cannot read is reported as unknown, as everywhere else: the filter never widens what the
+    assistant reaches, it only narrows it.
+    """
+    out = list(dict.fromkeys(r.strip() for r in ids if r and r.strip()))
+    unknown = [r for r in out if r not in service.refs or not user.can_read(r)]
+    if unknown:
+        raise HTTPException(404, f"unknown referential(s): {', '.join(unknown)}")
+    return out
+
+
 def _conversation(db: Session, user: CurrentUser, conversation_id: str) -> Conversation:
     conv = db.get(Conversation, conversation_id)
     if not conv or conv.user_id != user.id:
@@ -97,6 +119,7 @@ def _message_dict(m: ChatMessage) -> dict[str, Any]:
 
 def _conversation_dict(conv: Conversation, messages: int | None = None) -> dict[str, Any]:
     return {"id": conv.id, "title": conv.title, "model": conv.model, "agent": conv.agent,
+            "referential_ids": conv.referential_ids or [],
             "created_at": conv.created_at, "updated_at": conv.updated_at, "messages": messages}
 
 
@@ -120,6 +143,8 @@ def status(db: Session = Depends(get_db), user: CurrentUser = Depends(require_us
         "watchdogs": available and watchdoglib.enabled(cfg) and watchdoglib.may_use(user),
         "max_steps": cfg.max_steps,
         "max_chars": MAX_MESSAGE_CHARS,
+        # Referentials a conversation may be narrowed to (0 would mean the filter is not offered)
+        "max_scope": MAX_SCOPE,
     }
 
 
@@ -137,13 +162,15 @@ def list_conversations(db: Session = Depends(get_db), user: CurrentUser = Depend
 
 @router.post("/conversations", summary="Start a conversation", status_code=201)
 def create_conversation(body: ConversationIn, db: Session = Depends(get_db),
+                        service: Service = Depends(get_service),
                         user: CurrentUser = Depends(require_user)) -> dict[str, Any]:
     cfg = _config(db, user)
     total = db.scalar(select(func.count(Conversation.id)).where(Conversation.user_id == user.id)) or 0
     if total >= MAX_CONVERSATIONS:
         raise HTTPException(409, f"at most {MAX_CONVERSATIONS} conversations: delete one first")
     conv = Conversation(id=uuid.uuid4().hex, user_id=user.id, title=(body.title or "New conversation")[:200],
-                        model=cfg.model, agent=cfg.agent_enabled)
+                        model=cfg.model, agent=cfg.agent_enabled,
+                        referential_ids=_scope(service, user, body.referential_ids or []) or None)
     db.add(conv)
     db.commit()
     return _conversation_dict(conv, 0)
@@ -159,13 +186,17 @@ def get_conversation(conversation_id: str, db: Session = Depends(get_db),
     return {**_conversation_dict(conv, len(messages)), "messages": [_message_dict(m) for m in messages]}
 
 
-@router.patch("/conversations/{conversation_id}", summary="Rename a conversation")
+@router.patch("/conversations/{conversation_id}", summary="Rename a conversation, or change its filter")
 def rename_conversation(conversation_id: str, body: ConversationIn, db: Session = Depends(get_db),
+                        service: Service = Depends(get_service),
                         user: CurrentUser = Depends(require_user)) -> dict[str, Any]:
     _config(db, user)
     conv = _conversation(db, user, conversation_id)
     if body.title:
         conv.title = body.title[:200]
+    if body.referential_ids is not None:
+        # An empty list clears the filter: the assistant reaches again everything the account may read
+        conv.referential_ids = _scope(service, user, body.referential_ids) or None
     db.commit()
     return _conversation_dict(conv)
 
@@ -218,9 +249,11 @@ def send_message(conversation_id: str, body: MessageIn, request: Request, db: Se
     db.commit()
     history.append({"role": "user", "content": body.content})
 
-    worker = agentlib.Agent(agentlib.Caller.of(request), cfg, provider, user, agent_mode=body.agent)
+    scope = frozenset(conv.referential_ids or []) or None
+    worker = agentlib.Agent(agentlib.Caller.of(request, scope), cfg, provider, user, agent_mode=body.agent)
     audit(db, "assistant.ask", user=user, target=f"conversation:{conv.id}", request=request,
-          detail={"agent": worker.agent_mode, "model": cfg.model, "chars": len(body.content)})
+          detail={"agent": worker.agent_mode, "model": cfg.model, "chars": len(body.content),
+                  "scope": sorted(scope) if scope else None})
     # The session of the request is closed before the stream is consumed: nothing of it is used below
     conversation_id = conv.id
 

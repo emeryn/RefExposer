@@ -11,6 +11,7 @@ import {
   Loader,
   Modal,
   MultiSelect,
+  NumberInput,
   SegmentedControl,
   Select,
   SimpleGrid,
@@ -25,12 +26,12 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconBell, IconMail, IconPlus, IconSend, IconTrash, IconWebhook } from '@tabler/icons-react';
+import { IconBell, IconCheck, IconMail, IconPlus, IconSend, IconTrash, IconWebhook, IconX } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api/client';
-import type { NotificationChannel, NotificationEvent } from '../../api/types';
+import type { AlertKind, AlertsSettings, NotificationChannel, NotificationEvent, Severity } from '../../api/types';
 import { EmptyState } from '../../components/Common';
 import { SecretInput } from '../../components/SecretInput';
 import { fmtDate } from '../../lib/format';
@@ -41,6 +42,113 @@ const EVENTS: { value: NotificationEvent; label: string; description: string }[]
   { value: 'published', label: 'New version', description: 'every published version' },
   { value: 'quality', label: 'Quality warning', description: 'a version published with quality rules not met' },
 ];
+
+/** What each kind of the alert feed reports, said for whoever decides to show it or not. */
+const ALERT_KINDS: Record<AlertKind, { label: string; description: string }> = {
+  watchdog: { label: 'Watchdog findings', description: 'A scheduled investigation found something, or could not finish.' },
+  failure: { label: 'Failed updates', description: 'The last update failed, was rejected, or found a corrupted source.' },
+  quality: { label: 'Quality rules', description: 'The published version does not pass the quality rules of its referential.' },
+  stale: { label: 'Stale data', description: 'No new version within the delay the referential expects (max_age).' },
+  drift: { label: 'Volume drift', description: 'The last version changed the number of rows a lot — see the threshold below.' },
+};
+
+const SEVERITIES: { value: Severity; label: string }[] = [
+  { value: 'LOW', label: 'Low — everything is reported' },
+  { value: 'MEDIUM', label: 'Medium and above' },
+  { value: 'HIGH', label: 'High and critical only' },
+  { value: 'CRITICAL', label: 'Critical only' },
+];
+
+/**
+ * What counts as an alert in this instance.
+ *
+ * The Alerts page is built from the state of the referentials and the recorded watchdog runs, so there is
+ * nothing to acknowledge centrally — but not every instance cares about every kind. What is hidden here is
+ * out of the page and out of the count of the bell, for everybody.
+ */
+function AlertsCard() {
+  const qc = useQueryClient();
+  const { data } = useQuery({ queryKey: ['settings'], queryFn: api.settings });
+  const [form, setForm] = useState<AlertsSettings | null>(null);
+  const cfg = form ?? data?.alerts;
+  const kinds = data?.alert_kinds ?? (Object.keys(ALERT_KINDS) as AlertKind[]);
+  const save = useMutation({
+    mutationFn: (body: AlertsSettings) => api.saveSettings('alerts', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['settings'] });
+      qc.invalidateQueries({ queryKey: ['alerts'] });
+      notifications.show({ color: 'teal', icon: <IconCheck size={16} />, message: 'Alert settings saved' });
+    },
+    onError: (e: Error) => notifications.show({ color: 'red', icon: <IconX size={16} />, message: e.message }),
+  });
+  if (!cfg) return null;
+  const set = <K extends keyof AlertsSettings>(key: K, value: AlertsSettings[K]) =>
+    setForm({ ...cfg, [key]: value });
+  const shown = kinds.filter((k) => !cfg.hidden_kinds.includes(k));
+
+  return (
+    <Card withBorder padding="lg">
+      <Stack gap="md">
+        <div>
+          <Title order={4}>What counts as an alert</Title>
+          <Text size="sm" c="dimmed">
+            The <Anchor component={Link} to="/alerts" size="sm">Alerts</Anchor> page gathers what needs a look.
+            Leave out the kinds that do not apply here: a kind unticked is out of the page and out of the badge
+            of the bell, for everybody. Nothing stops being watched, and the notification channels below keep
+            their own configuration.
+          </Text>
+        </div>
+        <Checkbox.Group
+          value={shown}
+          onChange={(v) => set('hidden_kinds', kinds.filter((k) => !v.includes(k)))}
+        >
+          <Stack gap="xs">
+            {kinds.map((k) => (
+              <Checkbox key={k} value={k} label={ALERT_KINDS[k].label} description={ALERT_KINDS[k].description} />
+            ))}
+          </Stack>
+        </Checkbox.Group>
+        {!shown.length && (
+          <Alert color="orange" variant="light">
+            <Text size="sm">Nothing is reported at all: the Alerts page stays empty for everyone.</Text>
+          </Alert>
+        )}
+        <SimpleGrid cols={{ base: 1, sm: 3 }}>
+          <Select
+            label="Report from this severity upwards"
+            description="A watchdog finding keeps the severity the model gave it; the other kinds have a fixed one."
+            data={SEVERITIES}
+            value={cfg.min_severity}
+            onChange={(v) => set('min_severity', (v ?? 'LOW') as Severity)}
+            allowDeselect={false}
+          />
+          <NumberInput
+            label="A drift is a volume change of at least"
+            description="In percent, up or down, between the published version and the one before it."
+            suffix=" %"
+            min={1}
+            max={1000}
+            value={Math.round(cfg.drift_ratio * 100)}
+            onChange={(v) => set('drift_ratio', Math.max(1, Number(v) || 20) / 100)}
+          />
+          <NumberInput
+            label="…on a referential of at least"
+            description="Rows before the change. Below that a percentage means nothing."
+            suffix=" rows"
+            min={1}
+            value={cfg.drift_min_rows}
+            onChange={(v) => set('drift_min_rows', Math.max(1, Number(v) || 100))}
+          />
+        </SimpleGrid>
+        <Group justify="flex-end">
+          <Button onClick={() => save.mutate(cfg)} loading={save.isPending} disabled={!form}>
+            Save
+          </Button>
+        </Group>
+      </Stack>
+    </Card>
+  );
+}
 
 const TEMPLATES = [
   { value: '', label: 'Generic JSON (event, text, referential, run…)', template: '' },
@@ -251,8 +359,11 @@ export default function NotificationsPage() {
 
   return (
     <Stack gap="lg">
+      <AlertsCard />
+
       <Group justify="space-between" align="flex-end">
         <div>
+          <Title order={4}>Notification channels</Title>
           <Text c="dimmed" size="sm">
             E-mails and webhooks when a referential fails, recovers or publishes a new version. A failing referential is notified once,
             when it starts failing.

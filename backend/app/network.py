@@ -99,12 +99,19 @@ def ssl_context(settings: Settings, cfg: ProxySettings, verify_tls: bool = True)
     return ctx
 
 
-def client(settings: Settings, cfg: ProxySettings | None = None, verify_tls: bool = True, timeout: float | None = None) -> httpx.Client:
-    """HTTP client honouring the proxy configured in the UI (or, failing that, the environment)."""
+def client(settings: Settings, cfg: ProxySettings | None = None, verify_tls: bool = True,
+           timeout: float | None = None, follow_redirects: bool = True) -> httpx.Client:
+    """HTTP client honouring the proxy configured in the UI (or, failing that, the environment).
+
+    `follow_redirects`: on for the sources, which routinely redirect (a mirror, a signed link). **Off** for a
+    call whose address `validate_outbound()` has just checked: validating the address is worth nothing if a
+    redirect can then send the request — and whatever credential it carries — somewhere else entirely.
+    """
     cfg = cfg or _proxy
     verify = ssl_context(settings, cfg, verify_tls)
     t = httpx.Timeout(timeout or settings.http_timeout, connect=30)
-    common = {"follow_redirects": True, "timeout": t, "headers": {"User-Agent": settings.http_user_agent}}
+    common = {"follow_redirects": follow_redirects, "timeout": t,
+              "headers": {"User-Agent": settings.http_user_agent}}
     if not cfg.configured:
         return httpx.Client(verify=verify, trust_env=True, **common)
     mounts: dict[str, httpx.BaseTransport | None] = {}

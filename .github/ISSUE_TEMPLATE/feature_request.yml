@@ -32,7 +32,7 @@ body:
     attributes:
       label: Before opening this
       options:
-        - label: I looked in the README and the in-application help, and it is not there already
+        - label: I looked in the documentation (docs/) and the in-application help, and it is not there already
           required: true
         - label: I searched the existing issues
           required: true

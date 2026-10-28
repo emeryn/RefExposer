@@ -1,9 +1,16 @@
-"""Time travel: keep past versions of a referential and compare two of them.
+"""Kept versions of a referential: time travel, saved states, comparison and restore.
 
-Turned on per referential (`storage.time_travel`). At each publication the Parquet file of the new version is
-kept under ``data/<id>/snapshots/`` as a **hard link** on the published file: it costs no extra space, and it
-keeps the version alive once the published file is replaced. A retention policy
-(``storage.max_snapshots``) drops the oldest ones.
+Two ways a version is kept under ``data/<id>/snapshots/``, both as a **hard link** on the published file, which
+costs no extra space and keeps the version alive once the published file is replaced:
+
+- **time travel** (``storage.time_travel``), which keeps every published version and drops the oldest ones
+  beyond ``storage.max_snapshots``;
+- a **saved state**, taken on demand by someone with the manage right, with a label. It is never dropped
+  automatically, and it is what `restore_files` puts back.
+
+**Restoring** publishes the file of a kept version again, as a **new version**: the version number moves
+forward, because restoring is publishing something, not rewinding time. The state being replaced is saved
+first, so a restore can itself be undone.
 
 The comparison runs in DuckDB over the two files. A row is identified by ``primary_key_columns`` (or the key of
 the referential, or — failing both — by a hash of the whole row, which can then only report additions and
@@ -20,19 +27,20 @@ import hashlib
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 import orjson
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .config import ReferentialConfig
 from .engine import Engine, rows_to_records
 from .models import ReferentialSnapshot
 from .pii import expression
-from .sqlbuild import parquet_reader, qi
+from .sqlbuild import lit, parquet_reader, qi
 from .storage import RefPaths, iso, utcnow
 
 log = logging.getLogger(__name__)
@@ -40,6 +48,8 @@ log = logging.getLogger(__name__)
 FOLDER = "snapshots"
 LATEST = "latest"
 MAX_DIFF_ROWS = 1000
+# Saved states kept per referential: they are never dropped by the retention, so they need a limit of their own
+MAX_MANUAL = 25
 
 
 class SnapshotError(ValueError):
@@ -62,14 +72,43 @@ def record(db: Session, data_dir: Path, ref: ReferentialConfig, meta: dict[str, 
     """Keep the version just published as a snapshot. Returns it, or None when time travel is off."""
     if not ref.storage.time_travel:
         return None
+    version = int(meta.get("version") or 0)
+    if db.scalar(select(ReferentialSnapshot.id)
+                 .where(ReferentialSnapshot.referential_id == ref.id, ReferentialSnapshot.version == version,
+                        ReferentialSnapshot.manual.is_(False))):
+        return None  # already kept (a republication that did not change the version)
+    return _keep(db, data_dir, ref, meta, run_id=run_id)
+
+
+def capture(db: Session, data_dir: Path, ref: ReferentialConfig, meta: dict[str, Any], label: str = "",
+            user: str | None = None) -> ReferentialSnapshot:
+    """Save the state of a referential on demand, whether time travel is on or not.
+
+    The same version can be saved several times (before each change someone wants to be able to undo), so this
+    does not refuse an existing version the way `record` does.
+    """
+    kept = db.scalar(select(func.count(ReferentialSnapshot.id))
+                     .where(ReferentialSnapshot.referential_id == ref.id,
+                            ReferentialSnapshot.manual.is_(True))) or 0
+    if kept >= MAX_MANUAL:
+        raise SnapshotError(f"at most {MAX_MANUAL} saved states per referential: delete one first")
+    snap = _keep(db, data_dir, ref, meta, manual=True, label=label.strip()[:200], user=user)
+    if snap is None:
+        raise SnapshotError("this referential has no published version to save")
+    return snap
+
+
+def _keep(db: Session, data_dir: Path, ref: ReferentialConfig, meta: dict[str, Any], run_id: str | None = None,
+          manual: bool = False, label: str = "", user: str | None = None) -> ReferentialSnapshot | None:
+    """Hard-link the published file into the snapshots folder and record what it held."""
     paths = RefPaths(data_dir, ref.id)
     if not paths.current.exists():
         return None
     version = int(meta.get("version") or 0)
-    if db.scalar(select(ReferentialSnapshot.id)
-                 .where(ReferentialSnapshot.referential_id == ref.id, ReferentialSnapshot.version == version)):
-        return None  # already kept (a republication that did not change the version)
-    target = folder(data_dir, ref.id) / f"v{version:06d}-{utcnow().strftime('%Y%m%dT%H%M%SZ')}.parquet"
+    stamp = utcnow().strftime("%Y%m%dT%H%M%SZ")
+    target = folder(data_dir, ref.id) / f"v{version:06d}-{stamp}.parquet"
+    if target.exists():  # two saves within the same second
+        target = target.with_name(f"v{version:06d}-{stamp}-{uuid.uuid4().hex[:6]}.parquet")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(paths.current, target)
@@ -87,18 +126,26 @@ def record(db: Session, data_dir: Path, ref: ReferentialConfig, meta: dict[str, 
         columns=columns,
         encrypted=bool(meta.get("encrypted")),
         run_id=run_id,
+        manual=manual,
+        label=label,
+        created_by=user,
     )
     db.add(snap)
     db.flush()
-    prune(db, data_dir, ref.id, ref.storage.max_snapshots)
+    prune(db, data_dir, ref_id=ref.id, keep=ref.storage.max_snapshots)
     db.commit()
-    log.info("[%s] snapshot of version %s kept (%s)", ref.id, version, target.name)
+    log.info("[%s] %s of version %s kept (%s)", ref.id, "state" if manual else "snapshot", version, target.name)
     return snap
 
 
 def prune(db: Session, data_dir: Path, ref_id: str, keep: int) -> int:
-    """Drop the oldest snapshots beyond the retention policy. Returns how many were removed."""
-    rows = list(db.scalars(select(ReferentialSnapshot).where(ReferentialSnapshot.referential_id == ref_id)
+    """Drop the oldest snapshots beyond the retention policy. Returns how many were removed.
+
+    A saved state is never dropped here: it was kept on purpose, and only a person deletes it.
+    """
+    rows = list(db.scalars(select(ReferentialSnapshot)
+                           .where(ReferentialSnapshot.referential_id == ref_id,
+                                  ReferentialSnapshot.manual.is_(False))
                            .order_by(ReferentialSnapshot.version.desc(), ReferentialSnapshot.id.desc())))
     removed = 0
     for snap in rows[max(keep, 1):]:
@@ -129,6 +176,10 @@ def listing(db: Session, data_dir: Path, ref_id: str) -> list[dict[str, Any]]:
         "encrypted": s.encrypted,
         "available": (base / s.file).is_file(),
         "run_id": s.run_id,
+        # Saved by hand: it carries a label, the account that saved it, and the retention leaves it alone
+        "manual": s.manual,
+        "label": s.label or "",
+        "created_by": s.created_by,
     } for s in rows]
 
 
@@ -282,3 +333,148 @@ def stored_size(db: Session, data_dir: Path, ref_id: str) -> int:
 # Kept for the run journal: what the publication did with the snapshots
 def note(snap: ReferentialSnapshot | None) -> str | None:
     return f"snapshot kept: version {snap.version} ({iso(snap.created_at)})" if snap else None
+
+
+# --------------------------------------------------------------------------- restoring a kept version
+
+def restore_files(settings: Any, ref: ReferentialConfig, meta: dict[str, Any], snap: ReferentialSnapshot,
+                  run: Any) -> dict[str, Any]:
+    """Publish the file of a kept version again, as the current version of the referential.
+
+    Everything the published version is made of is rebuilt from that file — the sorted copies (indexes), the
+    row count, the columns, the column profile, the quality rules and the changes against the version being
+    replaced — so what comes out is a published version like any other. What this does **not** do is rewind:
+    the version number moves forward, and the source the referential reads is left untouched. The next update
+    from that source therefore brings its data back, which is why a restore freezes the referential.
+    """
+    from .crypto import encrypt_data, parquet_key
+    from .ingest import PROFILE_SAMPLE_ROWS, QUALITY_SAMPLE_ROWS, _connect, _profile, compute_changes
+    from .quality import evaluate as evaluate_quality
+    from .sqlbuild import parquet_sample
+
+    paths = RefPaths(settings.data_dir, ref.id)
+    source = folder(settings.data_dir, ref.id) / snap.file
+    if not source.is_file():
+        raise SnapshotError(f"the file of version {snap.version} is gone: it cannot be restored")
+    if bool(snap.encrypted) != bool(ref.confidential):
+        raise SnapshotError(
+            "this version was published with the other confidentiality setting: it is "
+            f"{'encrypted' if snap.encrypted else 'in clear'} while the referential is now "
+            f"{'confidential' if ref.confidential else 'not confidential'}")
+    st = ref.storage
+    key = parquet_key(ref.id) if ref.confidential else None
+    key_name = key[0] if key else None
+    paths.work.mkdir(parents=True, exist_ok=True)
+    con = _connect(settings, paths, "parquet", key=key)
+    index_tmp: dict[str, Path] = {}
+    try:
+        rel = parquet_reader(str(source), key_name)
+        rows = con.execute(f"SELECT count(*) FROM {rel}").fetchone()[0]
+        columns = [{"name": r[0], "type": r[1]} for r in con.execute(f"DESCRIBE SELECT * FROM {rel}").fetchall()]
+        col_names = {c["name"] for c in columns}
+        run.log(f"Version {snap.version} of {iso(snap.created_at)}: {rows:,} rows, {len(columns)} columns")
+        missing = [c for c in [*st.sort_by, *st.indexes] if c not in col_names]
+        if missing:
+            raise SnapshotError("this version does not have the sort / index column(s) configured today: "
+                                + ", ".join(missing))
+        large = rows > settings.large_rows
+        prev_rows = meta.get("row_count")
+
+        # What the restore changes, against the version it replaces
+        changes = None
+        if ref.key and ref.key in col_names and paths.current.exists() and not large and st.track_changes:
+            try:
+                changes = compute_changes(con, str(source), str(paths.current), ref.key, key_name, key_name)
+                run.log(f"Changes against the published version: +{changes['added']:,} / "
+                        f"-{changes['removed']:,} / "
+                        f"~{changes['modified'] if changes['modified'] is not None else '?'} modified")
+            except Exception as e:  # noqa: BLE001 (a comparison that fails never stops a restore)
+                run.log(f"Cannot compute the changes: {e}", "warn")
+
+        # The sorted copies belong to the data: they are written again from the version being restored
+        run.phase = "index"
+        copy_opts = f"FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {st.row_group_size}"
+        if key:
+            copy_opts += ", ENCRYPTION_CONFIG {footer_key: " + lit(key[0]) + "}"
+        for c in st.indexes:
+            path = paths.work / f"next.by_{RefPaths.index_name(c)}.parquet"
+            con.execute(f"COPY (SELECT * FROM {rel} ORDER BY {qi(c)}) TO {lit(str(path))} ({copy_opts})")
+            index_tmp[c] = path
+            run.log(f"Index on '{c}' written again ({path.stat().st_size:,} bytes)")
+
+        run.phase = "quality"
+        quality = evaluate_quality(con, rel, col_names, ref.quality, ref.key, examples=not ref.confidential,
+                                   large=large,
+                                   sample=parquet_sample(str(source), key_name, rows, QUALITY_SAMPLE_ROWS,
+                                                         st.row_group_size))
+        if quality:
+            quality["checked_at"] = iso(utcnow())
+            run.log(f"Quality: score {quality['score']}/100 ({quality['status']})")
+
+        run.phase = "profile"
+        profile = []
+        mode = st.profile if not (large and st.profile == "full") else "sample"
+        if mode != "none":
+            try:
+                src = rel if (mode == "full" or rows <= PROFILE_SAMPLE_ROWS) else parquet_sample(
+                    str(source), key_name, rows, PROFILE_SAMPLE_ROWS, st.row_group_size)
+                profile = _profile(con, src)
+            except Exception as e:  # noqa: BLE001
+                run.log(f"Cannot compute the column profile: {e}", "warn")
+    finally:
+        con.close()
+
+    # Publish: the file of the kept version becomes the published one — a hard link, as everywhere here, so
+    # restoring a version does not consume it.
+    run.phase = "publish"
+    tmp = paths.work / "restored.parquet"
+    tmp.unlink(missing_ok=True)
+    try:
+        os.link(source, tmp)
+    except OSError:
+        shutil.copy2(source, tmp)
+    if paths.current.exists() and st.keep_previous:
+        os.replace(paths.current, paths.previous)
+    else:
+        paths.previous.unlink(missing_ok=True)
+    os.replace(tmp, paths.current)
+    for column, path in index_tmp.items():
+        os.replace(path, paths.index_path(column))
+    wanted = {paths.index_path(c) for c in st.indexes}
+    for f in paths.index_files():
+        if f not in wanted:
+            f.unlink(missing_ok=True)
+    shutil.rmtree(paths.work, ignore_errors=True)
+    # The generated downloads were built from the version that has just been replaced
+    shutil.rmtree(paths.root / "exports", ignore_errors=True)
+
+    now = iso(utcnow())
+    out = dict(meta)
+    out.update({
+        "version": int(meta.get("version", 0)) + 1,
+        # Forgotten on purpose: the next update must read the source again instead of finding it "unchanged"
+        "fingerprint": "",
+        "data_updated_at": now,
+        "previous_row_count": prev_rows,
+        "row_count": rows,
+        "columns": columns,
+        "profile": [] if ref.confidential else profile,
+        "profile_enc": encrypt_data(orjson.dumps(profile).decode(), ref.id) if ref.confidential else None,
+        "encrypted": bool(ref.confidential),
+        "changes": changes,
+        "parquet_size": paths.current.stat().st_size,
+        "has_previous": paths.previous.exists(),
+        "sort_by": st.sort_by,
+        "indexes": st.indexes,
+        "quality": quality,
+        "large": large,
+        "profile_sampled": mode == "sample",
+        # Where the published version comes from, shown in the interface like a manual import
+        "restored": {"snapshot_id": snap.id, "version": snap.version, "label": snap.label or "",
+                     "saved_at": iso(snap.created_at), "at": now, "by": run.user},
+    })
+    out.pop("manual_import", None)
+    run.stats.update({"rows": rows, "previous_rows": prev_rows, "changes": changes, "version": out["version"],
+                      "restored_from": snap.version})
+    run.log(f"Version {out['version']} published, holding the data of version {snap.version}")
+    return out

@@ -15,13 +15,14 @@ from ..auth import CurrentUser, audit, require_admin
 from ..crypto import key_source
 from ..db import get_db
 from ..service import Service
+from ..alerts import KINDS as alert_kinds
 from ..llm.agent import default_prompt as assistant_default_prompt
 from ..llm.provider import parameters_for
 from .deps import get_service, public_base
 
 router = APIRouter(prefix="/admin/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
-Section = Literal["proxy", "ldap", "oidc", "branding", "syslog", "mfa", "mcp", "smtp", "assistant"]
+Section = Literal["proxy", "ldap", "oidc", "branding", "syslog", "mfa", "mcp", "smtp", "assistant", "alerts"]
 
 
 
@@ -50,6 +51,9 @@ def get_settings_all(request: Request, db: Session = Depends(get_db), service: S
         "mcp": appsettings.public("mcp", appsettings.load(db, "mcp")),
         "smtp": appsettings.public("smtp", appsettings.load(db, "smtp")),
         "assistant": appsettings.public("assistant", appsettings.load(db, "assistant")),
+        # Which kinds the alert feed reports at all (alerts.py); the kinds themselves never change per instance
+        "alerts": appsettings.public("alerts", appsettings.load(db, "alerts")),
+        "alert_kinds": list(alert_kinds),
         "assistant_default_prompt": assistant_default_prompt(),
         # What the chosen API would receive, so the effective parameters are visible without a call
         "assistant_parameters": parameters_for(appsettings.load(db, "assistant")),
@@ -109,14 +113,15 @@ class ProxyTest(BaseModel):
 def test_proxy(body: ProxyTest, db: Session = Depends(get_db), service: Service = Depends(get_service)):
     cfg = _validated(db, "proxy", body.config) if body.config else appsettings.load(db, "proxy")
     # The address comes from the form: checked before it is called, so the test cannot be turned into a way
-    # of reaching this machine or a metadata service
+    # of reaching this machine or a metadata service. Redirects are not followed either, or the check would
+    # only apply to the first hop: a 301 is already the answer this test is after (the proxy let it through).
     try:
         target = network.validate_outbound(body.url, what="address to test")
     except network.UnsafeUrl as e:
         raise HTTPException(422, str(e)) from e
     t0 = time.perf_counter()
     try:
-        with network.client(service.settings, cfg, timeout=20) as c:
+        with network.client(service.settings, cfg, timeout=20, follow_redirects=False) as c:
             r = c.get(target)
         return {"ok": r.status_code < 400, "status": r.status_code, "elapsed_ms": round((time.perf_counter() - t0) * 1000),
                 "route": network.describe(cfg), "error": None}

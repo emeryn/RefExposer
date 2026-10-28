@@ -13,6 +13,6 @@
 - [ ] `make test` passes (a bug fix comes with the test that was failing)
 - [ ] `make typecheck` passes
 - [ ] A migration is included if `backend/app/models.py` changed, and it works on SQLite and PostgreSQL
-- [ ] The README and / or the in-application help are updated if the behaviour changed
+- [ ] The documentation (docs/) and / or the in-application help are updated if the behaviour changed
 - [ ] No credential, token, personal data or internal host name in the diff
 - [ ] I agree to license this contribution under the Apache License 2.0

@@ -54,6 +54,13 @@ compose.override.yml
 refexposer-config-*.json.gz*
 refexposer-recovery-codes*.txt
 
+# Brought in for a build with nothing to download (enterprise/vendor-python.sh, vendor-duckdb.sh):
+# the folders are versioned, their content is not
+backend/wheels/*
+!backend/wheels/.gitkeep
+backend/duckdb-extensions/*
+!backend/duckdb-extensions/.gitkeep
+
 # --- Python -------------------------------------------------------------------------------------------
 __pycache__/
 *.py[cod]

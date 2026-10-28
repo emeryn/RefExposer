@@ -23,7 +23,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import httpx
 from fastapi import HTTPException, Request
@@ -40,10 +40,46 @@ log = logging.getLogger(__name__)
 AGENT_HEADER = "x-refexposer-agent"
 PROMPTS = Path(__file__).parent / "prompts"
 MAX_TOOL_RESULT_CHARS = 20_000
+# Of what a tool answered, what is kept with the step so the exchange can be read back afterwards
+STEP_RESULT_CHARS = 2_000
+
+
+class Small:
+    """What "the model is a small one" means, in one place.
+
+    A 1B or 3B model does not fail at agent mode for one reason: it picks the wrong tool out of twenty, it
+    calls three at once and loses track, it fills a 4k context with one result, and it writes the tool call
+    as text instead of using the tool-call field. Each of those is handled here rather than hoped away by
+    asking the model to be careful.
+    """
+
+    # The tools a small model can actually choose between. Reading only, and no artifact tools: handing back
+    # a file or a query is a judgement call that goes wrong more often than it helps at this size.
+    TOOLS = ("list_referentials", "get_referential", "query_rows", "lookup", "search")
+    # Plus this one when the account may use SQL, because one query often replaces four tool calls
+    SQL_TOOLS = ("run_sql", "sql_schema")
+    # Tool calls honoured per step: the rest of a burst is dropped, with the first result to work from
+    CALLS_PER_STEP = 1
+    # Steps before it must conclude (the configured maximum still caps this)
+    MAX_STEPS = 4
+    # A result that does not fit the context is worse than a truncated one
+    MAX_RESULT_CHARS = 2_000
+    # Rows a tool may return: a small model summarises ten rows, not two hundred
+    MAX_LIMIT = 10
+    # Messages of the conversation kept in the prompt
+    HISTORY = 6
+
+
+def small_prompt() -> str:
+    return (PROMPTS / "assistant-small.md").read_text(encoding="utf-8")
 # Referential identifiers, as the configuration allows them
 REF_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 # Keys naming a referential in an API answer or in the arguments of a tool
 REF_KEYS = ("id", "ref_id", "referential_id", "referential", "remote_id")
+# Arguments of a tool call that name the referential it acts on, and the ones that list several of them.
+# Only these are checked against the scope of the exchange: anything deeper is data, not a referential.
+REF_ARGUMENTS = ("id", "ref_id", "referential_id", "referential", "remote_id")
+REF_LIST_ARGUMENTS = ("ids", "referentials")
 
 
 # --------------------------------------------------------------------------- signed internal calls
@@ -96,6 +132,32 @@ def confidential_ids(service: Any) -> frozenset[str]:
     return frozenset(r.id for r in service.refs.values() if r.confidential)
 
 
+def _named_referential(args: Any, matches: Callable[[str], bool]) -> str | None:
+    """The first referential named anywhere in the arguments of a tool call for which `matches` is true."""
+    if isinstance(args, str):
+        return args if matches(args) else None
+    if isinstance(args, dict):
+        values: Iterable[Any] = args.values()
+    elif isinstance(args, (list, tuple)):
+        values = args
+    else:
+        return None
+    for value in values:
+        found = _named_referential(value, matches)
+        if found:
+            return found
+    return None
+
+
+def created_referentials(name: str, arguments: dict[str, Any]) -> list[str]:
+    """The identifiers a tool call is about to create, for the tools that create a referential."""
+    if name in ("create_referential", "create_referential_from_sql"):
+        return [str(arguments.get("id") or "")]
+    if name == "discovery_apply":
+        return [str(c.get("id") or "") for c in (arguments.get("configs") or []) if isinstance(c, dict)]
+    return []
+
+
 @dataclass
 class Caller:
     """What a tool call needs to reach the REST API in process, whoever started the exchange.
@@ -110,13 +172,29 @@ class Caller:
     client_ip: str | None = None
     # Referentials the exchange is restricted to, carried signed with every call (None: no restriction)
     scope: frozenset[str] | None = None
+    # Whether that scope is a filter the person chatting chose, rather than the fixed scope of a watchdog.
+    # A filter is said out loud (they know what they picked) and a referential created for them joins it; the
+    # scope of a watchdog stays invisible, so anything outside it simply does not exist for the model.
+    filter_scope: bool = False
 
     @classmethod
-    def of(cls, request: Request) -> "Caller":
+    def of(cls, request: Request, scope: frozenset[str] | None = None) -> "Caller":
         headers = {name: value for name in ("authorization", "cookie")
                    if (value := request.headers.get(name))}
         ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
-        return cls(request.app, request.app.state.service, headers, ip)
+        return cls(request.app, request.app.state.service, headers, ip, scope, filter_scope=scope is not None)
+
+    def widen(self, *ref_ids: str) -> None:
+        """A referential being created joins the scope of the exchange.
+
+        A conversation narrowed to a few referentials must still be able to make a new one and read it back:
+        without this the creation itself would be refused, the new identifier being outside the scope. It adds
+        no right — the call still goes through the rights of the account — and it never happens for a watchdog,
+        which cannot write at all.
+        """
+        ids = {r for r in ref_ids if isinstance(r, str) and REF_ID.match(r)}
+        if self.scope is not None and self.filter_scope and ids:
+            self.scope = self.scope | ids
 
 
 def allowed(cfg: AssistantSettings, user: CurrentUser) -> bool:
@@ -151,19 +229,7 @@ class Guard:
         """The identifier of a denied referential named anywhere in the arguments, if any."""
         if not self.denied:
             return None
-        if isinstance(args, str):
-            return args if args in self.denied else None
-        if isinstance(args, dict):
-            for value in args.values():
-                found = self.check(value)
-                if found:
-                    return found
-        elif isinstance(args, (list, tuple)):
-            for value in args:
-                found = self.check(value)
-                if found:
-                    return found
-        return None
+        return _named_referential(args, self.denied.__contains__)
 
     def path(self, path: str) -> str | None:
         if not self.denied:
@@ -188,15 +254,23 @@ class Guard:
 
 @dataclass
 class Step:
-    """One tool call of the agent, kept with the message and shown in the interface."""
+    """One tool call of the agent, kept with the message and shown in the interface.
+
+    `result` holds the first characters of what the tool answered and `ms` how long it took: without them a
+    finished exchange only says which tools were called, which is not enough to tell how an answer — or the
+    verdict of a watchdog — was reached.
+    """
 
     tool: str
     arguments: dict[str, Any]
     ok: bool
     summary: str
+    result: str = ""
+    ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"tool": self.tool, "arguments": self.arguments, "ok": self.ok, "summary": self.summary}
+        return {"tool": self.tool, "arguments": self.arguments, "ok": self.ok, "summary": self.summary,
+                "result": self.result, "ms": self.ms}
 
 
 # Handed to the user instead of being described: a query to open in the SQL console, a file to download.
@@ -228,7 +302,12 @@ def tools_for(cfg: AssistantSettings, user: CurrentUser) -> list[Tool]:
     Reading tools come from the data MCP server (the same ones an agent gets with an API token). The tools that
     change something are the administration ones, offered only when writes are allowed; the API then refuses
     anything this account may not do, exactly as in the interface.
+
+    A small model gets a short list: the choice is the hard part at that size, not the call.
     """
+    if cfg.small_model:
+        wanted = set(Small.TOOLS) | (set(Small.SQL_TOOLS) if user.can_use_sql else set())
+        return [t for t in USER_TOOLS if t.name in wanted]
     tools = [t for t in USER_TOOLS if t.name not in ("run_sql", "sql_schema") or user.can_use_sql]
     tools += list(_artifact_tools().values())
     if user.can_use_sql:
@@ -307,8 +386,26 @@ class Agent:
         self.base_prompt = system_prompt
 
     # ------------------------------------------------------------------ prompt
+    @property
+    def small(self) -> bool:
+        """The active profile says the model is a small one (1B, 3B)."""
+        return bool(self.cfg.small_model) and self.base_prompt is None
+
+    @property
+    def max_steps(self) -> int:
+        return min(self.cfg.max_steps, Small.MAX_STEPS) if self.small else self.cfg.max_steps
+
     def system_prompt(self) -> str:
-        prompt = (self.base_prompt or self.cfg.system_prompt or default_prompt()).strip()
+        base = self.base_prompt or self.cfg.system_prompt
+        if not base and self.small:
+            base = small_prompt()
+        prompt = (base or default_prompt()).strip()
+        if self.small:
+            # Every extra sentence costs context and dilutes the instructions that matter
+            facts = ["You only see the referentials the account you answer may read."]
+            if self.caller.scope:
+                facts.append("Only these referentials exist: " + ", ".join(sorted(self.caller.scope)) + ".")
+            return prompt + "\n\n" + "\n".join(f"- {f}" for f in facts)
         facts = [
             f"The account you are answering is '{self.user.username}', role '{self.user.role}'.",
             "Every tool call runs with the rights of that account: what it may not read does not exist for you.",
@@ -316,6 +413,9 @@ class Agent:
         if self.caller.scope:
             facts.append("You are restricted to these referentials: " + ", ".join(sorted(self.caller.scope))
                          + ". Nothing else exists for you, and asking for another one returns nothing.")
+            if self.agent_mode and self.cfg.allow_writes:
+                facts.append("That restriction is a filter the user chose, not a ban on working: a referential "
+                             "you create for them joins the list and can be read afterwards.")
         if self.guard.denied:
             facts.append("Confidential referentials are out of scope for this assistant: they are not listed and "
                          "cannot be queried. Say so plainly if the question needs one.")
@@ -327,7 +427,8 @@ class Agent:
         return prompt + "\n\n" + "\n".join(f"- {f}" for f in facts)
 
     def messages(self, history: list[dict[str, str]]) -> list[dict[str, Any]]:
-        kept = history[-self.cfg.history_messages:]
+        keep = min(self.cfg.history_messages, Small.HISTORY) if self.small else self.cfg.history_messages
+        kept = history[-keep:]
         return [{"role": "system", "content": self.system_prompt()}, *kept]
 
     # ------------------------------------------------------------------ run
@@ -357,9 +458,14 @@ class Agent:
     def _loop(self, history: list[dict[str, str]], turn: Turn) -> Iterator[dict[str, Any]]:
         messages = self.messages(history)
         definitions = schemas(self.tools)
-        for _ in range(self.cfg.max_steps):
+        for _ in range(self.max_steps):
             reply = self.provider.chat(messages, definitions)
             turn.usage = reply.usage or turn.usage
+            if not reply.tool_calls and self.small and reply.content:
+                # A small model often writes the call it wanted instead of using the tool-call field
+                written = text_tool_call(reply.content, self.by_name)
+                if written is not None:
+                    reply.tool_calls = [written]
             if not reply.tool_calls:
                 # The model answered: stream that answer so the user sees it arrive
                 if reply.content:
@@ -367,15 +473,21 @@ class Agent:
                     yield {"type": "token", "text": reply.content}
                     return
                 break
+            if self.small:
+                # One at a time: a burst of calls fills the context and the model loses the thread
+                reply.tool_calls = reply.tool_calls[:Small.CALLS_PER_STEP]
             # The shape of a tool exchange belongs to the driver: Ollama and the OpenAI API disagree on it
             messages.append(self.provider.assistant_turn(reply))
             for call in reply.tool_calls:
+                started = time.perf_counter()
                 step, result = self._execute(call, turn)
+                step.ms = int((time.perf_counter() - started) * 1000)
+                step.result = (result or "")[:STEP_RESULT_CHARS]
                 turn.steps.append(step)
                 yield {"type": "step", **step.to_dict()}
                 messages.append(self.provider.tool_result(call, result))
         else:
-            turn.error = f"stopped after {self.cfg.max_steps} steps"
+            turn.error = f"stopped after {self.max_steps} steps"
         # Out of steps, or an answer with no content: ask for a plain conclusion from what was gathered
         messages.append({"role": "user", "content": "Answer now, from what you have gathered. Do not call any tool."})
         yield from self._answer(messages, turn)
@@ -390,10 +502,21 @@ class Agent:
             return (Step(call.name, call.arguments, False, "confidential referential"),
                     "that referential is confidential: this assistant cannot read it, and no other way to "
                     "reach it will work. Tell the user it is out of scope.")
+        outside = self._outside(call.arguments)
+        if outside is not None:
+            # The API answers 404 on its own (the scope is in `CurrentUser.allowed`), but a model reads "not
+            # found" as an invitation to try another way. Saying it plainly costs one step instead of three.
+            return (Step(call.name, call.arguments, False, f"outside the chosen referentials: {outside}"),
+                    f"'{outside}' is not one of the referentials this exchange is limited to "
+                    f"({', '.join(sorted(self.caller.scope or ()))}). Tell the user it is out of scope.")
         missing = [name for name in tool.required if call.arguments.get(name) in (None, "")]
         if missing:
             return (Step(call.name, call.arguments, False, f"missing argument(s): {', '.join(missing)}"),
                     f"missing argument(s): {', '.join(missing)}")
+        if self.small:
+            call.arguments = small_arguments(call.arguments)
+        if tool.write:
+            self.caller.widen(*created_referentials(call.name, call.arguments))
         try:
             method, path, query, body = tool.call(call.arguments)
         except Exception as e:  # noqa: BLE001 - arguments invented by the model
@@ -404,6 +527,27 @@ class Agent:
             summary = artifact.get("title") or artifact.get("filename") or path
             return Step(call.name, call.arguments, True, summary), "handed to the user"
         return self._api(call, tool, method, path, query, body)
+
+    def _outside(self, args: Any) -> str | None:
+        """A referential the call points at that exists but is outside the filter of this exchange.
+
+        Only for a filter the user chose: the scope of a watchdog is not announced, so a referential outside it
+        answers "not found" like one that does not exist.
+
+        Only the arguments that name a referential are read, and only at the top level: a filter such as
+        `{"filters": {"id": "words"}}` is a column of the rows, not a referential, and refusing the call
+        because a cell value happens to match an identifier would be a bug of its own.
+        """
+        scope = self.caller.scope
+        if scope is None or not self.caller.filter_scope or not isinstance(args, dict):
+            return None
+        named = [args[key] for key in REF_ARGUMENTS if isinstance(args.get(key), str)]
+        for key in REF_LIST_ARGUMENTS:
+            value = args.get(key)
+            if isinstance(value, (list, tuple)):
+                named += [item for item in value if isinstance(item, str)]
+        known = self.caller.service.refs
+        return next((ref for ref in named if ref in known and ref not in scope), None)
 
     def _artifact(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
         if kind == "sql":
@@ -437,8 +581,9 @@ class Agent:
             data = tool.shape(data, call.arguments)
         data = self.guard.filter(data)
         text = as_text(data)
-        if len(text) > MAX_TOOL_RESULT_CHARS:
-            text = text[:MAX_TOOL_RESULT_CHARS] + "\n… truncated: narrow the request (filters, limit, columns)"
+        cap = Small.MAX_RESULT_CHARS if self.small else MAX_TOOL_RESULT_CHARS
+        if len(text) > cap:
+            text = text[:cap] + "\n… truncated: narrow the request (filters, limit, columns)"
         return Step(call.name, call.arguments, True, _summary(data)), text
 
     def _call_api(self, method: str, path: str, query: dict[str, Any] | None, body: Any) -> tuple[int, Any]:
@@ -468,6 +613,60 @@ class Agent:
             return asyncio.run(call())
         except (httpx.HTTPError, RuntimeError) as e:
             return 500, {"detail": f"internal call failed: {e}"}
+
+
+def small_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Arguments of a tool call, kept to what fits a small context: `limit=500` returns more rows than the
+    model can hold, and it asks for it because the description mentions the maximum."""
+    out = dict(arguments)
+    for name in ("limit", "top"):
+        value = out.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            continue
+        try:
+            out[name] = min(int(value), Small.MAX_LIMIT)
+        except (TypeError, ValueError):
+            out[name] = Small.MAX_LIMIT
+    if "limit" not in out:
+        out["limit"] = Small.MAX_LIMIT
+    return out
+
+
+# A tool call written in the answer instead of asked for properly: ```json {"name": …, "arguments": {…}} ```,
+# or a bare object. Only a name the model was actually offered is accepted.
+_FENCE = re.compile(r"```(?:json|tool_call|tool)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def text_tool_call(content: str, offered: dict[str, Tool]) -> ToolCall | None:
+    """The tool call a small model wrote as text, if that is what the answer is."""
+    candidates = [m.group(1) for m in _FENCE.finditer(content or "")]
+    stripped = (content or "").strip()
+    if stripped.startswith("{"):
+        candidates.append(stripped)
+    for raw in candidates:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        # The two shapes seen in the wild: {name, arguments} and {tool_call: {...}} / {function: {...}}
+        for shape in (data, data.get("tool_call"), data.get("function")):
+            if not isinstance(shape, dict):
+                continue
+            name = shape.get("name") or shape.get("tool")
+            if not isinstance(name, str) or name not in offered:
+                continue
+            arguments = shape.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {k: v for k, v in shape.items() if k not in ("name", "tool", "arguments")}
+            return ToolCall(name=name, arguments=arguments, id=name)
+    return None
 
 
 def _summary(data: Any) -> str:

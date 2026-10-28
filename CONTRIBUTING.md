@@ -25,7 +25,7 @@ make typecheck                  # type-check and build the frontend
 ```
 
 Running the backend or the frontend directly on your machine is described in
-**Development** in the [README](README.md#development).
+**Development** in the [documentation](docs/development.md#development).
 
 ## What a change should look like
 

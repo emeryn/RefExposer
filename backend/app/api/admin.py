@@ -51,6 +51,9 @@ class ServiceAccountCreate(BaseModel):
     display_name: str | None = Field(None, max_length=128, description="What the account is used for")
     email: str | None = Field(None, max_length=255, description="Contact of the team owning the tool")
     group_ids: list[int] = Field(default_factory=list)
+    # 'advanced' lets the tool read with SQL and create referentials (internal ones, or a query kept as one),
+    # which an integration pushing its own data needs. Never 'admin': that account signs nowhere in.
+    role: Literal["user", "advanced"] = "user"
 
     @field_validator("username")
     @classmethod
@@ -272,7 +275,7 @@ def create_service_account(body: ServiceAccountCreate, request: Request, db: Ses
         username=body.username,
         display_name=body.display_name,
         email=body.email,
-        role="user",
+        role=body.role,
         auth_source="service",
         password_hash=SERVICE_PASSWORD,
         must_change_password=False,
@@ -284,7 +287,7 @@ def create_service_account(body: ServiceAccountCreate, request: Request, db: Ses
     db.add(u)
     db.flush()
     audit(db, "user.create", user=admin, target=f"user:{u.username}", request=request,
-          detail={"service_account": True, "groups": sorted(g.name for g in u.groups)})
+          detail={"service_account": True, "role": u.role, "groups": sorted(g.name for g in u.groups)})
     return user_dict(u, db)
 
 
@@ -329,8 +332,10 @@ def update_user(user_id: int, body: UserUpdate, request: Request, db: Session = 
         raise HTTPException(404, "user not found")
     changes: dict[str, Any] = {}
     if u.auth_source == "service":
-        if body.role not in (None, "user"):
-            raise HTTPException(400, "a service account has the user role: give it rights on referentials instead")
+        # 'advanced' is allowed (SQL and creating referentials, which integrations need); 'admin' is not: it
+        # would give the administration API to an account that exists only as a token
+        if body.role not in (None, "user", "advanced"):
+            raise HTTPException(400, "a service account may be 'user' or 'advanced', never an administrator")
         if body.password or body.must_change_password:
             raise HTTPException(400, "a service account has no password: it uses API tokens")
     losing_admin = (body.role == "user" and u.role == "admin") or (body.is_active is False and u.role == "admin")

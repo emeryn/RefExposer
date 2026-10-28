@@ -46,6 +46,76 @@ def test_a_name_that_does_not_resolve_is_not_refused():
     assert validate_outbound("http://nothing.invalid/x") == "http://nothing.invalid/x"
 
 
+# --------------------------------------------------------------------------- redirects
+
+def test_a_checked_address_is_not_followed_elsewhere(env, http_dir):
+    """Validating the address is worth nothing if a redirect can then send the request anywhere.
+
+    The proxy test and the federation catalog call an address an administrator typed, which is checked
+    first; they must not follow a 301. The sources still do: a mirror or a signed link redirects routinely.
+    """
+    from app.network import client
+    from app.settings import get_settings
+
+    www, port = http_dir
+    (www / "sub").mkdir()
+    (www / "sub" / "index.html").write_text("the redirect target", encoding="utf-8")
+    settings = get_settings()
+    url = f"http://127.0.0.1:{port}/sub"  # a folder without its slash: the server answers 301
+
+    with client(settings, follow_redirects=False) as c:
+        r = c.get(url)
+        assert r.status_code == 301 and "redirect target" not in r.text
+    with client(settings, follow_redirects=True) as c:  # the sources keep following them
+        r = c.get(url)
+        assert r.status_code == 200 and "the redirect target" in r.text
+
+
+def test_the_proxy_test_does_not_follow_a_redirect(env, http_dir, monkeypatch):
+    """A 301 is already the answer the test is after: the proxy let the request through."""
+    from app import network
+
+    seen = {}
+    real = network.client  # captured before the patch: api.network is this very module
+
+    def spy(settings, cfg=None, verify_tls=True, timeout=None, follow_redirects=True):
+        seen["follow_redirects"] = follow_redirects
+        return real(settings, cfg, verify_tls, timeout, follow_redirects)
+
+    monkeypatch.setattr(network, "client", spy)
+    www, port = http_dir
+    (www / "ok.txt").write_text("fine", encoding="utf-8")
+    r = env.post("/api/admin/settings/proxy/test", json={"url": f"http://127.0.0.1:{port}/ok.txt"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True, r.text
+    assert seen["follow_redirects"] is False
+
+
+def test_the_federation_catalog_does_not_follow_a_redirect(env, monkeypatch):
+    """The call carries the API token of the service account on the peer: a 301 must not hand it over."""
+    from app import federation, ingest
+
+    seen = {}
+    real = ingest.http_client
+
+    def spy(settings, follow_redirects=True):
+        seen["follow_redirects"] = follow_redirects
+        return real(settings, follow_redirects)
+
+    monkeypatch.setattr(ingest, "http_client", spy)
+    with pytest.raises(federation.FederationError):  # nothing answers at that address
+        federation.fetch_catalog(env.app_.state.service, "http://127.0.0.1:1/api", "rfx_token")
+    assert seen["follow_redirects"] is False
+
+
+def test_a_discovery_scan_refuses_a_metadata_address(env):
+    """The folder is typed by an administrator, like the address of the proxy test."""
+    refused = env.post("/api/admin/discovery/scan", json={
+        "source": {"type": "http", "url": "http://169.254.169.254/latest/meta-data/"}, "analyse": False})
+    assert refused.status_code in (400, 422)
+    assert "link-local or metadata" in refused.text
+
+
 # --------------------------------------------------------------------------- after sign-in
 
 def test_only_local_paths_after_sign_in():

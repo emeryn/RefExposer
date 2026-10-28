@@ -319,3 +319,90 @@ def test_an_invalid_recipient_is_refused_at_creation(env, model):
 
 def _id(env, username: str) -> int:
     return next(u["id"] for u in env.get("/api/admin/users").json() if u["username"] == username)
+
+
+# --------------------------------------------------------------------------- watching everything
+
+def test_a_watchdog_can_be_pointed_at_every_referential(env, model):
+    task = create(env, referential_ids=[], all_referentials=True).json()
+    assert task["all_referentials"] is True and task["referential_ids"] == []
+
+
+def test_a_watchdog_watching_everything_reads_what_its_account_reads(env, model):
+    refresh(env, "words")
+    model(tool_call("query_rows", id="words", limit=3), verdict(finding_detected=True, summary="found"))
+    task = create(env, referential_ids=[], all_referentials=True).json()
+    result = run(env, task["id"])
+    # 'words' is outside no list, because there is no list: the scope is the rights of the account
+    assert result["steps"][0]["ok"] is True and result["status"] == "finding"
+
+
+def test_watching_everything_still_stops_at_the_rights_of_the_account(env, model):
+    create_user(env, "power", role="advanced")
+    env.post("/api/admin/grants", json={"referential_id": "countries",
+                                        "user_id": _id(env, "power"), "level": "read"})
+    refresh(env, "countries")
+    refresh(env, "words")
+    model(tool_call("query_rows", id="words", limit=3), verdict())
+    client = new_client(env, "power", USER_PASSWORD)
+    task = client.post("/api/watchdogs", json={"name": "All", "referential_ids": [], "all_referentials": True,
+                                               "trigger_type": "cron", "schedule": "0 7 * * *",
+                                               "prompt": "Look."}).json()
+    result = run(env, task["id"])
+    assert result["steps"][0]["ok"] is False  # 'words' is not granted to that account
+    assert "alpha" not in json.dumps(result["steps"])
+
+
+def test_a_synchronization_starts_a_watchdog_that_watches_everything(env, model):
+    task = create(env, referential_ids=[], all_referentials=True, trigger_type="on_sync", schedule=None).json()
+    from app import watchdog
+
+    started = []
+    original = watchdog.submit
+    try:
+        watchdog.submit = lambda service, task_id, trigger, username=None: started.append((task_id, trigger))
+        watchdog.on_sync(env.app_.state.service, "words")
+    finally:
+        watchdog.submit = original
+    assert started == [(task["id"], "on_sync:words")]
+
+
+# --------------------------------------------------------------------------- only the new data
+
+def test_a_watchdog_over_new_data_is_told_what_each_referential_changed(env, model):
+    refresh(env, "countries")
+    provider = model(verdict())
+    task = create(env, only_new_data=True).json()
+    assert task["only_new_data"] is True
+    run(env, task["id"])
+    asked = json.dumps(provider.calls)
+    assert "Only what is new matters" in asked
+    assert "get_changes" in asked                      # it is told how to ask for the changes
+    assert "State of the scope right now" in asked
+    assert "countries: version" in asked               # with the published version to work from
+
+
+def test_an_ordinary_watchdog_is_not_asked_about_new_data_only(env, model):
+    refresh(env, "countries")
+    provider = model(verdict())
+    run(env, create(env).json()["id"])
+    assert "Only what is new matters" not in json.dumps(provider.calls)
+
+
+# --------------------------------------------------------------------------- the trace of an investigation
+
+def test_the_trace_of_an_investigation_says_what_came_back(env, model):
+    refresh(env, "countries")
+    model(tool_call("query_rows", id="countries", limit=2), verdict())
+    result = run(env, create(env).json()["id"])
+    step = result["steps"][0]
+    assert step["tool"] == "query_rows" and step["ok"] is True
+    assert step["result"] and step["ms"] is not None
+
+
+def test_a_finished_run_is_not_reported_as_running(env, model):
+    model(verdict())
+    task = create(env).json()
+    run(env, task["id"])
+    row = env.get(f"/api/watchdogs/{task['id']}/runs").json()[0]
+    assert row["running"] is False and row["finished_at"]

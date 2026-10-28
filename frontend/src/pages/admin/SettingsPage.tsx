@@ -1062,7 +1062,7 @@ export default function SettingsPage() {
             E-mail
           </Tabs.Tab>
           <Tabs.Tab value="notifications" leftSection={<IconBell size={16} />}>
-            Notifications
+            Notifications &amp; alerts
           </Tabs.Tab>
           <Tabs.Tab value="mcp" leftSection={<IconRobot size={16} />} rightSection={data.mcp.enabled ? <Badge size="xs" color="teal">on</Badge> : null}>
             MCP server
@@ -1116,7 +1116,6 @@ export default function SettingsPage() {
             initial={data.assistant}
             defaultPrompt={data.assistant_default_prompt}
             groups={(groups ?? []).map((g: { name: string }) => g.name)}
-            savedParameters={data.assistant_parameters}
             users={(accounts ?? [])
               .filter((u) => u.auth_source !== 'service' && u.role !== 'admin')
               .map((u) => ({ value: String(u.id), label: u.display_name ? `${u.display_name} (${u.username})` : u.username }))}

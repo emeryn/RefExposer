@@ -42,7 +42,7 @@ Out of scope:
 - anything that needs an administrator account to begin with, where an administrator is *meant* to be able to
   do it. RefExposer lets an administrator point a source at an arbitrary URL, write SQL and configure an
   inference server: that is the job, not a vulnerability. The two `py/full-ssrf` findings in
-  [Code scanning](README.md#code-scanning-codeql) are documented for exactly that reason.
+  [Code scanning](docs/security.md#code-scanning-codeql) are documented for exactly that reason.
 - missing hardening that the operator is responsible for and the README says so: HTTPS and HSTS at the reverse
   proxy, rate limits, the database password, where `REFEX_SECRET_KEY` lives.
 - denial of service through sheer volume (a query over billions of rows is slow; there are timeouts and limits
@@ -54,4 +54,4 @@ Out of scope:
 Every push is scanned (CodeQL for the code, the dependency scan and SBOM of `scripts/`), the Python
 dependencies are pinned with hashes, and the images run rootless with a read-only root filesystem. What is
 covered, what is hardened but flagged by design, and what is left to the operator is written down in
-[Enterprise security](README.md#enterprise-security).
+[Enterprise security](docs/security.md).

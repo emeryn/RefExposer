@@ -61,3 +61,37 @@ def test_service_account_lifecycle(env):
     assert api.get("/api/referentials", headers=auth).status_code == 200
     assert env.delete(f"/api/admin/users/{svc['id']}/tokens/{t.json()['id']}").status_code == 200
     assert api.get("/api/referentials", headers=auth).status_code == 401
+
+
+def test_a_service_account_can_hold_the_advanced_role(env):
+    """An integration that writes (DSS and the like) needs SQL and the right to create a referential."""
+    r = env.post("/api/admin/service-accounts", json={"username": "dss", "display_name": "DSS integration",
+                                                      "role": "advanced"})
+    assert r.status_code == 201, r.text
+    svc = r.json()
+    assert svc["role"] == "advanced" and svc["is_service"] is True
+
+    token = env.post(f"/api/admin/users/{svc['id']}/tokens", json={"name": "prod"}).json()["token"]
+    api = new_client(env)
+    api.headers.pop("X-Requested-With")
+    auth = {"Authorization": f"Bearer {token}"}
+    me = api.get("/api/auth/me", headers=auth).json()
+    assert me["can_use_sql"] is True and me["can_create_internal"] is True
+
+    # It creates a referential of its own and manages it, like an advanced user
+    created = api.post("/api/internal-referentials", headers=auth, json={
+        "id": "dss-assets", "name": "DSS assets", "key": "id",
+        "columns": [{"name": "id", "type": "text", "required": True}]})
+    assert created.status_code in (200, 201), created.text
+    assert api.get("/api/referentials/dss-assets", headers=auth).status_code == 200
+
+    # Still never an administrator
+    assert env.patch(f"/api/admin/users/{svc['id']}", json={"role": "admin"}).status_code == 400
+    assert api.get("/api/admin/users", headers=auth).status_code == 403
+
+
+def test_the_advanced_role_can_be_given_and_taken_back(env):
+    svc = env.post("/api/admin/service-accounts", json={"username": "integration"}).json()
+    assert svc["role"] == "user"
+    assert env.patch(f"/api/admin/users/{svc['id']}", json={"role": "advanced"}).json()["role"] == "advanced"
+    assert env.patch(f"/api/admin/users/{svc['id']}", json={"role": "user"}).json()["role"] == "user"

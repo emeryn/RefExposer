@@ -14,6 +14,7 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Path as
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from ..auth import CurrentUser, audit, require_user
@@ -22,7 +23,7 @@ from ..db import get_db
 from ..engine import SqlError, SqlTimeout, rows_to_records
 from ..service import Service
 from ..sqlbuild import OPERATORS, QueryError, TableQuery, lit, parquet_reader, parse_filters, qi, type_kind
-from ..storage import RefPaths
+from ..storage import RefPaths, iso, utcnow
 from .deps import get_ref, get_ref_with_data, get_service, require_table
 from ..bloom import normalize as bloom_normalize
 from ..geoip import MmdbError, looks_like_ip
@@ -231,7 +232,7 @@ def refresh(
 ):
     get_ref(service, ref_id, user, "manage")
     if service.is_pinned(ref_id):
-        raise HTTPException(409, "version frozen after a manual import: resume automatic updates before starting one")
+        raise HTTPException(409, "this version is frozen: resume the automatic updates before starting one")
     run = service.submit(ref_id, "manual", force, user.username, replace=replace and service.refs[ref_id].is_merge)
     audit(db, "referential.refresh", user=user, target=f"ref:{ref_id}", request=request, detail={"force": force, "replace": run.replace, "run": run.id})
     return run.to_dict()
@@ -272,6 +273,27 @@ def manual_import(
     audit(db, "referential.import", user=user, target=f"ref:{ref_id}", request=request,
           detail={"files": [f["name"] for f in stored["files"]], "pin": pin, "replace": run.replace, "run": run.id})
     return run.to_dict()
+
+
+class FreezeIn(BaseModel):
+    """Why this version is frozen: shown in the banner of the referential and written to the audit log."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field("", max_length=200)
+
+
+@router.post("/referentials/{ref_id}/pin", summary="Freeze the published version (suspend automatic updates)")
+def pin(ref_id: str, body: FreezeIn, request: Request, service: Service = Depends(get_service),
+        user: CurrentUser = Depends(require_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    """The published version stays as it is: the schedule, the startup check and the sync folder leave it
+    alone. An update started by hand still works — freezing protects against what happens on its own, not
+    against a decision."""
+    get_ref(service, ref_id, user, "manage")
+    pinned = {"by": user.username, "at": iso(utcnow()), "reason": (body.reason or "frozen by hand").strip()[:200]}
+    service.set_pinned(ref_id, pinned)
+    audit(db, "referential.pin", user=user, target=f"ref:{ref_id}", request=request, detail=pinned)
+    return {"pinned": pinned}
 
 
 @router.delete("/referentials/{ref_id}/pin", summary="Resume automatic updates (frozen version)")
@@ -831,6 +853,68 @@ def diff_snapshots(
                                                  offset=offset, reveal=shown))
     except snapshots.SnapshotError as e:
         raise HTTPException(400, str(e)) from e
+
+
+class SnapshotIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field("", max_length=200, description="What this state is, e.g. 'before the vendor migration'")
+
+
+@router.post("/referentials/{ref_id}/snapshots", summary="Save the published version as a state to come back to",
+             status_code=201)
+def save_snapshot(ref_id: str, body: SnapshotIn, request: Request, service: Service = Depends(get_service),
+                  user: CurrentUser = Depends(require_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Keeps the file of the published version, whether time travel is on or not.
+
+    It costs no disk space until that version is replaced (the file is hard-linked), it is never dropped by
+    the retention, and it can be compared with the published version or restored later.
+    """
+    from .. import snapshots
+
+    ref = require_table(get_ref(service, ref_id, user, "manage"))
+    meta = service.metas.get(ref_id, {})
+    if not RefPaths(service.settings.data_dir, ref_id).current.exists():
+        raise HTTPException(400, "this referential has no published version to save")
+    try:
+        snap = snapshots.capture(db, service.settings.data_dir, ref, meta, body.label, user.username)
+    except snapshots.SnapshotError as e:
+        raise HTTPException(409, str(e)) from e
+    audit(db, "referential.snapshot_save", user=user, target=f"ref:{ref_id}", request=request,
+          detail={"version": snap.version, "label": snap.label, "rows": snap.row_count})
+    return {"id": snap.id, "version": snap.version, "label": snap.label, "created_at": snap.created_at,
+            "row_count": snap.row_count, "size": snap.size, "manual": True}
+
+
+@router.post("/referentials/{ref_id}/snapshots/{snapshot_id}/restore", status_code=202,
+             summary="Publish a kept version again (and freeze the referential)")
+def restore_snapshot(ref_id: str, snapshot_id: int, request: Request, service: Service = Depends(get_service),
+                     user: CurrentUser = Depends(require_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    """The data of that version becomes the published one, as a **new version**: nothing is rewound, and the
+    state being replaced is saved first so the restore can be undone.
+
+    The referential is then **frozen**, because the next scheduled update would read the source again and undo
+    the restore. Resuming the updates is one call away (`DELETE /pin`).
+    """
+    from ..models import ReferentialSnapshot
+    from ..service import BusyError
+
+    ref = require_table(get_ref(service, ref_id, user, "manage"))
+    if ref.is_internal:
+        # The rows of an internal referential live in the database and the Parquet file is built from them: a
+        # restored file would be undone by the next edit. Loading that version back is the Edit tab's job.
+        raise HTTPException(400, "internal referential: its rows are in the database, load the version you want "
+                                 "from the Edit tab (Load from a file) instead")
+    snap = db.get(ReferentialSnapshot, snapshot_id)
+    if snap is None or snap.referential_id != ref_id:
+        raise HTTPException(404, "unknown snapshot")
+    try:
+        run = service.restore(ref_id, snapshot_id, user.username)
+    except BusyError as e:
+        raise HTTPException(409, str(e)) from e
+    audit(db, "referential.restore", user=user, target=f"ref:{ref_id}", request=request,
+          detail={"version": snap.version, "label": snap.label, "snapshot": snapshot_id, "run": run.id})
+    return run.to_dict()
 
 
 @router.delete("/referentials/{ref_id}/snapshots/{snapshot_id}", summary="Delete a snapshot")

@@ -1,6 +1,7 @@
 import {
   Alert,
   Badge,
+  Checkbox,
   Button,
   Card,
   Code,
@@ -80,7 +81,8 @@ function UserForm({ user, onDone }: { user?: AdminUser; onDone: () => void }) {
         email: email || null,
         group_ids: groupIds.map(Number),
       };
-      if (!service) body.role = role;
+      // A service account may be advanced (SQL, creating referentials), never an administrator
+      body.role = service ? (role === 'advanced' ? 'advanced' : 'user') : role;
       if (!user) return api.createUser({ ...body, username, password, must_change_password: mustChange });
       body.is_active = active;
       if (password) {
@@ -97,7 +99,7 @@ function UserForm({ user, onDone }: { user?: AdminUser; onDone: () => void }) {
     <Stack>
       <TextInput
         label="Username"
-        description={user ? undefined : 'Minuscules, chiffres, . _ @ -'}
+        description={user ? undefined : 'Lowercase letters, digits, . _ @ -'}
         value={username}
         onChange={(e) => setUsername(e.currentTarget.value.toLowerCase())}
         disabled={!!user}
@@ -107,7 +109,14 @@ function UserForm({ user, onDone }: { user?: AdminUser; onDone: () => void }) {
         <TextInput label="Display name" value={displayName} onChange={(e) => setDisplayName(e.currentTarget.value)} />
         <TextInput label="Email" type="email" value={email} onChange={(e) => setEmail(e.currentTarget.value)} />
       </Group>
-      {!service && (
+      {service ? (
+        <Checkbox
+          checked={role === 'advanced'}
+          onChange={(e) => setRole(e.currentTarget.checked ? 'advanced' : 'user')}
+          label="Advanced rights"
+          description="Lets the tool query with SQL and create referentials (an internal one, or a query kept as one) — what an integration that pushes its own data needs. Rights on existing referentials are still given one by one. It can never administrate."
+        />
+      ) : (
         <div>
           <Text size="sm" fw={500} mb={4}>
             Role
@@ -150,7 +159,7 @@ function UserForm({ user, onDone }: { user?: AdminUser; onDone: () => void }) {
         <Alert color="violet" p="xs" icon={<IconRobot size={16} />}>
           <Text size="xs">
             Service account: it never signs in to the interface and calls the API with the tokens below, with the rights given to
-            it (directly or through its groups), like a user.
+            it (directly or through its groups), like {role === 'advanced' ? 'an advanced user' : 'a user'}.
           </Text>
         </Alert>
       ) : external ? (
@@ -192,8 +201,12 @@ function ServiceAccountForm({ onDone }: { onDone: () => void }) {
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [groupIds, setGroupIds] = useState<string[]>([]);
+  const [advanced, setAdvanced] = useState(false);
   const save = useAdminMutation(
-    () => api.createServiceAccount({ username, display_name: displayName || null, email: email || null, group_ids: groupIds.map(Number) }),
+    () => api.createServiceAccount({
+      username, display_name: displayName || null, email: email || null, group_ids: groupIds.map(Number),
+      role: advanced ? 'advanced' : 'user',
+    }),
     'Service account created: create its API token from its page',
     onDone,
   );
@@ -221,6 +234,12 @@ function ServiceAccountForm({ onDone }: { onDone: () => void }) {
         onChange={setGroupIds}
         searchable
         clearable
+      />
+      <Checkbox
+        checked={advanced}
+        onChange={(e) => setAdvanced(e.currentTarget.checked)}
+        label="Advanced rights"
+        description="Needed by an integration that writes: it then queries with SQL and creates referentials (an internal one, or a query kept as one), getting the manage right on what it creates. Without it the account only reads what it is granted. It can never administrate."
       />
       <Button onClick={() => save.mutate(undefined)} loading={save.isPending} disabled={!username}>
         Create the service account

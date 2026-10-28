@@ -256,12 +256,66 @@ RESERVED_LLM_KEYS = frozenset({
 })
 
 
+def check_llm_options(v: dict[str, Any]) -> dict[str, Any]:
+    """Free-form parameters sent to the inference server as they are. Shared by the settings and by a saved
+    profile, so both refuse the same things."""
+    if len(v) > 40:
+        raise ValueError("at most 40 options")
+    out: dict[str, Any] = {}
+    for name, value in v.items():
+        name = str(name).strip()
+        if not name:
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,48}", name):
+            raise ValueError(f"invalid option name: {name!r}")
+        if name in RESERVED_LLM_KEYS:
+            raise ValueError(f"'{name}' is part of the request itself and cannot be set as an option")
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            out[name] = value
+        elif isinstance(value, str):
+            if len(value) > 500:
+                raise ValueError(f"the value of '{name}' is too long")
+            out[name] = value
+        elif isinstance(value, list) and len(value) <= 32 and all(isinstance(x, (str, int, float)) for x in value):
+            out[name] = value
+        else:
+            raise ValueError(f"the value of '{name}' must be a number, a string, a boolean or a list")
+    return out
+
+
+def check_llm_headers(v: dict[str, str]) -> dict[str, str]:
+    """Extra headers sent with every call to the inference server."""
+    if len(v) > 20:
+        raise ValueError("at most 20 headers")
+    out = {}
+    for name, value in v.items():
+        name, value = str(name).strip(), str(value).strip()
+        if not name:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}", name):
+            raise ValueError(f"invalid header name: {name!r}")
+        # A newline in a value would let a second header be injected into the request
+        if len(value) > 1024 or re.search(r"[\r\n]", value):
+            raise ValueError(f"invalid value for the header {name}")
+        if name.lower() in ("host", "content-length", "transfer-encoding", "connection"):
+            raise ValueError(f"the header {name} is set by the client itself")
+        out[name] = value
+    return out
+
+
 class AssistantSettings(BaseModel):
     """In-application assistant: a chatbot answering from the referentials, optionally acting as an agent.
 
     The model runs on a server of your own (Ollama, or anything speaking the OpenAI API: vLLM, llama.cpp,
     LocalAI, TGI). RefExposer is its only client: the browser never calls it, and the connection uses the
     proxy and the certificate authorities configured in *Network & proxy*.
+
+    **The connection and the generation fields belong to the active profile** (llmprofiles.py) as soon as one
+    exists: `load()` overlays it, so everything reading these settings sees the model in use without knowing
+    about profiles. What is stored here for those fields is the fallback — what an instance configured before
+    profiles existed keeps using, and what a fresh instance has until a profile is saved. The rest of this
+    section is policy, which does not change when you switch model: who may use the assistant, whether it may
+    write, whether confidential referentials are in reach, how long conversations are kept.
     """
 
     enabled: bool = False
@@ -295,6 +349,14 @@ class AssistantSettings(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
     # Messages of the conversation kept in the prompt (the oldest ones are dropped beyond that)
     history_messages: int = Field(20, ge=2, le=200)
+
+    # Small model (1B, 3B): the agent adapts to it — fewer tools, a shorter prompt, one tool call at a
+    # time, smaller results. A profile carries this, because it is a property of the model.
+    small_model: bool = False
+
+    # Set by the overlay: which saved profile these values come from (read only, never stored)
+    profile_id: int | None = None
+    profile_name: str = ""
 
     # Agent mode: the model calls the REST API through the session of the user who is chatting, so it never
     # does anything that user could not do in the interface.
@@ -342,48 +404,12 @@ class AssistantSettings(BaseModel):
     @field_validator("options")
     @classmethod
     def _options(cls, v: dict[str, Any]) -> dict[str, Any]:
-        if len(v) > 40:
-            raise ValueError("at most 40 options")
-        out: dict[str, Any] = {}
-        for name, value in v.items():
-            name = str(name).strip()
-            if not name:
-                continue
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,48}", name):
-                raise ValueError(f"invalid option name: {name!r}")
-            if name in RESERVED_LLM_KEYS:
-                raise ValueError(f"'{name}' is part of the request itself and cannot be set as an option")
-            if isinstance(value, bool) or isinstance(value, (int, float)):
-                out[name] = value
-            elif isinstance(value, str):
-                if len(value) > 500:
-                    raise ValueError(f"the value of '{name}' is too long")
-                out[name] = value
-            elif isinstance(value, list) and len(value) <= 32 and all(isinstance(x, (str, int, float)) for x in value):
-                out[name] = value
-            else:
-                raise ValueError(f"the value of '{name}' must be a number, a string, a boolean or a list")
-        return out
+        return check_llm_options(v)
 
     @field_validator("headers")
     @classmethod
     def _headers(cls, v: dict[str, str]) -> dict[str, str]:
-        if len(v) > 20:
-            raise ValueError("at most 20 headers")
-        out = {}
-        for name, value in v.items():
-            name, value = str(name).strip(), str(value).strip()
-            if not name:
-                continue
-            if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}", name):
-                raise ValueError(f"invalid header name: {name!r}")
-            # A newline in a value would let a second header be injected into the request
-            if len(value) > 1024 or re.search(r"[\r\n]", value):
-                raise ValueError(f"invalid value for the header {name}")
-            if name.lower() in ("host", "content-length", "transfer-encoding", "connection"):
-                raise ValueError(f"the header {name} is set by the client itself")
-            out[name] = value
-        return out
+        return check_llm_headers(v)
 
     @property
     def configured(self) -> bool:
@@ -506,26 +532,61 @@ class NotificationsSettings(BaseModel):
     channels: list[NotificationChannel] = Field(default_factory=list)
 
 
+class AlertsSettings(BaseModel):
+    """What the *Alerts* page reports (alerts.py).
+
+    The feed gathers several kinds of event, and not every instance cares about all of them: an instance whose
+    sources publish irregularly reports a drift on every update, and the noise hides the rest. An administrator
+    hides the kinds that do not apply here, for everyone — the bell counts exactly what the page shows.
+
+    Only the display is concerned: nothing stops being watched, and e-mails and webhooks keep their own
+    per-channel configuration. Kinds are named rather than listed, so a kind added in a later version is shown
+    until an administrator hides it.
+    """
+
+    hidden_kinds: list[str] = Field(default_factory=list,
+                                    description="Alert kinds kept out of the page: watchdog, failure, quality, "
+                                                "stale, drift")
+    # Nothing below this is reported at all. A watchdog finding keeps the severity the model gave it; the other
+    # kinds have a fixed one (a failed update is HIGH, a stale referential MEDIUM, a volume that grew LOW...).
+    min_severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "LOW"
+    # What counts as a volume drift: a version that changes the number of rows by at least this much, on a
+    # referential that had at least `drift_min_rows` rows before (below that the ratio means nothing).
+    drift_ratio: float = Field(0.2, ge=0.01, le=10)
+    drift_min_rows: int = Field(100, ge=1, le=1_000_000_000)
+
+    @field_validator("hidden_kinds")
+    @classmethod
+    def _kinds(cls, v: list[str]) -> list[str]:
+        from .alerts import KINDS  # here: alerts.py reads these settings, and owns the list of kinds
+
+        unknown = sorted(set(v) - set(KINDS))
+        if unknown:
+            raise ValueError(f"unknown alert kind(s): {', '.join(unknown)} (available: {', '.join(KINDS)})")
+        return list(dict.fromkeys(v))
+
+    def shows(self, kind: str) -> bool:
+        return kind not in self.hidden_kinds
+
+
 M = TypeVar("M", bound=BaseModel)
 
 SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSettings, "oidc": OidcSettings, "branding": BrandingSettings,
                                          "syslog": SyslogSettings, "tasks": TasksSettings,
                                          "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
                                          "notifications": NotificationsSettings, "federation": FederationSettings,
-                                         "assistant": AssistantSettings}
+                                         "assistant": AssistantSettings, "alerts": AlertsSettings}
 SECRETS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
                                        "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
-                                       "notifications": (), "federation": (), "assistant": ("api_key",)}
+                                       "notifications": (), "federation": (), "assistant": ("api_key",),
+                                       "alerts": ()}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()
 
 
-def load(db: Session, key: str) -> BaseModel:
+def _read(db: Session, key: str) -> BaseModel:
     model = SECTIONS[key]
-    with _lock:
-        if key in _cache:
-            return _cache[key]
     row = db.get(AppSetting, key)
     data = dict(row.value) if row else {}
     for f in SECRETS[key]:
@@ -536,10 +597,28 @@ def load(db: Session, key: str) -> BaseModel:
                 log.error("Cannot decrypt %s.%s (encryption key changed?)", key, f)
                 data[f] = ""
     try:
-        value = model.model_validate(data)
+        return model.model_validate(data)
     except Exception as e:  # noqa: BLE001
         log.error("Invalid %s settings, defaults used: %s", key, e)
-        value = model()
+        return model()
+
+
+def stored_assistant(db: Session) -> BaseModel:
+    """The assistant settings as they are stored, **without** the active profile applied: the fallback
+    connection. Only llmprofiles.bootstrap needs this; everything else wants load()."""
+    return _read(db, "assistant")
+
+
+def load(db: Session, key: str) -> BaseModel:
+    with _lock:
+        if key in _cache:
+            return _cache[key]
+    value = _read(db, key)
+    if key == "assistant":
+        # The connection and the generation fields come from the saved profile in use, when there is one
+        from . import llmprofiles
+
+        value = llmprofiles.overlay(db, value)
     with _lock:
         _cache[key] = value
     return value

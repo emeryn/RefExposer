@@ -76,9 +76,15 @@ def list_http(settings: Settings, source: dict[str, Any]) -> tuple[str, list[tup
     """(folder URL, [(file URL, path relative to the folder)]) from the HTML directory listing(s)."""
     from .network import client
 
+    from .network import UnsafeUrl, validate_outbound
+
     url = (source.get("url") or "").strip()
     if not re.match(r"^https?://\S+$", url):
         raise DiscoveryError("URL of the folder expected (http:// or https://)")
+    try:
+        validate_outbound(url, what="URL of the folder")
+    except UnsafeUrl as e:
+        raise DiscoveryError(str(e)) from e
     base = url if url.endswith("/") or urlparse(url).path.endswith(".html") else url + "/"
     base_dir = base.rsplit("/", 1)[0] + "/"
     depth = max(0, min(int(source.get("depth") or 0), 5))
@@ -90,6 +96,13 @@ def list_http(settings: Settings, source: dict[str, Any]) -> tuple[str, list[tup
         while queue:
             folder, level = queue.pop(0)
             r = c.get(folder, headers=cfg.request_headers(folder))
+            # Redirects are followed (a mirror sends /folder to /folder/), so the address that actually
+            # answered is checked as well: a redirect must not take the scan to a metadata service. The links
+            # found in the page are already kept inside base_dir below.
+            try:
+                validate_outbound(str(r.url), what="address reached by the scan")
+            except UnsafeUrl as e:
+                raise DiscoveryError(str(e)) from e
             if r.status_code >= 400:
                 raise DiscoveryError(f"{folder}: HTTP {r.status_code}")
             if "html" not in r.headers.get("content-type", "html").lower():

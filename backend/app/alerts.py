@@ -7,7 +7,13 @@ event happens — the feed is built from the state of the referentials and the r
 never disagree with what the rest of the interface shows.
 
 Every entry is filtered by what the account may see: a referential it cannot read is not there, and a watchdog
-belongs to its owner (administrators see every one).
+belongs to its owner (administrators see every one). On top of that, an administrator chooses what counts as an
+alert at all (`AlertsSettings`): the kinds reported, the severity below which nothing is, and what makes a volume
+drift. What is left out there is out of the feed for everyone, so the bell in the header and the page always agree.
+
+**Read** is kept per account (`AlertRead`), not per alert: an alert is a computed line, and acknowledging one only
+means this person has seen it. It comes back unread when the thing behind it happens again, because the marker
+remembers the date of what was acknowledged.
 """
 
 from __future__ import annotations
@@ -15,19 +21,23 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from . import appsettings
 from .auth import CurrentUser
-from .models import SEVERITIES, WatchdogRun, WatchdogTask
+from .models import SEVERITIES, AlertRead, WatchdogRun, WatchdogTask, now as utcnow
 from .storage import RefPaths, read_runs
 
 KINDS = ("watchdog", "failure", "quality", "stale", "drift")
 # A version that changes the volume by more than this, on a referential that had enough rows for the ratio to
-# mean something, is reported as a drift: the source may have changed shape, or lost a part of its data
+# mean something, is reported as a drift: the source may have changed shape, or lost a part of its data.
+# Both are the defaults of `AlertsSettings`, which is what the feed actually reads.
 DRIFT_RATIO = 0.2
 DRIFT_MIN_ROWS = 100
 MAX_ALERTS = 200
+# Read markers of an alert nobody has seen for this long are dropped: the alert itself is long gone
+KEEP_READ_DAYS = 180
 
 
 @dataclass
@@ -47,6 +57,8 @@ class Alert:
     watchdog_name: str | None = None
     # A watchdog finding carries the report the agent wrote; the others carry logs or figures
     has_report: bool = False
+    # This account has marked it read (and the thing behind it has not happened again since)
+    read: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -58,7 +70,7 @@ def _rank(severity: str) -> int:
 
 # --------------------------------------------------------------------------- referentials
 
-def _referential_alerts(service: Any, user: CurrentUser) -> list[Alert]:
+def _referential_alerts(service: Any, user: CurrentUser, cfg: Any) -> list[Alert]:
     out: list[Alert] = []
     for ref in service.refs.values():
         if not user.can_read(ref.id):
@@ -94,7 +106,7 @@ def _referential_alerts(service: Any, user: CurrentUser) -> list[Alert]:
                 summary=f"Failing rules: {failed}" if failed else "The published version does not pass its quality rules.",
                 link=f"/r/{ref.id}/quality", referential_id=ref.id, referential_name=name))
 
-        drift = _drift(meta)
+        drift = _drift(meta, cfg)
         if drift is not None:
             delta, ratio = drift
             way = "lost" if delta < 0 else "gained"
@@ -108,14 +120,14 @@ def _referential_alerts(service: Any, user: CurrentUser) -> list[Alert]:
     return out
 
 
-def _drift(meta: dict[str, Any]) -> tuple[int, float] | None:
-    """(delta, ratio) when the last version moved the volume a lot, else None."""
+def _drift(meta: dict[str, Any], cfg: Any) -> tuple[int, float] | None:
+    """(delta, ratio) when the last version moved the volume more than the settings tolerate, else None."""
     before, now = meta.get("previous_row_count"), meta.get("row_count")
-    if not isinstance(before, int) or not isinstance(now, int) or before < DRIFT_MIN_ROWS:
+    if not isinstance(before, int) or not isinstance(now, int) or before < cfg.drift_min_rows:
         return None
     delta = now - before
     ratio = delta / before
-    return (delta, ratio) if abs(ratio) >= DRIFT_RATIO else None
+    return (delta, ratio) if abs(ratio) >= cfg.drift_ratio else None
 
 
 # --------------------------------------------------------------------------- watchdogs
@@ -151,20 +163,39 @@ def _watchdog_alerts(db: Session, user: CurrentUser, limit: int) -> list[Alert]:
 
 # --------------------------------------------------------------------------- the feed
 
+def shown_kinds(db: Session) -> tuple[str, ...]:
+    """The kinds the administrator left on, in the order of KINDS."""
+    cfg = appsettings.load(db, "alerts")
+    return tuple(k for k in KINDS if cfg.shows(k))  # type: ignore[attr-defined]
+
+
+def read_markers(db: Session, user: CurrentUser) -> dict[str, str]:
+    """{alert id: date it carried when this account marked it read}."""
+    return {r.alert_id: r.at or ""
+            for r in db.scalars(select(AlertRead).where(AlertRead.user_id == user.id))}
+
+
 def feed(db: Session, service: Any, user: CurrentUser, limit: int = 50,
          kinds: list[str] | None = None) -> list[dict[str, Any]]:
-    wanted = set(kinds or KINDS)
-    alerts = [a for a in _referential_alerts(service, user) if a.kind in wanted]
+    cfg = appsettings.load(db, "alerts")
+    wanted = set(kinds or KINDS) & set(shown_kinds(db))
+    alerts = [a for a in _referential_alerts(service, user, cfg) if a.kind in wanted]
     if "watchdog" in wanted:
         alerts += _watchdog_alerts(db, user, min(limit, MAX_ALERTS))
+    floor = _rank(cfg.min_severity)  # type: ignore[attr-defined]
+    alerts = [a for a in alerts if _rank(a.severity) >= floor]
+    marked = read_markers(db, user)
+    for alert in alerts:
+        # Marked, and nothing newer happened since: the date of the alert is the date of what was acknowledged
+        alert.read = alert.id in marked and marked[alert.id] >= (alert.at or "")
     # Newest first; an entry without a date (never updated) goes last, and severity breaks a tie
     alerts.sort(key=lambda a: (a.at or "", _rank(a.severity)), reverse=True)
     return [a.to_dict() for a in alerts[:min(limit, MAX_ALERTS)]]
 
 
-def counts(alerts: list[dict[str, Any]]) -> dict[str, int]:
-    out = {"total": len(alerts)}
-    for kind in KINDS:
+def counts(alerts: list[dict[str, Any]], kinds: tuple[str, ...] = KINDS) -> dict[str, int]:
+    out = {"total": len(alerts), "unread": sum(1 for a in alerts if not a.get("read"))}
+    for kind in kinds:
         out[kind] = sum(1 for a in alerts if a["kind"] == kind)
     for severity in SEVERITIES:
         out[severity.lower()] = sum(1 for a in alerts if a["severity"] == severity)
@@ -175,6 +206,43 @@ def counts(alerts: list[dict[str, Any]]) -> dict[str, int]:
 
 class UnknownAlert(LookupError):
     """No such alert, or it is not one this account may see."""
+
+
+def mark(db: Session, service: Any, user: CurrentUser, ids: list[str] | None, read: bool) -> int:
+    """Mark alerts of this account read (or unread again). `ids` None: every alert of its feed.
+
+    Only alerts the account actually sees can be marked, so an identifier is never a way to learn that
+    something exists. Returns how many lines changed.
+    """
+    import datetime as dt
+
+    current = {a["id"]: (a["at"] or "") for a in feed(db, service, user, limit=MAX_ALERTS)}
+    wanted = list(current) if ids is None else [i for i in dict.fromkeys(ids) if i in current]
+    existing = {r.alert_id: r for r in db.scalars(
+        select(AlertRead).where(AlertRead.user_id == user.id, AlertRead.alert_id.in_(wanted or [""])))}
+    changed = 0
+    for alert_id in wanted:
+        row = existing.get(alert_id)
+        if not read:
+            if row is not None:
+                db.delete(row)
+                changed += 1
+            continue
+        if row is None:
+            db.add(AlertRead(user_id=user.id, alert_id=alert_id, at=current[alert_id][:40]))
+            changed += 1
+        elif (row.at or "") != current[alert_id]:
+            row.at, row.read_at = current[alert_id][:40], utcnow()
+            changed += 1
+    # A marker whose alert went away years ago has nothing left to hide
+    db.execute(delete(AlertRead)
+               .where(AlertRead.user_id == user.id,
+                      AlertRead.read_at < utcnow() - dt.timedelta(days=KEEP_READ_DAYS))
+               # Deleted in the database, not evaluated against the rows of the session: those come back from
+               # SQLite without a timezone, and comparing them in Python raises
+               .execution_options(synchronize_session=False))
+    db.commit()
+    return changed
 
 
 def detail(db: Session, service: Any, user: CurrentUser, alert_id: str) -> dict[str, Any]:

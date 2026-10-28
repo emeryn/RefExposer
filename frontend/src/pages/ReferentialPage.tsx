@@ -210,7 +210,9 @@ function Header({ r }: { r: ReferentialDetail }) {
             )}
             {r.has_data && <DownloadMenu refId={r.id} />}
             {r.access === 'manage' && !internal && !combined && !r.sync_path && <ImportButton r={r} />}
-            {r.access === 'manage' && !internal && <RefreshButton id={r.id} running={!!r.current_run} merged={!!r.merge?.enabled} />}
+            {r.access === 'manage' && !internal && (
+              <RefreshButton id={r.id} running={!!r.current_run} merged={!!r.merge?.enabled} pinned={pinned} />
+            )}
           </Group>
         </Group>
 
@@ -356,7 +358,8 @@ function OriginNotices({ r }: { r: ReferentialDetail }) {
       </Alert>
     );
   const m = r.manual_import;
-  if (!m && !r.pinned) return null;
+  const restored = r.restored;
+  if (!m && !r.pinned && !restored) return null;
   return (
     <Alert color="indigo" variant="light" icon={r.pinned ? <IconPin /> : <IconFileImport />} p="sm">
       <Group justify="space-between" wrap="nowrap" align="flex-start">
@@ -365,6 +368,13 @@ function OriginNotices({ r }: { r: ReferentialDetail }) {
             <Text size="sm">
               <b>Current version imported manually</b> {m.origin === 'upload' ? `(upload by ${m.by ?? 'unknown'})` : '(import folder)'}{' '}
               {fmtRelative(m.at)} — {m.files.join(', ')}
+            </Text>
+          )}
+          {restored && (
+            <Text size="sm">
+              <b>Current version restored</b> from the version {restored.version}
+              {restored.label ? ` (${restored.label})` : ''} by {restored.by ?? 'unknown'} {fmtRelative(restored.at)}.
+              Resuming the updates will read the source again and replace it.
             </Text>
           )}
           {r.pinned && (
@@ -399,8 +409,8 @@ const TABS: { value: string; label: string; icon: typeof IconTable; admin?: bool
   { value: 'schema', label: 'Schema & profile', icon: IconListDetails },
   { value: 'quality', label: 'Quality', icon: IconShieldCheck },
   { value: 'changes', label: 'Changes', icon: IconGitCompare },
-  // Only on a referential whose past versions are kept (storage.time_travel)
-  { value: 'timetravel', label: 'History & diff', icon: IconClockHour4, travel: true },
+  // Versions kept: by time travel, or saved by hand from this tab (which needs the manage right)
+  { value: 'timetravel', label: 'Versions & diff', icon: IconClockHour4, travel: true },
   { value: 'history', label: 'History', icon: IconHistory },
   { value: 'api', label: 'API', icon: IconApi },
   { value: 'source', label: 'Source & configuration', icon: IconSettings },
@@ -449,7 +459,7 @@ export default function ReferentialPage() {
             (t) =>
               (!t.admin || me?.is_admin) &&
               (!t.internal || r.kind === 'internal') &&
-              (!t.travel || r.time_travel) &&
+              (!t.travel || r.time_travel || r.access === 'manage') &&
               (!artifact || ARTIFACT_TABS.includes(t.value)),
           ).map((t) => (
             <Tabs.Tab key={t.value} value={t.value} leftSection={<t.icon size={16} />}>
@@ -485,7 +495,7 @@ export default function ReferentialPage() {
             <Tabs.Panel value="changes">
               <ChangesTab r={r} />
             </Tabs.Panel>
-            {r.time_travel && (
+            {(r.time_travel || r.access === 'manage') && (
               <Tabs.Panel value="timetravel">
                 <TimeTravelTab r={r} />
               </Tabs.Panel>

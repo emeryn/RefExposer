@@ -230,7 +230,7 @@ function FacetedSearch({ r }: { r: ReferentialDetail }) {
         <Card padding="md">
           <Stack gap="md">
             <Group justify="space-between">
-              <Title order={6}>Affiner</Title>
+              <Title order={6}>Refine</Title>
               {(active.length > 0 || highlight) && (
                 <Button
                   size="compact-xs"

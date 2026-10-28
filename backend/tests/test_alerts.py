@@ -243,3 +243,109 @@ def test_the_feed_is_newest_first(env):
     refresh(env, "pdns")
     dates = [a["at"] for a in feed(env)["alerts"] if a["at"]]
     assert dates == sorted(dates, reverse=True)
+
+
+# --------------------------------------------------------------------------- what counts as an alert
+
+def settings(env, **changes):
+    r = env.put("/api/admin/settings/alerts", json=changes)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_a_kind_an_administrator_hid_is_out_of_the_feed(env):
+    break_remote(env)
+    assert "failure" in kinds(feed(env))
+    settings(env, hidden_kinds=["failure"])
+    answer = feed(env)
+    assert "failure" not in kinds(answer)
+    assert "failure" not in answer["kinds"] and "stale" in answer["kinds"]
+    # And the alert itself is no longer readable: what is not reported does not exist
+    assert env.get("/api/alerts/ref:remote:failure").status_code == 404
+    settings(env, hidden_kinds=[])
+    assert "failure" in kinds(feed(env))
+
+
+def test_an_unknown_kind_is_refused(env):
+    assert env.put("/api/admin/settings/alerts", json={"hidden_kinds": ["nope"]}).status_code == 422
+
+
+def test_nothing_below_the_chosen_severity_is_reported(env):
+    break_remote(env)      # HIGH
+    refresh(env, "pdns")
+    settings(env, min_severity="CRITICAL")
+    assert feed(env)["alerts"] == []
+    settings(env, min_severity="HIGH")
+    assert kinds(feed(env)) == {"failure"}
+
+
+def test_the_drift_threshold_is_configurable(env):
+    refresh(env, "pdns")  # 3002 rows
+    (env.data_dir / "pdns" / "raw" / "p.csv").write_text(
+        "rrname,rrtype,rdata,count\n" + "".join(f"h{i}.example.com,A,10.0.0.{i % 250},{i}\n" for i in range(2800)),
+        encoding="utf-8")
+    refresh(env, "pdns", force=True)  # about 7% lost: under the default threshold
+    assert "ref:pdns:drift" not in {a["id"] for a in feed(env)["alerts"]}
+    settings(env, drift_ratio=0.05)
+    assert "ref:pdns:drift" in {a["id"] for a in feed(env)["alerts"]}
+    settings(env, drift_ratio=0.05, drift_min_rows=1_000_000)  # too small a referential to mean anything
+    assert "ref:pdns:drift" not in {a["id"] for a in feed(env)["alerts"]}
+
+
+# --------------------------------------------------------------------------- read and unread
+
+def test_an_alert_can_be_marked_read(env):
+    break_remote(env)
+    answer = feed(env)
+    alert = next(a for a in answer["alerts"] if a["id"] == "ref:remote:failure")
+    assert alert["read"] is False and answer["counts"]["unread"] == answer["counts"]["total"]
+
+    marked = env.post("/api/alerts/read", json={"ids": ["ref:remote:failure"]})
+    assert marked.status_code == 200, marked.text
+    assert marked.json()["changed"] == 1
+    again = feed(env)
+    assert next(a for a in again["alerts"] if a["id"] == "ref:remote:failure")["read"] is True
+    assert again["counts"]["unread"] == again["counts"]["total"] - 1
+    # The detail says so too, and marking it read again changes nothing
+    assert env.get("/api/alerts/ref:remote:failure").json()["alert"]["read"] is True
+    assert env.post("/api/alerts/read", json={"ids": ["ref:remote:failure"]}).json()["changed"] == 0
+
+    assert env.post("/api/alerts/read", json={"ids": ["ref:remote:failure"], "read": False}).json()["changed"] == 1
+    assert next(a for a in feed(env)["alerts"] if a["id"] == "ref:remote:failure")["read"] is False
+
+
+def test_everything_can_be_marked_read_at_once(env):
+    break_remote(env)
+    refresh(env, "pdns")
+    answer = env.post("/api/alerts/read", json={})
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["unread"] == 0
+    assert all(a["read"] for a in feed(env)["alerts"])
+
+
+def test_an_alert_comes_back_unread_when_it_happens_again(env):
+    """A marker remembers the date of what was acknowledged: the same referential failing again is news."""
+    break_remote(env)
+    env.post("/api/alerts/read", json={})
+    assert feed(env)["counts"]["unread"] == 0
+    refresh(env, "remote", force=True)  # it fails again, later
+    assert next(a for a in feed(env)["alerts"] if a["id"] == "ref:remote:failure")["read"] is False
+
+
+def test_read_belongs_to_the_account_that_marked_it(env):
+    break_remote(env)
+    create_user(env, "other")
+    env.post("/api/admin/grants", json={"referential_id": "remote",
+                                        "user_id": _id(env, "other"), "level": "read"})
+    env.post("/api/alerts/read", json={})
+    client = new_client(env, "other", USER_PASSWORD)
+    assert next(a for a in feed(client)["alerts"] if a["id"] == "ref:remote:failure")["read"] is False
+
+
+def test_an_alert_this_account_cannot_see_cannot_be_marked(env):
+    break_remote(env)
+    create_user(env, "reader")
+    env.post("/api/admin/grants", json={"referential_id": "countries",
+                                        "user_id": _id(env, "reader"), "level": "read"})
+    client = new_client(env, "reader", USER_PASSWORD)
+    assert client.post("/api/alerts/read", json={"ids": ["ref:remote:failure"]}).json()["changed"] == 0

@@ -1,13 +1,14 @@
 import {
   ActionIcon,
   Alert,
-  Badge,
   Button,
   Card,
   Group,
   Loader,
   Menu,
+  MultiSelect,
   Paper,
+  Popover,
   ScrollArea,
   Stack,
   Switch,
@@ -23,22 +24,23 @@ import {
   IconCheck,
   IconDotsVertical,
   IconDownload,
+  IconFilter,
   IconMessagePlus,
   IconPlayerStop,
   IconRobot,
   IconSend,
   IconSql,
-  IconTool,
   IconTrash,
   IconUser,
-  IconX,
 } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { askAssistant, type AssistantEvent } from '../api/assistant-stream';
 import { api } from '../api/client';
+import { useReferentials } from '../api/hooks';
 import type { AgentStep, Artifact, ChatMessage } from '../api/types';
+import { StepRow } from '../components/AgentSteps';
 import { EmptyState } from '../components/Common';
 import { Markdown } from '../components/Markdown';
 import { fmtRelative } from '../lib/format';
@@ -68,8 +70,17 @@ export default function ChatPage() {
     enabled: !!conversationId && !!status?.available,
   });
 
+  const { data: refs } = useReferentials();
   const [question, setQuestion] = useState('');
   const [agent, setAgent] = useState(true);
+  /**
+   * The referentials this conversation is about, or none for no filter.
+   *
+   * It belongs to the conversation on the server (every tool call is restricted to it), and is kept here so
+   * the choice made before the first question is applied when the conversation is created. Switching
+   * conversation loads its own filter; starting a new one keeps the current choice, which is the point of it.
+   */
+  const [scope, setScope] = useState<string[]>([]);
   const [pending, setPending] = useState<Pending | null>(null);
   const [asked, setAsked] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -95,6 +106,16 @@ export default function ChatPage() {
     bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [stored.length, asked, pending?.content, pending?.steps.length]);
 
+  // Only when another conversation is opened: a filter just changed here must not be overwritten by the reload
+  useEffect(() => {
+    if (detail) setScope(detail.referential_ids ?? []);
+  }, [detail?.id]);
+
+  function pickScope(ids: string[]) {
+    setScope(ids);
+    if (conversationId) changeScope.mutate(ids);
+  }
+
   const select = useCallback(
     (id: string | null) => {
       setParams(id ? { c: id } : {}, { replace: true });
@@ -104,11 +125,19 @@ export default function ChatPage() {
   );
 
   const start = useMutation({
-    mutationFn: api.newConversation,
+    mutationFn: () => api.newConversation(scope),
     onSuccess: (conv) => {
       qc.invalidateQueries({ queryKey: ['conversations'] });
       select(conv.id);
     },
+  });
+  const changeScope = useMutation({
+    mutationFn: (ids: string[]) => api.setConversationScope(conversationId!, ids),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['conversation', conversationId] });
+      qc.invalidateQueries({ queryKey: ['conversations'] });
+    },
+    onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
   });
   const remove = useMutation({
     mutationFn: api.deleteConversation,
@@ -131,7 +160,7 @@ export default function ChatPage() {
     if (!content || busy) return;
     let id = conversationId;
     if (!id) {
-      id = (await api.newConversation()).id;
+      id = (await api.newConversation(scope)).id;
       qc.invalidateQueries({ queryKey: ['conversations'] });
       select(id);
     }
@@ -213,6 +242,40 @@ export default function ChatPage() {
           </Text>
         </div>
         <Group gap="xs" wrap="nowrap">
+          {status.agent && (
+            <Popover width={420} position="bottom-end" shadow="md" trapFocus>
+              <Popover.Target>
+                <Button
+                  variant={scope.length ? 'light' : 'default'}
+                  leftSection={<IconFilter size={16} />}
+                  loading={changeScope.isPending}
+                >
+                  {scope.length ? `${scope.length} referential(s)` : 'All referentials'}
+                </Button>
+              </Popover.Target>
+              <Popover.Dropdown>
+                <Stack gap="xs">
+                  <MultiSelect
+                    label="Only look at these referentials"
+                    description={`Optional. It saves the assistant exploring the whole catalogue to answer a question about a few referentials. At most ${status.max_scope}.`}
+                    placeholder={scope.length ? undefined : 'Everything you may read'}
+                    searchable
+                    clearable
+                    maxValues={status.max_scope}
+                    data={(refs ?? []).map((r) => ({ value: r.id, label: `${r.name} (${r.id})` }))}
+                    value={scope}
+                    onChange={pickScope}
+                    disabled={busy}
+                  />
+                  <Text size="xs" c="dimmed">
+                    {status.writes
+                      ? 'It still answers about anything else — it just says so instead of looking. A referential it creates for you joins the filter.'
+                      : 'It still answers about anything else — it just says so instead of looking.'}
+                  </Text>
+                </Stack>
+              </Popover.Dropdown>
+            </Popover>
+          )}
           {status.agent && (
             <Tooltip label="Let the assistant query the referentials and act with your own rights">
               <Switch
@@ -303,9 +366,11 @@ export default function ChatPage() {
           {asked && <Bubble role="user">{asked}</Bubble>}
           {pending && (
             <Stack gap="xs">
-              {pending.steps.map((s, i) => (
-                <StepRow key={i} step={s} />
-              ))}
+              <div style={{ paddingLeft: 44 }}>
+                {pending.steps.map((s, i) => (
+                  <StepRow key={i} step={s} />
+                ))}
+              </div>
               <Bubble role="assistant">
                 {pending.content ? (
                   <Markdown text={pending.content} />
@@ -351,7 +416,8 @@ export default function ChatPage() {
         />
         <Group justify="space-between" mt={4} px="xs">
           <Text size="xs" c="dimmed">
-            Enter sends, Shift+Enter adds a line. The assistant only sees what your account may read.
+            Enter sends, Shift+Enter adds a line. The assistant only sees what your account may read
+            {scope.length ? `, and in this conversation only ${scope.join(', ')}` : ''}.
           </Text>
           {busy ? (
             <Button size="xs" variant="default" leftSection={<IconPlayerStop size={14} />} onClick={stop}>
@@ -406,9 +472,11 @@ function Message({ message }: { message: ChatMessage }) {
   if (message.role === 'user') return <Bubble role="user">{message.content}</Bubble>;
   return (
     <Stack gap="xs">
-      {(message.steps ?? []).map((s, i) => (
-        <StepRow key={i} step={s} />
-      ))}
+      <div style={{ paddingLeft: 44 }}>
+        {(message.steps ?? []).map((s, i) => (
+          <StepRow key={i} step={s} />
+        ))}
+      </div>
       <Bubble role="assistant">
         <Stack gap="sm">
           {message.content ? <Markdown text={message.content} /> : <Text size="sm" c="dimmed">No answer.</Text>}
@@ -423,25 +491,6 @@ function Message({ message }: { message: ChatMessage }) {
         </Stack>
       </Bubble>
     </Stack>
-  );
-}
-
-/** One tool call of the agent: what it did, and whether it worked. */
-function StepRow({ step }: { step: AgentStep }) {
-  const args = Object.entries(step.arguments ?? {})
-    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
-    .join(' · ');
-  return (
-    <Group gap="xs" wrap="nowrap" pl={44}>
-      <IconTool size={14} opacity={0.6} />
-      <Text size="xs" ff="monospace" c="dimmed" lineClamp={1}>
-        {step.tool}
-        {args ? ` (${args})` : ''}
-      </Text>
-      <Badge size="xs" variant="light" color={step.ok ? 'teal' : 'orange'} leftSection={step.ok ? null : <IconX size={10} />}>
-        {step.summary}
-      </Badge>
-    </Group>
   );
 }
 

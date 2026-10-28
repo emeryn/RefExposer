@@ -2,8 +2,9 @@
 
 Who may do what: administrators see and manage every watchdog, an advanced user manages its own. Creating one
 needs the assistant (with its agent mode) to be available for the account — a watchdog is the same agent, on a
-schedule. The scope is always explicit, and the account the investigation runs with must be able to read every
-referential of it: a watchdog never gets access its owner does not have.
+schedule. The scope is always chosen — a list of referentials, or every one the account may read — and the
+account the investigation runs with must be able to read all of it: a watchdog never gets access its owner does
+not have.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from typing import Any, Literal
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -36,8 +37,13 @@ class WatchdogIn(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=120)
     description: str = Field("", max_length=500)
-    # The only referentials the investigation may read: chosen explicitly, never "everything"
-    referential_ids: list[str] = Field(..., min_length=1, max_length=MAX_SCOPE)
+    # The only referentials the investigation may read. Empty is allowed only with `all_referentials`.
+    referential_ids: list[str] = Field(default_factory=list, max_length=MAX_SCOPE)
+    # Look at everything instead of a list: the scope becomes what the account below may read, and follows its
+    # rights as they change. Confidential referentials stay out unless the assistant settings allow them.
+    all_referentials: bool = False
+    # Investigate what arrived since the last run, instead of the whole data every time
+    only_new_data: bool = False
     trigger_type: Literal["cron", "on_sync"] = "cron"
     schedule: str | None = Field(None, max_length=100)
     prompt: str = Field("", max_length=8000)
@@ -54,10 +60,14 @@ class WatchdogIn(BaseModel):
     def _scope(cls, v: list[str] | None) -> list[str] | None:
         if v is None:
             return None
-        out = list(dict.fromkeys(r.strip() for r in v if r and r.strip()))
-        if not out:
-            raise ValueError("choose at least one referential")
-        return out
+        return list(dict.fromkeys(r.strip() for r in v if r and r.strip()))
+
+    @model_validator(mode="after")
+    def _scope_given(self):
+        """A watchdog needs a scope: a list of referentials, or every one its account may read."""
+        if not self.all_referentials and not self.referential_ids:
+            raise ValueError("choose at least one referential, or let it look at every referential")
+        return self
 
     @field_validator("notify_emails")
     @classmethod
@@ -89,13 +99,22 @@ class WatchdogPatch(WatchdogIn):
 
     name: str | None = Field(None, min_length=1, max_length=120)
     description: str | None = Field(None, max_length=500)
-    referential_ids: list[str] | None = Field(None, min_length=1, max_length=MAX_SCOPE)
+    referential_ids: list[str] | None = Field(None, max_length=MAX_SCOPE)
+    all_referentials: bool | None = None
+    only_new_data: bool | None = None
     trigger_type: Literal["cron", "on_sync"] | None = None
     prompt: str | None = Field(None, max_length=8000)
     notify_emails: list[str] | None = None
     notify_channels: list[str] | None = None
     min_severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None
     enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _scope_given(self):
+        """Only what the change sends is checked here; the merged scope is checked in `_check`."""
+        if "referential_ids" in self.model_fields_set and not self.referential_ids and not self.all_referentials:
+            raise ValueError("choose at least one referential, or let it look at every referential")
+        return self
 
 
 # --------------------------------------------------------------------------- access
@@ -140,6 +159,8 @@ def _check(db: Session, service: Service, user: CurrentUser, owner: User, data: 
     """Refuse a watchdog that could not run: unknown referential, a scope its account cannot read, an invalid
     crontab, a notification channel that does not exist."""
     scope = data.get("referential_ids") or []
+    if not data.get("all_referentials") and not scope:
+        raise HTTPException(400, "choose at least one referential, or let it look at every referential")
     unknown = [r for r in scope if r not in service.refs]
     if unknown:
         raise HTTPException(400, f"unknown referential(s): {', '.join(unknown)}")
@@ -147,10 +168,14 @@ def _check(db: Session, service: Service, user: CurrentUser, owner: User, data: 
     hidden = [r for r in scope if not user.can_read(r)]
     if hidden:
         raise HTTPException(404, f"unknown referential(s): {', '.join(hidden)}")
-    as_owner = watchdog.current_user(db, service, owner, frozenset(scope), frozenset())
+    as_owner = watchdog.current_user(db, service, owner, None, frozenset())
     unreachable = [r for r in scope if not as_owner.can_read(r)]
     if unreachable:
         raise HTTPException(400, f"the account '{owner.username}' cannot read: {', '.join(unreachable)}")
+    if data.get("all_referentials"):
+        # Watching everything is watching everything *that account* reads: refuse one that would read nothing
+        if not any(as_owner.can_read(r.id) for r in service.refs.values()):
+            raise HTTPException(400, f"the account '{owner.username}' may read no referential at all")
     if data.get("trigger_type") == "cron":
         schedule = (data.get("schedule") or "").strip()
         if not schedule:
@@ -220,8 +245,8 @@ def create_watchdog(body: WatchdogIn, request: Request, db: Session = Depends(ge
     db.commit()
     watchdog.schedule_one(service, task)
     audit(db, "watchdog.create", user=user, target=f"watchdog:{task.id}", request=request,
-          detail={"name": task.name, "scope": task.referential_ids, "trigger": task.trigger_type,
-                  "schedule": task.schedule, "runs_as": owner.username})
+          detail={"name": task.name, "scope": "*" if task.all_referentials else task.referential_ids,
+                  "trigger": task.trigger_type, "schedule": task.schedule, "runs_as": owner.username})
     return watchdog.task_dict(service, db, task)
 
 
@@ -242,6 +267,7 @@ def update_watchdog(task_id: int, body: WatchdogPatch, request: Request, db: Ses
     owner = _owner(db, user, body.user_id) if body.user_id is not None else task.user
     merged = {
         "referential_ids": changes.get("referential_ids", task.referential_ids),
+        "all_referentials": changes.get("all_referentials", task.all_referentials),
         "trigger_type": changes.get("trigger_type", task.trigger_type),
         "schedule": changes.get("schedule", task.schedule) if "schedule" in changes or task.schedule else None,
         "notify_channels": changes.get("notify_channels", task.notify_channels),

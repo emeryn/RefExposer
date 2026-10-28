@@ -10,11 +10,14 @@ import type {
   BulkResult,
   AlertDetail,
   AlertFeed,
+  LlmProfile,
+  LlmProfileDraft,
   CatalogEntry,
   ChangesResponse,
   ColumnStats,
   DiffRows,
   DiffSummary,
+  Snapshot,
   SnapshotListing,
   WatchdogRun,
   WatchdogTask,
@@ -147,13 +150,37 @@ export const api = {
       `/api/referentials/${enc(id)}/diff?from=${enc(from)}&to=${enc(to)}&kind=${kind}&limit=${limit}&offset=${offset}` +
         (reveal ? '&reveal=true' : ''),
     ),
+  // Keep the published version as a state to come back to (no time travel needed)
+  saveSnapshot: (id: string, label: string) =>
+    request<Snapshot>(`/api/referentials/${enc(id)}/snapshots`, json('POST', { label })),
+  // Publish a kept version again: it answers at once, the restore runs like an update
+  restoreSnapshot: (id: string, snapshotId: number) =>
+    request<Run>(`/api/referentials/${enc(id)}/snapshots/${snapshotId}/restore`, json('POST')),
   deleteSnapshot: (id: string, snapshotId: number) =>
     request<{ deleted: number; version: number }>(`/api/referentials/${enc(id)}/snapshots/${snapshotId}`, json('DELETE')),
+
+  // Saved connectors to an inference server (their secrets never come back)
+  llmProfiles: () => request<LlmProfile[]>('/api/admin/llm-profiles'),
+  createLlmProfile: (body: LlmProfileDraft) => request<LlmProfile>('/api/admin/llm-profiles', json('POST', body)),
+  updateLlmProfile: (id: number, body: Partial<LlmProfileDraft>) =>
+    request<LlmProfile>(`/api/admin/llm-profiles/${id}`, json('PATCH', body)),
+  deleteLlmProfile: (id: number) =>
+    request<{ deleted: number; was_active: boolean }>(`/api/admin/llm-profiles/${id}`, json('DELETE')),
+  duplicateLlmProfile: (id: number) => request<LlmProfile>(`/api/admin/llm-profiles/${id}/duplicate`, json('POST')),
+  activateLlmProfile: (id: number) => request<LlmProfile>(`/api/admin/llm-profiles/${id}/activate`, json('POST')),
+  testLlmProfile: (id: number) =>
+    request<{ ok: boolean; models?: string[]; model_found?: boolean; error?: string; parameters?: Record<string, unknown> }>(
+      `/api/admin/llm-profiles/${id}/test`,
+      json('POST'),
+    ),
 
   // Alerts: watchdog findings and referential drifts, newest first
   alerts: (limit = 50, kinds?: string[]) =>
     request<AlertFeed>(`/api/alerts?limit=${limit}${(kinds ?? []).map((k) => `&kind=${enc(k)}`).join('')}`),
   alert: (id: string) => request<AlertDetail>(`/api/alerts/${enc(id)}`),
+  // Read is per account: `ids` null marks every alert this account can see
+  markAlerts: (ids: string[] | null, read = true) =>
+    request<{ changed: number; unread: number }>('/api/alerts/read', json('POST', { ids, read })),
 
   // Watchdogs: scheduled investigations run by the assistant on a fixed scope
   watchdogs: () => request<WatchdogTask[]>('/api/watchdogs'),
@@ -172,9 +199,13 @@ export const api = {
     '/api/assistant/test', json('POST')),
   conversations: () => request<Conversation[]>('/api/assistant/conversations'),
   conversation: (id: string) => request<ConversationDetail>(`/api/assistant/conversations/${enc(id)}`),
-  newConversation: () => request<Conversation>('/api/assistant/conversations', json('POST', {})),
+  newConversation: (referential_ids: string[] = []) =>
+    request<Conversation>('/api/assistant/conversations', json('POST', { referential_ids })),
   renameConversation: (id: string, title: string) =>
     request<Conversation>(`/api/assistant/conversations/${enc(id)}`, json('PATCH', { title })),
+  // The referential filter of a conversation; an empty list clears it
+  setConversationScope: (id: string, referential_ids: string[]) =>
+    request<Conversation>(`/api/assistant/conversations/${enc(id)}`, json('PATCH', { referential_ids })),
   deleteConversation: (id: string) =>
     request<{ deleted: string }>(`/api/assistant/conversations/${enc(id)}`, json('DELETE')),
   resetConversations: () => request<{ deleted: number }>('/api/assistant/conversations', json('DELETE')),
@@ -257,7 +288,7 @@ export const api = {
     form.append('confirm', confirm);
     return request<{ restored: Record<string, number> }>('/api/admin/backups/restore-upload', { method: 'POST', body: form, headers: {} });
   },
-  createServiceAccount: (body: { username: string; display_name: string | null; email: string | null; group_ids: number[] }) =>
+  createServiceAccount: (body: { username: string; display_name: string | null; email: string | null; group_ids: number[]; role?: 'user' | 'advanced' }) =>
     request<AdminUser>('/api/admin/service-accounts', json('POST', body)),
   userTokens: (id: number) => request<ApiTokenInfo[]>(`/api/admin/users/${id}/tokens`),
   createUserToken: (id: number, name: string, expires_in_days: number | null) =>
@@ -367,6 +398,8 @@ export const api = {
     return request<{ logo_url: string }>('/api/admin/settings/branding/logo', { method: 'POST', body: form });
   },
   deleteLogo: () => request<{ logo_url: null }>('/api/admin/settings/branding/logo', json('DELETE')),
+  pin: (id: string, reason = '') =>
+    request<{ pinned: { by: string; at: string; reason: string } }>(`/api/referentials/${enc(id)}/pin`, json('POST', { reason })),
   unpin: (id: string) => request<{ pinned: boolean }>(`/api/referentials/${enc(id)}/pin`, json('DELETE')),
 
   // Internal referentials

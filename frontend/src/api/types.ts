@@ -171,6 +171,8 @@ export interface ReferentialSummary {
   quality?: QualitySummary | null;
   access: Access | null;
   pinned: { by: string | null; at: string; reason?: string } | null;
+  /** Set when the published version was put back from a kept one */
+  restored?: { snapshot_id: number; version: number; label: string; saved_at: string | null; at: string; by: string | null } | null;
   /** data encrypted at rest; `encrypted`: state of the published version (until the next publication) */
   confidential: boolean;
   encrypted: boolean;
@@ -413,6 +415,10 @@ export interface Snapshot {
   /** The file is still on disk (it is removed with the retention policy) */
   available: boolean;
   run_id: string | null;
+  /** Saved by hand: it carries a label, and the retention never drops it */
+  manual: boolean;
+  label: string;
+  created_by: string | null;
 }
 
 export interface SnapshotListing {
@@ -471,6 +477,8 @@ export interface WatchdogRun {
   task_id: number;
   /** Set on the recent-runs list: the name of the watchdog it belongs to */
   name?: string;
+  /** The investigation is going on right now: its steps arrive as it works */
+  running: boolean;
   started_at: string;
   finished_at: string | null;
   trigger: string;
@@ -492,6 +500,10 @@ export interface WatchdogTask {
   user_id: number;
   username: string;
   referential_ids: string[];
+  /** Look at everything the account may read, instead of the list above */
+  all_referentials: boolean;
+  /** Report on what the latest versions added or changed, not on the whole data */
+  only_new_data: boolean;
   trigger_type: 'cron' | 'on_sync';
   schedule: string | null;
   prompt: string;
@@ -533,11 +545,24 @@ export interface Alert {
   watchdog_name: string | null;
   /** A watchdog finding carries the report the agent wrote */
   has_report: boolean;
+  /** Marked as read by this account, and nothing newer happened since */
+  read: boolean;
 }
 
 export interface AlertFeed {
   alerts: Alert[];
+  /** total, unread, one per kind and one per severity (lowercase) */
   counts: Record<string, number>;
+  /** The kinds this instance reports at all: an administrator can hide some of them */
+  kinds: AlertKind[];
+}
+
+/** What counts as an alert here (Settings › Notifications & alerts). */
+export interface AlertsSettings {
+  hidden_kinds: AlertKind[];
+  min_severity: Severity;
+  drift_ratio: number;
+  drift_min_rows: number;
 }
 
 /** An alert with what it takes to act on it (the report, the logs, the rules, the figures). */
@@ -570,6 +595,64 @@ export interface AssistantStatus {
   watchdogs: boolean;
   max_steps: number;
   max_chars: number;
+  /** Referentials a conversation may be narrowed to */
+  max_scope: number;
+}
+
+/** A saved connector to an inference server. Its secrets never leave the server. */
+export interface LlmProfile {
+  id: number;
+  name: string;
+  description: string;
+  /** The one the assistant, the agent and the watchdogs use */
+  active: boolean;
+  provider: 'ollama' | 'openai';
+  base_url: string;
+  model: string;
+  verify_tls: boolean;
+  timeout: number;
+  temperature: number;
+  top_p: number;
+  max_tokens: number;
+  context_tokens: number;
+  stop: string[];
+  options: Record<string, unknown>;
+  /** Agent mode adapted to a 1B / 3B model: fewer tools, a shorter prompt, one call at a time */
+  small_model: boolean;
+  /** An API key is stored (its value is never returned) */
+  api_key_set: boolean;
+  /** Names of the extra headers; their values stay in the database */
+  header_names: string[];
+  configured: boolean;
+  last_test_at: string | null;
+  last_test_ok: boolean | null;
+  last_test_error: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  updated_by: string | null;
+}
+
+export interface LlmProfileDraft {
+  name: string;
+  description: string;
+  provider: 'ollama' | 'openai';
+  base_url: string;
+  model: string;
+  verify_tls: boolean;
+  timeout: number;
+  temperature: number;
+  top_p: number;
+  max_tokens: number;
+  context_tokens: number;
+  stop: string[];
+  options: Record<string, unknown>;
+  small_model: boolean;
+  /** Empty keeps the stored key; `api_key_clear` removes it */
+  api_key?: string;
+  api_key_clear?: boolean;
+  /** A value equal to the mask keeps the stored one */
+  headers?: Record<string, string>;
 }
 
 export interface AssistantSettings {
@@ -594,6 +677,11 @@ export interface AssistantSettings {
   max_steps: number;
   allow_writes: boolean;
   allow_confidential: boolean;
+  /** Agent mode adapted to a small model; carried by the active profile */
+  small_model?: boolean;
+  /** Which saved profile the connection values come from (read only) */
+  profile_id?: number | null;
+  profile_name?: string;
   /** Scheduled watchdogs: off by default, and reserved to administrators and advanced users */
   watchdogs_enabled: boolean;
   groups: string[];
@@ -608,6 +696,10 @@ export interface AgentStep {
   arguments: Record<string, unknown>;
   ok: boolean;
   summary: string;
+  /** The first characters of what the tool answered, kept so the exchange can be read back */
+  result?: string;
+  /** How long the call took */
+  ms?: number | null;
 }
 
 export type Artifact =
@@ -629,6 +721,8 @@ export interface Conversation {
   title: string;
   model: string | null;
   agent: boolean;
+  /** Optional filter: the only referentials the assistant looks at in this conversation */
+  referential_ids: string[];
   created_at: string;
   updated_at: string;
   messages: number | null;
@@ -1091,6 +1185,8 @@ export interface AllSettings {
   assistant: AssistantSettings;
   assistant_default_prompt: string;
   assistant_parameters: Record<string, unknown>;
+  alerts: AlertsSettings;
+  alert_kinds: AlertKind[];
   local_login: boolean;
   log_level: LogLevel;
   public_url: string | null;

@@ -361,3 +361,163 @@ def test_the_assistant_cannot_ask_to_reveal(env, people, llm):
 
 def _id(env, username: str) -> int:
     return next(u["id"] for u in env.get("/api/admin/users").json() if u["username"] == username)
+
+
+# --------------------------------------------------------------------------- saved states, restore, freeze
+
+def saved(env, ref="people"):
+    return [s for s in env.get(f"/api/referentials/{ref}/snapshots").json()["snapshots"] if s["manual"]]
+
+
+def wait_run(env, ref="people"):
+    from test_admin_referentials import wait_idle
+
+    return wait_idle(env, ref)
+
+
+def test_a_state_can_be_saved_by_hand_without_time_travel(env):
+    """Saving a state is a decision, not a setting: it does not need time travel to be on."""
+    _write(env, PEOPLE, {"referentials": [{**DEFINITION["referentials"][0], "storage": {}}]})
+    refresh(env, "people")
+    r = env.post("/api/referentials/people/snapshots", json={"label": "before the migration"})
+    assert r.status_code == 201, r.text
+    snap = r.json()
+    assert snap["version"] == 1 and snap["label"] == "before the migration" and snap["manual"] is True
+
+    listing = env.get("/api/referentials/people/snapshots").json()
+    assert listing["enabled"] is False  # time travel is still off
+    kept = listing["snapshots"][0]
+    assert kept["manual"] is True and kept["created_by"] == "admin" and kept["available"] is True
+    assert kept["row_count"] == 3
+
+
+def test_a_saved_state_survives_the_retention(env, people):
+    """The oldest automatic snapshots are dropped; a state someone saved on purpose is not."""
+    env.post("/api/referentials/people/snapshots", json={"label": "keep me"})
+    for dept in ("A", "B", "C"):
+        _write(env, PEOPLE.replace(",IT", f",{dept}"))
+        refresh(env, "people", force=True)
+    listing = env.get("/api/referentials/people/snapshots").json()
+    automatic = [s for s in listing["snapshots"] if not s["manual"]]
+    assert len(automatic) == 3  # max_snapshots
+    assert [s["label"] for s in listing["snapshots"] if s["manual"]] == ["keep me"]
+
+
+def test_a_saved_state_can_be_deleted_one_by_one(env, people):
+    one = env.post("/api/referentials/people/snapshots", json={"label": "first"}).json()
+    two = env.post("/api/referentials/people/snapshots", json={"label": "second"}).json()
+    assert len(saved(env)) == 2
+    assert env.delete(f"/api/referentials/people/snapshots/{one['id']}").status_code == 200
+    assert [s["label"] for s in saved(env)] == ["second"]
+    assert env.delete(f"/api/referentials/people/snapshots/{two['id']}").status_code == 200
+    assert saved(env) == []
+
+
+def test_a_saved_state_is_compared_with_the_published_version(env, people):
+    """What the metrics of the diff are for: seeing what moved since the state was saved."""
+    snap = env.post("/api/referentials/people/snapshots", json={"label": "before"}).json()
+    _write(env, PEOPLE_V2)
+    refresh(env, "people", force=True)
+    summary = env.get("/api/referentials/people/diff", params={"from": snap["id"], "to": "latest"}).json()
+    assert summary["added"] == 1 and summary["removed"] == 1 and summary["modified"] == 1
+
+
+def test_restoring_publishes_the_saved_data_again_as_a_new_version(env, people):
+    snap = env.post("/api/referentials/people/snapshots", json={"label": "the good one"}).json()
+    _write(env, PEOPLE_V2)
+    refresh(env, "people", force=True)
+    before = env.get("/api/referentials/people").json()
+    assert before["version"] == 2 and {r["id"] for r in rows(env)} == {1, 2, 4}
+
+    started = env.post(f"/api/referentials/people/snapshots/{snap['id']}/restore")
+    assert started.status_code == 202, started.text
+    run = wait_run(env)
+    assert run["status"] == "success" and run["trigger"] == "restore"
+    # Restoring is publishing, not rewinding: the data comes back, the version number moves forward
+    assert run["version"] == 3 and run["restored_from"] == 1
+    assert {r["id"] for r in rows(env)} == {1, 2, 3}
+    after = env.get("/api/referentials/people").json()
+    assert after["version"] == 3 and after["status"] == "ok"
+    assert after["restored"]["version"] == 1 and after["restored"]["by"] == "admin"
+
+
+def test_restoring_freezes_the_referential(env, people):
+    """Without it the next scheduled update would read the source again and undo the restore."""
+    snap = env.post("/api/referentials/people/snapshots", json={}).json()
+    _write(env, PEOPLE_V2)
+    refresh(env, "people", force=True)
+    env.post(f"/api/referentials/people/snapshots/{snap['id']}/restore")
+    wait_run(env)
+    detail = env.get("/api/referentials/people").json()
+    assert detail["pinned"] and "restored" in detail["pinned"]["reason"]
+    assert env.delete("/api/referentials/people/pin").json() == {"pinned": False}
+    assert env.get("/api/referentials/people").json()["pinned"] is None
+
+
+def test_a_restore_can_itself_be_undone(env, people):
+    """The state being replaced is saved first, so a restore made by mistake is one more restore away."""
+    snap = env.post("/api/referentials/people/snapshots", json={"label": "v1"}).json()
+    _write(env, PEOPLE_V2)
+    refresh(env, "people", force=True)
+    env.post(f"/api/referentials/people/snapshots/{snap['id']}/restore")
+    wait_run(env)
+    automatic = [s for s in saved(env) if s["label"].startswith("Before restoring")]
+    assert len(automatic) == 1 and automatic[0]["row_count"] == 3
+    env.post(f"/api/referentials/people/snapshots/{automatic[0]['id']}/restore")
+    wait_run(env)
+    assert {r["id"] for r in rows(env)} == {1, 2, 4}  # back to the version that was published before
+
+
+def test_a_reader_can_neither_save_nor_restore_nor_freeze(env, people):
+    create_user(env, "reader")
+    env.post("/api/admin/grants", json={"referential_id": "people",
+                                        "user_id": next(u["id"] for u in env.get("/api/admin/users").json()
+                                                        if u["username"] == "reader"), "level": "read"})
+    snap = env.post("/api/referentials/people/snapshots", json={}).json()
+    client = new_client(env, "reader", USER_PASSWORD)
+    assert client.post("/api/referentials/people/snapshots", json={}).status_code == 403
+    assert client.post(f"/api/referentials/people/snapshots/{snap['id']}/restore").status_code == 403
+    assert client.post("/api/referentials/people/pin", json={}).status_code == 403
+    assert client.delete("/api/referentials/people/pin").status_code == 403
+
+
+def test_a_referential_can_be_frozen_by_hand(env, people):
+    frozen = env.post("/api/referentials/people/pin", json={"reason": "audit in progress"})
+    assert frozen.status_code == 200, frozen.text
+    pinned = env.get("/api/referentials/people").json()["pinned"]
+    assert pinned["reason"] == "audit in progress" and pinned["by"] == "admin"
+
+    # Automatic updates are skipped; an update started by hand is refused while it is frozen
+    from app.service import Service
+
+    service = env.app_.state.service
+    assert service.submit("people", "schedule") is None
+    assert service.submit("people", "sync") is None
+    assert env.post("/api/referentials/people/refresh").status_code == 409
+
+    env.delete("/api/referentials/people/pin")
+    assert env.get("/api/referentials/people").json()["pinned"] is None
+    assert env.post("/api/referentials/people/refresh").status_code == 200
+
+
+def test_an_unknown_snapshot_is_not_restored(env, people):
+    assert env.post("/api/referentials/people/snapshots/999999/restore").status_code == 404
+
+
+def test_an_internal_referential_is_not_restored_from_its_file(env):
+    """Its rows live in the database: a restored file would be undone by the next edit."""
+    import time
+
+    assert env.post("/api/internal-referentials", json={
+        "id": "assets", "name": "Assets", "key": "host",
+        "columns": [{"name": "host", "type": "text", "required": True}]}).status_code == 201
+    env.post("/api/referentials/assets/records", json={"host": "srv-1"})
+    deadline = time.time() + 20
+    while time.time() < deadline and not env.get("/api/referentials/assets").json().get("version"):
+        time.sleep(0.2)
+    assert env.get("/api/referentials/assets").json()["version"], "the internal referential never published"
+
+    snap = env.post("/api/referentials/assets/snapshots", json={"label": "one row"})
+    assert snap.status_code == 201, snap.text
+    refused = env.post(f"/api/referentials/assets/snapshots/{snap.json()['id']}/restore")
+    assert refused.status_code == 400 and "Edit tab" in refused.text

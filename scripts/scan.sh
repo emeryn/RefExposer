@@ -4,6 +4,7 @@
 #   scripts/scan.sh            everything (what "make scan" runs)
 #   scripts/scan.sh deps       dependencies only (pip-audit, npm audit), no image needed
 #   scripts/scan.sh images     built images (CVEs, secrets, misconfiguration)
+#   scripts/scan.sh published  the images as they are in the registry, not the ones just built
 #   scripts/scan.sh config     Dockerfiles and compose file
 #
 # Docker is the only prerequisite: every tool runs in a container, nothing is installed on the host.
@@ -14,6 +15,10 @@
 #   - pip-audit and npm audit (level high) on the dependency manifests
 #   - trivy config on the Dockerfiles
 # Third-party images (PostgreSQL) are reported but never gate: their content belongs to their publisher.
+#
+# A vulnerability with no published fix cannot gate a build - there is nothing to install. It is printed in a
+# section of its own all the same, with its package: the answer to those is usually to drop the package (a
+# smaller base image) or to wait for the distribution, and neither happens if nobody sees them.
 set -eu
 
 # Git Bash on Windows rewrites arguments that look like paths (/out, /src...)
@@ -42,6 +47,22 @@ trivy() {
         -v "$REPO:/src:ro" \
         "$TRIVY_IMAGE" "$@"
 }
+
+# Reads a trivy JSON report and lists, per package, the findings with no fix published
+UNFIXED='
+import collections, json, sys
+data = json.load(sys.stdin)
+rows = collections.defaultdict(lambda: collections.Counter())
+for result in data.get("Results") or []:
+    for v in result.get("Vulnerabilities") or []:
+        if not v.get("FixedVersion"):
+            rows[(v["PkgName"], v.get("InstalledVersion", ""))][v["Severity"]] += 1
+if not rows:
+    print("      none")
+for (pkg, version), counts in sorted(rows.items()):
+    detail = ", ".join(f"{n} {s.lower()}" for s, n in sorted(counts.items()))
+    print(f"      {pkg} {version}: {detail}")
+'
 
 note() { printf '\n== %s\n' "$1"; }
 fail() { printf '   FAILED: %s\n' "$1"; FAILED="$FAILED $1"; }
@@ -85,7 +106,14 @@ scan_images() {
             || fail "$image has a CRITICAL vulnerability"
         trivy image --quiet --scanners vuln --severity HIGH --ignore-unfixed --exit-code 1 "$image" \
             || fail "$image has a fixable HIGH vulnerability"
-        trivy image --quiet --scanners vuln,secret --severity CRITICAL,HIGH --format table "$image" | tail -40
+        printf '   fixable now:\n'
+        trivy image --quiet --scanners vuln,secret --severity CRITICAL,HIGH,MEDIUM --ignore-unfixed \
+            --format table "$image" | tail -30
+        # No fix published: nothing to install, so no gate - but the packages are named, because the way out
+        # is often to stop shipping them at all
+        printf '   no fix published (not a gate, watch the packages):\n'
+        trivy image --quiet --scanners vuln --severity CRITICAL,HIGH,MEDIUM --format json "$image" \
+            | docker run --rm -i "$PYTHON_IMAGE" python -c "$UNFIXED"
     done
 
     if [ -n "$THIRD_PARTY" ]; then
@@ -94,6 +122,21 @@ scan_images() {
         trivy image --quiet --scanners vuln --format json -o "/out/$name.json" "$THIRD_PARTY" || true
         trivy image --quiet --scanners vuln --severity CRITICAL,HIGH --format table "$THIRD_PARTY" | head -20 || true
     fi
+}
+
+scan_published() {
+    note "Images of the registry (what a registry scanner such as Docker Scout reports)"
+    printf '   A pushed image keeps the packages it was built with: one fixed since then is still in it until\n'
+    printf '   the image is rebuilt and pushed again. That is usually why a registry report differs from a\n'
+    printf '   local scan of a fresh build.\n'
+    for image in $OURS; do
+        note "Registry image $image"
+        docker pull --quiet "$image" >/dev/null 2>&1 || { printf '   not in the registry (or no access)\n'; continue; }
+        name=$(echo "$image" | tr '/:' '__')
+        trivy image --quiet --scanners vuln --severity CRITICAL,HIGH,MEDIUM --format json \
+            -o "/out/$name-published.json" "$image"
+        trivy image --quiet --scanners vuln --severity CRITICAL,HIGH --format table "$image" | tail -25
+    done
 }
 
 scan_config() {
@@ -110,9 +153,10 @@ scan_config() {
 case "${1:-all}" in
     deps) scan_deps ;;
     images) scan_images ;;
+    published) scan_published ;;
     config) scan_config ;;
     all) scan_deps; scan_config; scan_images ;;
-    *) echo "usage: $0 [all|deps|images|config]" >&2; exit 2 ;;
+    *) echo "usage: $0 [all|deps|images|published|config]" >&2; exit 2 ;;
 esac
 
 printf '\nReports: %s\n' "$OUT"

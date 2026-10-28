@@ -738,11 +738,11 @@ def _download(client: httpx.Client, url: str, dest: Path, headers: dict[str, str
     }
 
 
-def http_client(settings: Settings) -> httpx.Client:
+def http_client(settings: Settings, follow_redirects: bool = True) -> httpx.Client:
     """Client honouring the proxy and certificates configured in the administration settings."""
     from .network import client
 
-    return client(settings)
+    return client(settings, follow_redirects=follow_redirects)
 
 
 def _cleanup_raw(paths: RefPaths, keep: set[str]) -> None:

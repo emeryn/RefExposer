@@ -3,6 +3,7 @@ import {
   Alert as Callout,
   Anchor,
   Badge,
+  Button,
   Card,
   Drawer,
   Group,
@@ -10,12 +11,14 @@ import {
   SegmentedControl,
   SimpleGrid,
   Stack,
+  Switch,
   Table,
   Text,
   Title,
   Tooltip,
   UnstyledButton,
 } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import {
   IconAlertTriangle,
   IconArrowRight,
@@ -23,15 +26,18 @@ import {
   IconChartArrowsVertical,
   IconClock,
   IconDog,
+  IconMail,
+  IconMailOpened,
   IconRefresh,
   IconShieldCheck,
 } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
-import { markAlertsSeen, useAlerts } from '../api/hooks';
+import { useAlerts } from '../api/hooks';
 import type { Alert, AlertKind, QualityResult, Run, Severity, WatchdogRun } from '../api/types';
+import { AgentSteps } from '../components/AgentSteps';
 import { EmptyState, StatCard } from '../components/Common';
 import { Markdown } from '../components/Markdown';
 import { RunStatusBadge } from '../components/Status';
@@ -52,14 +58,14 @@ const KIND: Record<AlertKind, { label: string; icon: typeof IconBell; hint: stri
   drift: { label: 'Drift', icon: IconChartArrowsVertical, hint: 'The last version changed the volume a lot' },
 };
 
-function AlertRow({ alert, onOpen }: { alert: Alert; onOpen: () => void }) {
+function AlertRow({ alert, onOpen, onRead }: { alert: Alert; onOpen: () => void; onRead: (read: boolean) => void }) {
   const kind = KIND[alert.kind];
   return (
-    <UnstyledButton onClick={onOpen} w="100%">
-      <Card withBorder padding="sm">
-        <Group justify="space-between" wrap="nowrap" gap="sm">
+    <Card withBorder padding="sm" opacity={alert.read ? 0.6 : 1}>
+      <Group justify="space-between" wrap="nowrap" gap="sm">
+        <UnstyledButton onClick={onOpen} style={{ minWidth: 0, flex: 1 }}>
           <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
-            <Badge color={SEVERITY_COLOR[alert.severity]} variant="filled" w={84} style={{ flexShrink: 0 }}>
+            <Badge color={SEVERITY_COLOR[alert.severity]} variant={alert.read ? 'light' : 'filled'} w={84} style={{ flexShrink: 0 }}>
               {alert.severity}
             </Badge>
             <Tooltip label={kind.hint}>
@@ -68,7 +74,7 @@ function AlertRow({ alert, onOpen }: { alert: Alert; onOpen: () => void }) {
               </Badge>
             </Tooltip>
             <div style={{ minWidth: 0 }}>
-              <Text size="sm" fw={600} truncate>
+              <Text size="sm" fw={alert.read ? 400 : 600} truncate>
                 {alert.title}
               </Text>
               <Text size="xs" c="dimmed" lineClamp={1}>
@@ -77,16 +83,28 @@ function AlertRow({ alert, onOpen }: { alert: Alert; onOpen: () => void }) {
               </Text>
             </div>
           </Group>
-          <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+        </UnstyledButton>
+        <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
+          <Text size="xs" c="dimmed">
             {fmtRelative(alert.at)}
           </Text>
+          <Tooltip label={alert.read ? 'Mark as unread' : 'Mark as read'}>
+            <ActionIcon
+              variant="subtle"
+              color={alert.read ? 'gray' : 'blue'}
+              onClick={() => onRead(!alert.read)}
+              aria-label={alert.read ? 'Mark as unread' : 'Mark as read'}
+            >
+              {alert.read ? <IconMailOpened size={16} /> : <IconMail size={16} />}
+            </ActionIcon>
+          </Tooltip>
         </Group>
-      </Card>
-    </UnstyledButton>
+      </Group>
+    </Card>
   );
 }
 
-function Detail({ id, onClose }: { id: string; onClose: () => void }) {
+function Detail({ id, onClose, onRead }: { id: string; onClose: () => void; onRead: (read: boolean) => void }) {
   const { data, isLoading, error } = useQuery({ queryKey: ['alert', id], queryFn: () => api.alert(id) });
   const alert = data?.alert;
   return (
@@ -148,17 +166,9 @@ function Detail({ id, onClose }: { id: string; onClose: () => void }) {
               {!!(data.run as WatchdogRun).steps?.length && (
                 <div>
                   <Text size="xs" c="dimmed" mb={4}>
-                    How it looked
+                    How it looked — click a step to see what came back
                   </Text>
-                  <Group gap={4}>
-                    {(data.run as WatchdogRun).steps.map((s, i) => (
-                      <Tooltip key={i} label={`${JSON.stringify(s.arguments)} → ${s.summary}`} multiline maw={360}>
-                        <Badge size="xs" variant="default" color={s.ok ? undefined : 'red'}>
-                          {s.tool}
-                        </Badge>
-                      </Tooltip>
-                    ))}
-                  </Group>
+                  <AgentSteps steps={(data.run as WatchdogRun).steps} />
                 </div>
               )}
               {!!(data.run as WatchdogRun).notifications?.length && (
@@ -244,9 +254,19 @@ function Detail({ id, onClose }: { id: string; onClose: () => void }) {
             </SimpleGrid>
           )}
 
-          <Anchor component={Link} to={alert.link} onClick={onClose} size="sm">
-            Open {alert.referential_name ?? alert.watchdog_name ?? 'it'} <IconArrowRight size={14} style={{ verticalAlign: -2 }} />
-          </Anchor>
+          <Group justify="space-between">
+            <Anchor component={Link} to={alert.link} onClick={onClose} size="sm">
+              Open {alert.referential_name ?? alert.watchdog_name ?? 'it'} <IconArrowRight size={14} style={{ verticalAlign: -2 }} />
+            </Anchor>
+            <Button
+              size="xs"
+              variant="default"
+              leftSection={alert.read ? <IconMail size={14} /> : <IconMailOpened size={14} />}
+              onClick={() => onRead(!alert.read)}
+            >
+              {alert.read ? 'Mark as unread' : 'Mark as read'}
+            </Button>
+          </Group>
         </Stack>
       )}
     </Drawer>
@@ -254,20 +274,33 @@ function Detail({ id, onClose }: { id: string; onClose: () => void }) {
 }
 
 export default function AlertsPage() {
+  const qc = useQueryClient();
   const { data, isLoading, error, refetch, isFetching } = useAlerts(200);
   const [kind, setKind] = useState('all');
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
 
-  // Opening the page is what marks them read: the bell counts what arrived since
-  useEffect(() => {
-    if (data) markAlertsSeen();
-  }, [data]);
+  /** Read is per account and kept on the server: `null` means every alert of this feed. */
+  const mark = useMutation({
+    mutationFn: ({ ids, read }: { ids: string[] | null; read: boolean }) => api.markAlerts(ids, read),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['alerts'] });
+      qc.invalidateQueries({ queryKey: ['alert'] });
+    },
+    onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
+  });
+  const read = (ids: string[] | null, value: boolean) => mark.mutate({ ids, read: value });
 
   const shown = useMemo(
-    () => (data?.alerts ?? []).filter((a) => kind === 'all' || a.kind === kind),
-    [data, kind],
+    () =>
+      (data?.alerts ?? []).filter(
+        (a) => (kind === 'all' || a.kind === kind) && (!unreadOnly || !a.read),
+      ),
+    [data, kind, unreadOnly],
   );
   const counts = data?.counts ?? {};
+  // Only the kinds this instance reports: an administrator can hide some of them in the settings
+  const kinds = data?.kinds ?? (Object.keys(KIND) as AlertKind[]);
 
   if (isLoading) return <Loader />;
   if (error) return <Callout color="red">{(error as Error).message}</Callout>;
@@ -282,14 +315,25 @@ export default function AlertsPage() {
             an update that failed, data gone stale, quality rules failing, a volume that moved a lot.
           </Text>
         </div>
-        <ActionIcon variant="default" size="lg" loading={isFetching} onClick={() => refetch()} aria-label="Refresh">
-          <IconRefresh size={18} />
-        </ActionIcon>
+        <Group gap="xs">
+          <Button
+            variant="default"
+            leftSection={<IconMailOpened size={16} />}
+            onClick={() => read(null, true)}
+            loading={mark.isPending}
+            disabled={!counts.unread}
+          >
+            Mark all as read
+          </Button>
+          <ActionIcon variant="default" size="lg" loading={isFetching} onClick={() => refetch()} aria-label="Refresh">
+            <IconRefresh size={18} />
+          </ActionIcon>
+        </Group>
       </Group>
 
       <SimpleGrid cols={{ base: 2, sm: 4 }}>
         <StatCard label="Open alerts" value={counts.total ?? 0} icon={<IconBell size={20} />} color={counts.total ? 'orange' : 'teal'} />
-        <StatCard label="Watchdog findings" value={counts.watchdog ?? 0} icon={<IconDog size={20} />} color="grape" />
+        <StatCard label="Unread" value={counts.unread ?? 0} icon={<IconMail size={20} />} color={counts.unread ? 'blue' : 'teal'} />
         <StatCard
           label="Referentials"
           value={(counts.failure ?? 0) + (counts.stale ?? 0) + (counts.quality ?? 0) + (counts.drift ?? 0)}
@@ -304,40 +348,64 @@ export default function AlertsPage() {
         />
       </SimpleGrid>
 
-      <SegmentedControl
-        value={kind}
-        onChange={setKind}
-        w="fit-content"
-        data={[
-          { value: 'all', label: `All (${counts.total ?? 0})` },
-          ...(Object.keys(KIND) as AlertKind[]).map((k) => ({
-            value: k,
-            label: `${KIND[k].label} (${counts[k] ?? 0})`,
-          })),
-        ]}
-      />
+      <Group justify="space-between" wrap="wrap" gap="sm">
+        <SegmentedControl
+          value={kind}
+          onChange={setKind}
+          w="fit-content"
+          data={[
+            { value: 'all', label: `All (${counts.total ?? 0})` },
+            ...kinds.map((k) => ({ value: k, label: `${KIND[k].label} (${counts[k] ?? 0})` })),
+          ]}
+        />
+        <Switch
+          label="Unread only"
+          checked={unreadOnly}
+          onChange={(e) => setUnreadOnly(e.currentTarget.checked)}
+        />
+      </Group>
 
       {shown.length === 0 ? (
-        <EmptyState icon={<IconBell size={28} />} title="Nothing to report">
-          {kind === 'all'
-            ? 'No watchdog finding, and every referential you can see is up to date and passing its rules.'
-            : 'No alert of this kind.'}
+        <EmptyState icon={<IconBell size={28} />} title={unreadOnly ? 'Nothing unread' : 'Nothing to report'}>
+          {unreadOnly
+            ? 'Every alert you can see has been read.'
+            : kind === 'all'
+              ? 'No watchdog finding, and every referential you can see is up to date and passing its rules.'
+              : 'No alert of this kind.'}
         </EmptyState>
       ) : (
         <Stack gap={6}>
           {shown.map((a) => (
-            <AlertRow key={a.id} alert={a} onOpen={() => setOpen(a.id)} />
+            <AlertRow
+              key={a.id}
+              alert={a}
+              onOpen={() => {
+                setOpen(a.id);
+                if (!a.read) read([a.id], true);
+              }}
+              onRead={(value) => read([a.id], value)}
+            />
           ))}
         </Stack>
       )}
 
       <Text size="xs" c="dimmed">
         This list is built from the state of the referentials and the recorded watchdog runs: an alert
-        disappears on its own once the thing behind it is fixed. Nothing is sent from here — e-mails and
-        webhooks are configured per channel in the notification settings.
+        disappears on its own once the thing behind it is fixed, and one you have read comes back unread if it
+        happens again. Read is yours alone, and what counts as an alert here is set in{' '}
+        <Anchor component={Link} to="/admin/settings/notifications" size="xs">
+          Settings › Notifications &amp; alerts
+        </Anchor>
+        . Nothing is sent from here — e-mails and webhooks are configured per channel.
       </Text>
 
-      {open && <Detail id={open} onClose={() => setOpen(null)} />}
+      {open && (
+        <Detail
+          id={open}
+          onClose={() => setOpen(null)}
+          onRead={(value) => read([open], value)}
+        />
+      )}
     </Stack>
   );
 }

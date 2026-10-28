@@ -393,7 +393,7 @@ class Service:
                     raise BusyError("an update is already running for this referential")
                 return self.active[ref_id]
             meta = self.metas.setdefault(ref_id, {})
-            if trigger in ("schedule", "startup") and meta.get("pinned"):
+            if trigger in ("schedule", "startup", "sync") and meta.get("pinned"):
                 log.info("[%s] frozen version: automatic update skipped", ref_id)
                 return None
             if trigger in ("schedule", "startup", "sync") and meta.get("crashed"):
@@ -407,6 +407,94 @@ class Service:
             meta["status"] = "queued"
         self.executor.submit(self._execute, ref, run, manual)
         return run
+
+    # ------------------------------------------------------------------ restoring a kept version
+    def restore(self, ref_id: str, snapshot_id: int, user: str | None = None) -> Run:
+        """Publish a kept version again, in the background.
+
+        It goes through the job queue like an update, because it does the same work on the data: the sorted
+        copies, the profile and the quality rules are written again from the restored file.
+        """
+        with self._lock:
+            if ref_id in self.active:
+                raise BusyError("an update is already running for this referential")
+            ref = self.refs[ref_id]
+            run = Run(ref.id, "restore", user=user)
+            self.active[ref_id] = run
+            self.metas.setdefault(ref_id, {})["status"] = "queued"
+        self.executor.submit(self._restore, ref, run, snapshot_id)
+        return run
+
+    def _restore(self, ref: ReferentialConfig, run: Run, snapshot_id: int) -> None:
+        from . import snapshots
+        from .models import ReferentialSnapshot
+
+        paths = RefPaths(self.settings.data_dir, ref.id)
+        before = read_meta(paths)
+        previous_status = before.get("status")
+        quality_before = (before.get("quality") or {}).get("status")
+        with self._lock:
+            self.metas[ref.id] = {**self.metas.get(ref.id, {}), "status": "running"}
+        run.started_at = utcnow()
+        run.status = "running"
+        run.journal = paths.running
+        run.save_journal()
+        meta = before
+        try:
+            with self.tasks.db() as db:
+                snap = db.get(ReferentialSnapshot, snapshot_id)
+                if snap is None or snap.referential_id != ref.id:
+                    raise snapshots.SnapshotError("unknown saved version")
+                version = snap.version
+                # The state about to be replaced is saved first, so a restore can itself be undone. It costs
+                # nothing: the file is hard-linked, and the published one is about to be replaced, not erased.
+                if paths.current.exists():
+                    try:
+                        kept = snapshots.capture(db, self.settings.data_dir, ref, before,
+                                                 label=f"Before restoring version {version}", user=run.user)
+                        run.log(f"State before the restore saved (version {kept.version})")
+                    except snapshots.SnapshotError as e:
+                        run.log(f"The state before the restore could not be saved: {e}", "warn")
+                meta = snapshots.restore_files(self.settings, ref, before, snap, run)
+            run.status = "success"
+            run.message = f"Version {version} restored"
+            meta.update({"status": "ok", "last_error": None, "last_success_at": iso(utcnow())})
+            self._register(ref, meta)
+            # The next scheduled update would bring the data of the source back and undo the restore: the
+            # referential is frozen, and resuming its updates is one click away (the banner says so)
+            meta["pinned"] = {"by": run.user, "at": iso(utcnow()), "reason": f"restored version {version}"}
+            if ref.downloads:
+                run.phase = "downloads"
+                self.downloads.prebuild(ref, meta)
+        except snapshots.SnapshotError as e:
+            run.status, run.message = "rejected", str(e)
+            run.log(f"Nothing restored: {e}", "error")
+            meta = {**read_meta(paths), "status": previous_status or "ok"}
+        except Exception as e:  # noqa: BLE001
+            log.exception("Restore %s failed", run.id)
+            run.status, run.message = "error", f"{type(e).__name__}: {e}"
+            run.log(run.message, "error")
+            meta = {**read_meta(paths), "status": "error", "last_error": run.message}
+        finally:
+            run.finished_at = utcnow()
+            run.phase = "done"
+            run.journal = None
+            paths.running.unlink(missing_ok=True)
+        meta["last_run"] = run.to_dict(with_logs=False)
+        meta["last_attempt_at"] = iso(run.finished_at)
+        meta["storage_size"] = dir_size(paths.root)
+        write_meta(paths, meta)
+        append_run(paths, run.to_dict(), self.settings.keep_runs)
+        try:
+            self.notifier.run_finished(ref, run.to_dict(with_logs=False), previous_status, meta.get("status"),
+                                       run.logs, quality_before, quality_summary(meta.get("quality")))
+        except Exception:  # noqa: BLE001 (a notification never breaks a publication)
+            log.exception("[%s] notifications not sent", ref.id)
+        with self._lock:
+            self.metas[ref.id] = self._in_memory(ref.id, meta)
+            self.active.pop(ref.id, None)
+        if run.status == "success":
+            self._update_dependents(ref.id, run.user)
 
     # ------------------------------------------------------------------ internal referentials
     @staticmethod
@@ -924,6 +1012,8 @@ class Service:
             # state of the published version: differs from `confidential` until the next publication
             "encrypted": bool(meta.get("encrypted")),
             "manual_import": meta.get("manual_import"),
+            # Where the published version comes from, when it was put back from a kept one (snapshots.py)
+            "restored": meta.get("restored"),
             "import_folder": (str(self.settings.import_dir / ref.id) if self.settings.import_dir
                               and not (ref.is_sync or ref.is_internal or ref.is_combined) else None),
             "sync_path": f"{self.settings.sync_dir}/{ref.source.path}" if ref.is_sync else None,

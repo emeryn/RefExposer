@@ -2,7 +2,7 @@
 # make is a convenience, never a requirement: every target is one command, shown in its recipe, and
 # "docker compose up -d" alone is enough to start the application.
 .DEFAULT_GOAL := help
-.PHONY: help up down logs build test typecheck integrations lock lock-upgrade scan scan-deps sbom
+.PHONY: help up down logs build test typecheck integrations lock lock-upgrade scan scan-deps scan-published sbom
 
 COMPOSE ?= docker compose
 # Git Bash on Windows rewrites arguments that look like paths before Docker sees them
@@ -48,6 +48,9 @@ scan: ## Supply-chain scan: dependencies, images, Dockerfiles (fails on a fixabl
 
 scan-deps: ## Dependency scan only (pip-audit, npm audit); no image needed
 	sh scripts/scan.sh deps
+
+scan-published: ## Scan the images as they are in the registry (what a registry scanner reports)
+	sh scripts/scan.sh published
 
 sbom: ## Write the CycloneDX bill of materials of the images to dist/sbom/
 	sh scripts/sbom.sh

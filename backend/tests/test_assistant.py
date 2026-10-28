@@ -136,7 +136,8 @@ def source(env, ref_id, name, content, **config):
 def test_hidden_until_configured(env):
     assert env.get("/api/assistant").json() == {
         "available": False, "enabled": False, "configured": False, "model": None, "agent": False,
-        "writes": False, "confidential": False, "watchdogs": False, "max_steps": 8, "max_chars": 8000}
+        "writes": False, "confidential": False, "watchdogs": False, "max_steps": 8, "max_chars": 8000,
+        "max_scope": 20}
     # Nothing is reachable while it is disabled
     assert env.get("/api/assistant/conversations").status_code == 403
     assert env.post("/api/assistant/conversations", json={}).status_code == 403
@@ -540,3 +541,79 @@ def test_one_question_stores_exactly_one_pair(env, llm):
         ("user", "first question"), ("assistant", "Only once.")]
     # And reading the conversation while the answer is being written shows the question once
     assert sum(1 for m in messages if m["role"] == "user" and m["content"] == "first question") == 1
+
+
+# --------------------------------------------------------------------------- the filter of a conversation
+
+def test_a_conversation_can_be_narrowed_to_some_referentials(env, llm):
+    configure(env)
+    refresh(env, "countries")
+    conv = env.post("/api/assistant/conversations", json={"referential_ids": ["countries"]})
+    assert conv.status_code == 201, conv.text
+    assert conv.json()["referential_ids"] == ["countries"]
+    provider = llm(tool_call("query_rows", id="countries", limit=3), "Here are the countries.")
+    _, events = ask(env, "What is in there?", conversation=conv.json()["id"])
+    assert next(e for e in events if e["type"] == "step")["ok"] is True
+    # The filter is in the prompt, so the model does not have to discover it
+    assert "restricted to these referentials: countries" in json.dumps(provider.calls)
+
+
+def test_a_referential_outside_the_filter_is_said_to_be_out_of_scope(env, llm):
+    configure(env)
+    refresh(env, "countries")
+    refresh(env, "words")
+    conv = env.post("/api/assistant/conversations", json={"referential_ids": ["countries"]}).json()
+    provider = llm(tool_call("query_rows", id="words", limit=5), "That one is out of scope.")
+    _, events = ask(env, "And words?", conversation=conv["id"])
+    step = next(e for e in events if e["type"] == "step")
+    assert step["ok"] is False and "outside the chosen referentials" in step["summary"]
+    assert "alpha" not in json.dumps(provider.calls)  # no row of it reached the model
+
+
+def test_the_filter_only_narrows_what_the_account_may_read(env, llm):
+    configure(env)
+    assert env.post("/api/assistant/conversations", json={"referential_ids": ["nope"]}).status_code == 404
+    create_user(env, "reader")
+    env.post("/api/admin/grants", json={"referential_id": "countries",
+                                        "user_id": next(u["id"] for u in env.get("/api/admin/users").json()
+                                                        if u["username"] == "reader"), "level": "read"})
+    client = new_client(env, "reader", USER_PASSWORD)
+    assert client.post("/api/assistant/conversations", json={"referential_ids": ["words"]}).status_code == 404
+
+
+def test_the_filter_can_be_changed_and_cleared(env, llm):
+    configure(env)
+    conv = env.post("/api/assistant/conversations", json={}).json()
+    assert conv["referential_ids"] == []
+    changed = env.patch(f"/api/assistant/conversations/{conv['id']}", json={"referential_ids": ["countries", "countries"]})
+    assert changed.json()["referential_ids"] == ["countries"]
+    assert env.patch(f"/api/assistant/conversations/{conv['id']}",
+                     json={"referential_ids": []}).json()["referential_ids"] == []
+
+
+def test_the_filter_does_not_stop_the_assistant_creating_a_referential(env, llm):
+    """The whole point of a filter being a filter: narrowing the conversation must not forbid working in it."""
+    refresh(env, "countries")
+    source(env, "owners", "Owners", OWNERS, key="code")
+    configure(env, allow_writes=True)
+    conv = env.post("/api/assistant/conversations", json={"referential_ids": ["countries", "owners"]}).json()
+    provider = llm(tool_call("create_referential_from_sql", id="owned", name="Owned countries", key="code",
+                             sql="SELECT c.code, c.label, o.owner FROM countries c JOIN owners o ON o.code = c.code"),
+                   "The referential 'owned' is being built.")
+    _, events = ask(env, "Make a referential joining them", conversation=conv["id"])
+    step = next(e for e in events if e["type"] == "step")
+    assert step["ok"], step
+    assert wait_idle(env, "owned")["status"] == "success"
+    assert "a referential you create for them joins the list" in json.dumps(provider.calls)
+
+
+def test_a_step_keeps_what_the_tool_answered(env, llm):
+    """Reading back an exchange needs more than the list of tools that were called."""
+    configure(env)
+    refresh(env, "countries")
+    llm(tool_call("query_rows", id="countries", limit=2), "Two rows.")
+    conv, events = ask(env, "Show me two rows")
+    step = next(e for e in events if e["type"] == "step")
+    assert step["result"] and step["ms"] is not None and step["ms"] >= 0
+    stored = env.get(f"/api/assistant/conversations/{conv}").json()["messages"][-1]
+    assert stored["steps"][0]["result"] == step["result"]

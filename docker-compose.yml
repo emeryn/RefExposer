@@ -5,6 +5,16 @@ x-proxy-env: &proxy-env
   HTTPS_PROXY: ${HTTPS_PROXY:-}
   NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,backend,frontend}
 
+# Where the build takes its base images and its packages. Every default is the public one; point them at the
+# company repositories to build without reaching the Internet (see enterprise/README.md).
+x-build-sources: &build-sources
+  PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+  APT_MIRROR: ${APT_MIRROR:-}
+  PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+  PIP_EXTRA_ARGS: ${PIP_EXTRA_ARGS:-}
+  OS_UPDATE: ${OS_UPDATE:-1}
+  DUCKDB_EXTENSION_REPOSITORY: ${DUCKDB_EXTENSION_REPOSITORY:-}
+
 # Containers run as unprivileged accounts, without Linux capabilities, on a read-only root filesystem:
 # only the volumes and /tmp (in memory) are writable
 x-hardening: &hardening
@@ -15,7 +25,7 @@ x-hardening: &hardening
 
 services:
   db:
-    image: postgres:17-alpine
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
     restart: unless-stopped
     environment:
       POSTGRES_DB: refexposer
@@ -36,11 +46,11 @@ services:
       context: ./backend
       target: runtime
       args:
-        <<: *proxy-env
+        <<: [*proxy-env, *build-sources]
         # Account running the backend: owner of ./data and ./import on the host (see README, "Containers")
         REFEX_UID: ${REFEX_UID:-10001}
         REFEX_GID: ${REFEX_GID:-10001}
-    image: emeryn/refexposer-backend:latest
+    image: emeryn/refexposer-backend:${REFEX_VERSION:-latest}
     user: "0:0"
     entrypoint:
       - sh
@@ -63,7 +73,7 @@ services:
 
   backend:
     build: *backend-build
-    image: emeryn/refexposer-backend:latest
+    image: emeryn/refexposer-backend:${REFEX_VERSION:-latest}
     restart: unless-stopped
     <<: *hardening
     # Processors and memory of the backend (0: no limit). On a workstation, keep some for the host, e.g.
@@ -143,8 +153,15 @@ services:
   frontend:
     build:
       context: ./frontend
-      args: *proxy-env
-    image: emeryn/refexposer-frontend:latest
+      args:
+        <<: *proxy-env
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.31-alpine-slim}
+        APK_MIRROR: ${APK_MIRROR:-}
+        OS_UPDATE: ${OS_UPDATE:-1}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+        NPM_EXTRA_ARGS: ${NPM_EXTRA_ARGS:-}
+    image: emeryn/refexposer-frontend:${REFEX_VERSION:-latest}
     restart: unless-stopped
     <<: *hardening
     # nginx writes its temporary files (request bodies, proxy buffers) to /var/cache/nginx

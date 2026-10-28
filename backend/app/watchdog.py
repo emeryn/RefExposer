@@ -6,7 +6,16 @@ with three differences that matter:
 
 - **Scope.** The referentials are listed in the task, and nothing else is reachable: the signed scope travels
   with every tool call and `CurrentUser.level()` returns 0 for anything outside it, so the model cannot drift
-  onto another source even if it asks.
+  onto another source even if it asks. A watchdog can instead be told to look at **everything**
+  (`all_referentials`), and its scope is then exactly what its account may read — no more.
+
+- **Trace.** The tool calls are written to the run as they happen, not at the end, so the interface shows what
+  an investigation is doing while it runs, and what it did once it is over.
+
+- **New data only.** A watchdog can be told to look at what arrived since its last investigation
+  (`only_new_data`): the question then carries the published version of each referential in scope, what its last
+  version changed, and whether that happened after the previous run — so the agent asks for the changes instead
+  of reading everything again.
 - **Rights.** It runs with the rights of the account it belongs to, through a session of its own opened for
   the run and closed after it. It never writes: the tools that change something are off for a watchdog,
   whatever the assistant settings allow in the chat.
@@ -160,7 +169,7 @@ def on_sync(service: Any, ref_id: str) -> None:
                 return
             tasks = [t.id for t in db.scalars(
                 select(WatchdogTask).where(WatchdogTask.enabled.is_(True), WatchdogTask.trigger_type == "on_sync"))
-                if ref_id in (t.referential_ids or [])]
+                if t.all_referentials or ref_id in (t.referential_ids or [])]
     except Exception:  # noqa: BLE001
         log.exception("Cannot read the watchdogs after the update of %s", ref_id)
         return
@@ -282,8 +291,13 @@ def _close_session(db: Session, session_id: int) -> None:
         db.commit()
 
 
-def current_user(db: Session, service: Any, user: User, scope: frozenset[str], denied: frozenset[str]) -> CurrentUser:
-    """The account as the agent sees it: its own rights, narrowed to the scope of the watchdog."""
+def current_user(db: Session, service: Any, user: User, scope: frozenset[str] | None,
+                 denied: frozenset[str]) -> CurrentUser:
+    """The account as the agent sees it: its own rights, narrowed to the scope of the watchdog.
+
+    `scope` None: no narrowing at all, which is what a watchdog watching every referential gets — it then
+    reads exactly what its account reads, nothing more.
+    """
     categories = {r.id: r.category for r in service.refs.values()}
     return CurrentUser(
         id=user.id, username=user.username, display_name=user.display_name, email=user.email, role=user.role,
@@ -293,10 +307,83 @@ def current_user(db: Session, service: Any, user: User, scope: frozenset[str], d
     )
 
 
-def question(task: WatchdogTask) -> str:
-    scope = ", ".join(task.referential_ids or [])
+# Referentials described in the question of a watchdog watching everything: enough to work from, few enough
+# that the prompt stays a prompt
+MAX_STATE_LINES = 40
+
+
+def _aware(value: Any) -> Any:
+    """A date read from `meta.json` or from the database, as an aware UTC datetime (None when unreadable)."""
+    import datetime as dt
+
+    if isinstance(value, dt.datetime):
+        when = value
+    else:
+        try:
+            when = dt.datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+    # SQLite gives naive datetimes back, and they are stored as UTC
+    return when if when.tzinfo is not None else when.replace(tzinfo=dt.timezone.utc)
+
+
+def _before(value: Any, since: Any) -> bool:
+    """Whether a date of `meta.json` is at or before the start of the previous investigation."""
+    when, start = _aware(value), _aware(since)
+    return when is not None and start is not None and when <= start
+
+
+def scope_state(service: Any, ref_ids: list[str], since: Any = None) -> list[str]:
+    """One line per referential: its published version, what its last version changed, and whether anything
+    arrived since the previous investigation. It saves the agent a `get_referential` per referential."""
+    out: list[str] = []
+    for ref_id in ref_ids[:MAX_STATE_LINES]:
+        meta = service.metas.get(ref_id) or {}
+        bits = [f"version {meta['version']}" if meta.get("version") else "never published"]
+        changed = meta.get("changes") or {}
+        if changed:
+            modified = changed.get("modified")
+            bits.append(f"last version: +{changed.get('added', 0)} / -{changed.get('removed', 0)} / "
+                        f"~{modified if modified is not None else '?'} rows")
+        updated = meta.get("data_updated_at")
+        if updated:
+            bits.append(f"updated {updated}")
+            if since is not None and _before(updated, since):
+                bits.append("nothing new since the previous investigation")
+        out.append(f"- {ref_id}: " + "; ".join(bits))
+    if len(ref_ids) > MAX_STATE_LINES:
+        out.append(f"- … and {len(ref_ids) - MAX_STATE_LINES} more (list_referentials gives them all)")
+    return out
+
+
+def scope_of(task: WatchdogTask) -> frozenset[str] | None:
+    """The referentials of the investigation, or None when it may look at everything its account can read."""
+    return None if task.all_referentials else frozenset(task.referential_ids or [])
+
+
+def question(task: WatchdogTask, service: Any = None, ref_ids: list[str] | None = None,
+             since: Any = None) -> str:
+    """What the agent is asked: the scope, the state of that scope, and the question of the watchdog."""
+    scope = ("every referential this account may read" if task.all_referentials
+             else ", ".join(task.referential_ids or []))
     prompt = (task.prompt or "").strip() or "Report anything unusual in these referentials."
-    return f"Referentials in scope: {scope}.\n\n{prompt}"
+    parts = [f"Referentials in scope: {scope}.", ""]
+    if task.only_new_data:
+        started = _aware(since)
+        when = f" ({started.isoformat(timespec='minutes')})" if started is not None else ""
+        parts += [
+            f"Only what is new matters: report a finding about rows the latest versions added or changed, not "
+            f"about data that was already there at the previous investigation{when}.",
+            "Ask for the changes rather than reading everything again: `get_changes` gives what the last "
+            "version added, removed or modified, and `diff_referential_snapshots` what changed since a past "
+            "version. Say so plainly if a referential keeps no changes to compare.",
+            "",
+        ]
+    lines = scope_state(service, ref_ids, since) if service is not None and ref_ids else []
+    if lines:
+        parts += ["State of the scope right now:", *lines, ""]
+    parts.append(prompt)
+    return "\n".join(parts)
 
 
 def execute(service: Any, task_id: int, trigger: str = "manual", username: str | None = None) -> dict[str, Any]:
@@ -311,20 +398,20 @@ def execute(service: Any, task_id: int, trigger: str = "manual", username: str |
             raise WatchdogError(f"unknown watchdog: {task_id}")
         owner = task.user
         cfg = appsettings.load(db, "assistant")
-        scope = frozenset(task.referential_ids or [])
+        scope = scope_of(task)
         run = WatchdogRun(task_id=task.id, trigger=trigger[:80], status="error", started_at=utcnow())
         db.add(run)
         db.commit()
         notifications: list[dict[str, Any]] = []
         session_id = None
         try:
-            if not scope:
+            if scope is not None and not scope:
                 raise WatchdogError("this watchdog has no referential in its scope")
             if not enabled(cfg):
                 raise WatchdogError("scheduled watchdogs are disabled (Settings › Assistant)")
             if not cfg.configured:
                 raise WatchdogError("the assistant has no inference server or no model yet")
-            if not may_use(current_user(db, service, owner, frozenset(), frozenset())):
+            if not may_use(current_user(db, service, owner, None, frozenset())):
                 raise WatchdogError(f"the account '{owner.username}' may not run a watchdog "
                                     "(administrators and advanced users only)")
             if not (owner.is_active and owner.status == "active") or owner.auth_source == "service":
@@ -333,9 +420,14 @@ def execute(service: Any, task_id: int, trigger: str = "manual", username: str |
             current = current_user(db, service, owner, scope, denied)
             if not agentlib.allowed(cfg, current):
                 raise WatchdogError(f"the account '{owner.username}' is not allowed to use the assistant")
-            unreachable = sorted(r for r in scope if not current.can_read(r))
-            if unreachable:
-                raise WatchdogError("the account cannot read: " + ", ".join(unreachable))
+            if scope is None:
+                # Watching everything is watching everything *that account* reads, which may be nothing at all
+                if not any(current.can_read(r.id) for r in service.refs.values()):
+                    raise WatchdogError(f"the account '{owner.username}' may read no referential at all")
+            else:
+                unreachable = sorted(r for r in scope if not current.can_read(r))
+                if unreachable:
+                    raise WatchdogError("the account cannot read: " + ", ".join(unreachable))
             provider = build(cfg, service.settings, appsettings.load(db, "proxy"))
             token, session_id = _session_for(db, owner)
             # A watchdog only looks: the tools that change something are off whatever the settings allow
@@ -343,11 +435,24 @@ def execute(service: Any, task_id: int, trigger: str = "manual", username: str |
             caller = agentlib.Caller(service.app, service, {"cookie": f"refex_session={token}"}, None, scope)
             worker = agentlib.Agent(caller, read_only, provider, current, agent_mode=True,
                                     system_prompt=default_prompt())
+            in_scope = (sorted(scope) if scope is not None
+                        else sorted(r.id for r in service.refs.values() if current.can_read(r.id)))
+            previous = db.scalars(
+                select(WatchdogRun).where(WatchdogRun.task_id == task.id, WatchdogRun.id != run.id,
+                                          WatchdogRun.finished_at.is_not(None))
+                .order_by(WatchdogRun.id.desc()).limit(1)).first()
+            asked = question(task, service, in_scope, previous.started_at if previous else None)
             final: dict[str, Any] = {}
-            for event in worker.run([{"role": "user", "content": question(task)}]):
-                if event.get("type") == "done":
+            progress: list[dict[str, Any]] = []
+            for event in worker.run([{"role": "user", "content": asked}]):
+                if event.get("type") == "step":
+                    # Written as it happens: an investigation takes minutes, and the interface follows it
+                    progress.append({k: event.get(k) for k in STEP_KEYS})
+                    run.steps = list(progress)
+                    db.commit()
+                elif event.get("type") == "done":
                     final = event
-            run.steps = final.get("steps") or None
+            run.steps = final.get("steps") or progress or None
             if final.get("error"):
                 raise WatchdogError(str(final["error"]))
             verdict, bad = parse_verdict(final.get("content") or "")
@@ -382,6 +487,8 @@ def execute(service: Any, task_id: int, trigger: str = "manual", username: str |
         return run_dict(run)
 
 
+# What is kept, of a step event, in the trace of a run
+STEP_KEYS = ("tool", "arguments", "ok", "summary", "result", "ms")
 KEEP_RUNS = 100
 
 
@@ -485,9 +592,15 @@ def mail_body(service: Any, task: WatchdogTask, run: WatchdogRun) -> str:
 # --------------------------------------------------------------------------- what the API returns
 
 def run_dict(run: WatchdogRun, with_details: bool = True) -> dict[str, Any]:
+    """One investigation as the API returns it, with its trace.
+
+    `running`: it is still going in this process. No `finished_at` and not running means it was interrupted
+    (the service stopped mid-investigation), which the interface says instead of reporting a failure.
+    """
     out = {
         "id": run.id,
         "task_id": run.task_id,
+        "running": run.finished_at is None and is_running(run.task_id),
         "started_at": run.started_at,
         "finished_at": run.finished_at,
         "trigger": run.trigger,
@@ -516,6 +629,8 @@ def task_dict(service: Any, db: Session, task: WatchdogTask) -> dict[str, Any]:
         "user_id": task.user_id,
         "username": task.user.username,
         "referential_ids": task.referential_ids or [],
+        "all_referentials": task.all_referentials,
+        "only_new_data": task.only_new_data,
         "trigger_type": task.trigger_type,
         "schedule": task.schedule,
         "prompt": task.prompt,

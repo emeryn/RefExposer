@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -240,6 +241,61 @@ class SourceSecret(Base):
     updated_by: Mapped[str | None] = mapped_column(String(64))
 
 
+class LlmProfile(Base):
+    """A saved connector to an inference server: where it is, which model, how it generates.
+
+    Several can exist side by side — a small model on a workstation, a bigger one on the GPU server, a gateway
+    — and one is `active`: that is the one the assistant and the watchdogs use. Switching is one click, which
+    is the point: comparing models otherwise means retyping the whole connection.
+
+    Every secret of the profile (the API key, and the values of the extra headers, where a gateway key often
+    lives) is kept in **one encrypted blob** bound to the profile, never in clear and never returned by the
+    API — the same treatment as the secret manager.
+    """
+
+    __tablename__ = "llm_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    description: Mapped[str] = mapped_column(String(300), default="")
+    # The one the assistant uses. Exactly one row has it (see llmprofiles.activate)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    provider: Mapped[str] = mapped_column(String(16), default="ollama")
+    base_url: Mapped[str] = mapped_column(String(500), default="")
+    model: Mapped[str] = mapped_column(String(200), default="")
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
+    timeout: Mapped[int] = mapped_column(Integer, default=120)
+
+    # Generation
+    temperature: Mapped[float] = mapped_column(Float, default=0.2)
+    top_p: Mapped[float] = mapped_column(Float, default=0.95)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=2048)
+    context_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    stop: Mapped[list | None] = mapped_column(JSON)
+    options: Mapped[dict | None] = mapped_column(JSON)
+
+    # Agent mode adapted to a small model (1B, 3B): fewer tools, a shorter prompt, one call at a time
+    small_model: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # {"api_key": ..., "headers": {name: value}} encrypted (AES-256-GCM), bound to this profile
+    secrets_enc: Mapped[str | None] = mapped_column(String(8192))
+    # Names of the extra headers, kept in clear so the interface can list them without their values
+    header_names: Mapped[list | None] = mapped_column(JSON)
+
+    # Result of the last connection test, shown in the list
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_test_error: Mapped[str | None] = mapped_column(String(500))
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (CheckConstraint("provider IN ('ollama', 'openai')", name="ck_llm_profiles_provider"),)
+
+
 class Conversation(Base):
     """Conversation of a user with the assistant, kept until the user deletes it.
 
@@ -254,6 +310,9 @@ class Conversation(Base):
     model: Mapped[str | None] = mapped_column(String(128))
     # Agent mode asked for by the user on this conversation
     agent: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Optional filter chosen by the user: the only referentials the assistant looks at in this conversation.
+    # Empty or absent: its usual reach. A referential it creates during the conversation joins the list.
+    referential_ids: Mapped[list | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now, index=True)
 
@@ -278,9 +337,14 @@ class ChatMessage(Base):
 
 
 class ReferentialSnapshot(Base):
-    """Published version kept for time travel (`storage.time_travel`): the Parquet file of that version, and
-    what it held. The file is a hard link on the published file, so a snapshot costs nothing until the version
-    it shares its blocks with is replaced."""
+    """A published version kept: the Parquet file of that version, and what it held. The file is a hard link on
+    the published file, so a snapshot costs nothing until the version it shares its blocks with is replaced.
+
+    Two ways in: **time travel** (`storage.time_travel`) keeps every version automatically and drops the oldest
+    ones beyond `max_snapshots`, and someone with the manage right **saves the state** before touching
+    something. A saved state is never dropped automatically — it was kept on purpose — and it is what a restore
+    puts back.
+    """
 
     __tablename__ = "referential_snapshots"
 
@@ -298,6 +362,10 @@ class ReferentialSnapshot(Base):
     # The file is encrypted (the referential was confidential when it was published)
     encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
     run_id: Mapped[str | None] = mapped_column(String(64))
+    # Saved by hand rather than kept by time travel: it is labelled, and the retention never drops it
+    manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    label: Mapped[str] = mapped_column(String(200), default="")
+    created_by: Mapped[str | None] = mapped_column(String(64))
 
     __table_args__ = (UniqueConstraint("referential_id", "file", name="uq_snapshots_file"),)
 
@@ -323,8 +391,14 @@ class WatchdogTask(Base):
     description: Mapped[str] = mapped_column(String(500), default="")
     # Account whose rights the investigation runs with (its author, or whoever an administrator chose)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    # The only referentials this watchdog may read: chosen explicitly, never "everything"
+    # The only referentials this watchdog may read, chosen explicitly — unless `all_referentials` is set
     referential_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # Look at everything the account may read, instead of a fixed list: the scope then follows the rights of
+    # that account (and still excludes confidential referentials unless the assistant settings allow them)
+    all_referentials: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Investigate only what is new: the question carries the state of each referential in scope and tells the
+    # agent to report on the rows the latest versions added or changed, not on data already there last time
+    only_new_data: Mapped[bool] = mapped_column(Boolean, default=False)
     trigger_type: Mapped[str] = mapped_column(String(16), default="cron")
     schedule: Mapped[str | None] = mapped_column(String(100))  # crontab expression (cron trigger)
     prompt: Mapped[str] = mapped_column(String(8000), default="")
@@ -370,6 +444,28 @@ class WatchdogRun(Base):
     error: Mapped[str | None] = mapped_column(String(2000))
 
     __table_args__ = (CheckConstraint("status IN ('ok', 'finding', 'error')", name="ck_watchdog_run_status"),)
+
+
+class AlertRead(Base):
+    """An alert one account has marked as read.
+
+    Alerts are not rows: the feed is computed from the state of the referentials and the recorded watchdog runs
+    (alerts.py), so "read" is kept on the side, per account and per alert identifier. `at` is the date the alert
+    carried when it was marked, because the identifier of a referential alert is stable: the same condition
+    happening again (a referential that fails again) comes back unread instead of staying hidden behind an
+    acknowledgement of the previous one.
+    """
+
+    __tablename__ = "alert_reads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    alert_id: Mapped[str] = mapped_column(String(200))
+    # ISO 8601 date of the alert when it was marked; empty for an alert that carries no date
+    at: Mapped[str] = mapped_column(String(40), default="")
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+    __table_args__ = (UniqueConstraint("user_id", "alert_id", name="uq_alert_read"),)
 
 
 class AuditLog(Base):

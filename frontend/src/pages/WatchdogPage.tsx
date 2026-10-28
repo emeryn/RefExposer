@@ -25,6 +25,7 @@ import {
   IconAlertTriangle,
   IconBolt,
   IconCheck,
+  IconCircleOff,
   IconChevronDown,
   IconChevronRight,
   IconClockHour4,
@@ -43,6 +44,7 @@ import { api } from '../api/client';
 import { useAssistant, useReferentials } from '../api/hooks';
 import { useAuth } from '../auth/AuthContext';
 import type { Severity, WatchdogRun, WatchdogTask, WatchdogTemplate } from '../api/types';
+import { AgentSteps } from '../components/AgentSteps';
 import { EmptyState } from '../components/Common';
 import { Markdown } from '../components/Markdown';
 import { describeCron, fmtDate, fmtNumber, fmtRelative } from '../lib/format';
@@ -66,6 +68,8 @@ type Draft = {
   name: string;
   description: string;
   referential_ids: string[];
+  all_referentials: boolean;
+  only_new_data: boolean;
   trigger_type: 'cron' | 'on_sync';
   schedule: string;
   prompt: string;
@@ -81,6 +85,8 @@ const EMPTY: Draft = {
   name: '',
   description: '',
   referential_ids: [],
+  all_referentials: false,
+  only_new_data: false,
   trigger_type: 'cron',
   schedule: '0 7 * * *',
   prompt: '',
@@ -97,6 +103,21 @@ function severityColor(severity: Severity | null | undefined) {
 }
 
 function RunBadge({ run }: { run: WatchdogRun }) {
+  if (run.running)
+    return (
+      <Badge color="blue" variant="light" leftSection={<Loader size={8} color="blue" type="dots" />}>
+        investigating…
+      </Badge>
+    );
+  // No end date and not running any more: the service stopped in the middle of it, which is not a failure
+  if (!run.finished_at)
+    return (
+      <Tooltip label="The service stopped while this investigation was running. Start it again.">
+        <Badge color="gray" variant="light" leftSection={<IconCircleOff size={10} />}>
+          interrupted
+        </Badge>
+      </Tooltip>
+    );
   if (run.status === 'error')
     return (
       <Tooltip label={run.error ?? 'Failed'} multiline maw={360}>
@@ -120,22 +141,26 @@ function RunBadge({ run }: { run: WatchdogRun }) {
 
 function RunCard({ run, taskName }: { run: WatchdogRun; taskName?: string }) {
   const [open, setOpen] = useState(false);
+  // A running investigation is unfolded by itself: its steps are the point of looking at the page
+  const show = open || run.running;
   const detail = useQuery({
     queryKey: ['watchdog-run', run.task_id, run.id],
     queryFn: () => api.watchdogRuns(run.task_id, 50),
-    enabled: open && run.details_markdown === undefined,
+    enabled: show && (run.details_markdown === undefined || run.running),
+    // While it works, the trace is written as it goes: follow it
+    refetchInterval: run.running ? 3000 : false,
   });
-  const full = run.details_markdown !== undefined ? run : detail.data?.find((r) => r.id === run.id);
+  const full = detail.data?.find((r) => r.id === run.id) ?? run;
   return (
     <Card withBorder padding="sm">
       <UnstyledButton onClick={() => setOpen((v) => !v)} w="100%">
         <Group justify="space-between" wrap="nowrap">
           <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
-            {open ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+            {show ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
             <RunBadge run={run} />
             <Text size="sm" truncate>
               {taskName ?? run.name ? <b>{taskName ?? run.name}: </b> : null}
-              {run.summary || run.error || '—'}
+              {run.summary || run.error || (run.running ? 'in progress…' : '—')}
             </Text>
           </Group>
           <Group gap="sm" wrap="nowrap" style={{ flexShrink: 0 }}>
@@ -151,7 +176,7 @@ function RunCard({ run, taskName }: { run: WatchdogRun; taskName?: string }) {
           </Group>
         </Group>
       </UnstyledButton>
-      {open && (
+      {show && (
         <Stack gap="xs" mt="sm" pl={28}>
           {detail.isLoading && <Loader size="sm" />}
           {full?.error && <Alert color="red" variant="light" p="xs">{full.error}</Alert>}
@@ -160,7 +185,8 @@ function RunCard({ run, taskName }: { run: WatchdogRun; taskName?: string }) {
               <Markdown text={full.details_markdown} />
             </Card>
           ) : (
-            !detail.isLoading && (
+            !detail.isLoading &&
+            !run.running && (
               <Text size="sm" c="dimmed">
                 No detail was reported.
               </Text>
@@ -176,14 +202,20 @@ function RunCard({ run, taskName }: { run: WatchdogRun; taskName?: string }) {
             </Group>
           )}
           {!!full?.steps.length && (
-            <Group gap={4}>
-              {full.steps.map((s, i) => (
-                <Tooltip key={i} label={`${JSON.stringify(s.arguments)} → ${s.summary}`} multiline maw={360}>
-                  <Badge size="xs" variant="default" color={s.ok ? undefined : 'red'}>
-                    {s.tool}
-                  </Badge>
-                </Tooltip>
-              ))}
+            <div>
+              <Text size="xs" c="dimmed" mb={4}>
+                What it did ({full.steps.length} step{full.steps.length > 1 ? 's' : ''}) — click one to see what
+                came back
+              </Text>
+              <AgentSteps steps={full.steps} />
+            </div>
+          )}
+          {run.running && !full?.steps.length && (
+            <Group gap="xs">
+              <Loader size="xs" type="dots" />
+              <Text size="xs" c="dimmed">
+                reading the referentials in its scope…
+              </Text>
             </Group>
           )}
           <Text size="xs" c="dimmed">
@@ -224,10 +256,13 @@ function TaskCard({ task, onEdit }: { task: WatchdogTask; onEdit: () => void }) 
     },
     onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
   });
+  // While it is investigating, its executions are shown without being asked for: that is the status
+  const openRuns = showRuns || task.running;
   const runs = useQuery({
     queryKey: ['watchdog-runs', task.id],
     queryFn: () => api.watchdogRuns(task.id),
-    enabled: showRuns,
+    enabled: openRuns,
+    refetchInterval: task.running ? 3000 : false,
   });
 
   return (
@@ -246,11 +281,26 @@ function TaskCard({ task, onEdit }: { task: WatchdogTask; onEdit: () => void }) 
               </Text>
             )}
             <Group gap={6}>
-              {task.referential_ids.map((id) => (
-                <Badge key={id} size="xs" variant="outline" component={Link} to={`/r/${id}`} style={{ cursor: 'pointer' }}>
-                  {id}
-                </Badge>
-              ))}
+              {task.all_referentials ? (
+                <Tooltip label="Everything the account it runs as may read, as its rights change">
+                  <Badge size="xs" variant="light" color="indigo">
+                    every referential
+                  </Badge>
+                </Tooltip>
+              ) : (
+                task.referential_ids.map((id) => (
+                  <Badge key={id} size="xs" variant="outline" component={Link} to={`/r/${id}`} style={{ cursor: 'pointer' }}>
+                    {id}
+                  </Badge>
+                ))
+              )}
+              {task.only_new_data && (
+                <Tooltip label="It is asked about the rows the latest versions added or changed, not the whole data">
+                  <Badge size="xs" variant="light" color="teal">
+                    new data only
+                  </Badge>
+                </Tooltip>
+              )}
             </Group>
           </Stack>
           <Group gap="xs" wrap="nowrap">
@@ -323,14 +373,14 @@ function TaskCard({ task, onEdit }: { task: WatchdogTask; onEdit: () => void }) 
         </SimpleGrid>
 
         <Group gap="xs">
-          <Button variant="subtle" size="xs" onClick={() => setShowRuns((v) => !v)}>
-            {showRuns ? 'Hide' : 'Show'} executions
+          <Button variant="subtle" size="xs" onClick={() => setShowRuns((v) => !v)} disabled={task.running}>
+            {openRuns ? 'Hide' : 'Show'} executions
           </Button>
           <Text size="xs" c="dimmed">
             Runs as {task.username}
           </Text>
         </Group>
-        {showRuns && (
+        {openRuns && (
           <Stack gap={6}>
             {runs.isLoading && <Loader size="sm" />}
             {runs.data?.length === 0 && (
@@ -367,6 +417,8 @@ function Editor({
           name: task.name,
           description: task.description,
           referential_ids: task.referential_ids,
+          all_referentials: task.all_referentials,
+          only_new_data: task.only_new_data,
           trigger_type: task.trigger_type,
           schedule: task.schedule ?? '0 7 * * *',
           prompt: task.prompt,
@@ -388,6 +440,8 @@ function Editor({
     mutationFn: () => {
       const body = {
         ...draft,
+        // Watching everything is a scope of its own: the list is cleared so the two never disagree
+        referential_ids: draft.all_referentials ? [] : draft.referential_ids,
         schedule: draft.trigger_type === 'cron' ? draft.schedule : null,
         user_id: me?.is_admin ? draft.user_id : null,
       };
@@ -410,7 +464,8 @@ function Editor({
       description: d.description || (t.id === 'custom' ? '' : t.description),
     }));
 
-  const ready = draft.name.trim() && draft.referential_ids.length > 0 && draft.prompt.trim();
+  const ready =
+    draft.name.trim() && (draft.all_referentials || draft.referential_ids.length > 0) && draft.prompt.trim();
   return (
     <Modal opened onClose={onClose} title={task ? `Edit “${task.name}”` : 'New watchdog'} size="xl">
       <Stack gap="md">
@@ -449,15 +504,33 @@ function Editor({
           />
         </SimpleGrid>
 
-        <MultiSelect
-          label="Referentials it may read"
-          description="The only ones the investigation can reach. Nothing else exists for it, whatever the model asks for."
-          required
-          searchable
-          data={(refs ?? []).map((r) => ({ value: r.id, label: `${r.name} (${r.id})` }))}
-          value={draft.referential_ids}
-          onChange={(v) => set('referential_ids', v)}
-        />
+        <Card withBorder padding="sm">
+          <Stack gap="sm">
+            <Switch
+              checked={draft.all_referentials}
+              onChange={(e) => set('all_referentials', e.currentTarget.checked)}
+              label="It may look at every referential"
+              description="Instead of a list chosen here. Its scope is then exactly what the account it runs as may read, and follows those rights as they change — confidential referentials stay out unless the assistant settings allow them."
+            />
+            {!draft.all_referentials && (
+              <MultiSelect
+                label="Referentials it may read"
+                description="The only ones the investigation can reach. Nothing else exists for it, whatever the model asks for."
+                required
+                searchable
+                data={(refs ?? []).map((r) => ({ value: r.id, label: `${r.name} (${r.id})` }))}
+                value={draft.referential_ids}
+                onChange={(v) => set('referential_ids', v)}
+              />
+            )}
+            <Switch
+              checked={draft.only_new_data}
+              onChange={(e) => set('only_new_data', e.currentTarget.checked)}
+              label="Only investigate what is new"
+              description="The question carries the published version of each referential in scope and what its last version changed, and asks for a finding about the rows added or changed since the previous investigation — not about data that was already there. Pairs well with “after a synchronization”."
+            />
+          </Stack>
+        </Card>
 
         <Textarea
           label="What to investigate"

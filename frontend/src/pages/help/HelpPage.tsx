@@ -116,7 +116,7 @@ const USER: Section[] = [
               ['Search', 'Multi-criteria search with facets (most frequent values per column, ranges for numbers and dates), and search by a list of values: paste up to 10,000 values to know which ones exist.'],
               ['Schema & profile', 'Columns, types, fill rate, distinct values, min/max. Click a column for its distribution and most frequent values.'],
               ['Changes', 'Rows added, removed and modified by the last version (requires a key).'],
-              ['History & diff', 'Only when the referential keeps its past versions: pick any two and see what was added, removed and modified, with the before and after of each column.'],
+              ['Versions & diff', 'Versions kept: save the state published right now, compare any two of them (added, removed, modified, with the before and after of each column), restore one, or delete one.'],
               ['History', 'Every update: when, why (schedule, manual, upload, import folder, edit), how long, how many rows, and its log.'],
               ['API', 'Documentation generated from the actual schema, with a request builder you can run in the page.'],
               ['Source & configuration', 'Where the data comes from, the validation rules and the definition.'],
@@ -184,7 +184,7 @@ const USER: Section[] = [
       <>
         <P>
           The bell in the header and the <Anchor component={Link} to="/alerts">Alerts</Anchor> page list what
-          needs a look, newest first. The badge counts what arrived since you last opened the page.
+          needs a look, newest first. The badge counts what you have not read yet.
         </P>
         <Table fz="sm" maw={860} mb="sm" withTableBorder>
           <Table.Tbody>
@@ -209,11 +209,18 @@ const USER: Section[] = [
           it found, the <b>log of the failed update</b>, the <b>rules that are failing</b> and by how much, or
           the <b>figures</b> of the drift — plus a link straight to the referential.
         </P>
-        <H>Nothing to tick off</H>
+        <H>Read, and read again</H>
         <P>
-          The list is built from the current state, not from a mailbox: an alert disappears on its own once the
-          thing behind it is fixed, and there is nothing to acknowledge or clean up. You only ever see alerts
-          about referentials you may read.
+          Opening an alert marks it as <b>read</b>, and the envelope on each line marks it read or unread again.
+          Read is yours alone: it changes nothing for your colleagues, and nothing about the referential or the
+          watchdog behind it. An alert you have read <b>comes back unread</b> if the thing behind it happens
+          again — the same referential failing a second time is news.
+        </P>
+        <P>
+          The list itself is built from the current state, not from a mailbox: an alert disappears on its own
+          once the thing behind it is fixed, and there is nothing to clean up. You only ever see alerts about
+          referentials you may read, and an administrator decides which kinds are reported here at all — so a
+          kind missing from the list above is one that was turned off.
         </P>
         <P>
           This is the view inside the application. Getting the same events by e-mail or in a chat channel is a
@@ -321,6 +328,13 @@ ORDER BY e.epss DESC LIMIT 20`}</Shell>
           exist for it either, and it can only change what you could change yourself from the interface. Nothing is
           elevated. Confidential referentials are out of its reach unless an administrator allowed them.
         </P>
+        <H>Pointing it at a few referentials</H>
+        <P>
+          The button at the top of the page narrows a conversation to the referentials it is about. It is
+          optional, and it is there for speed: with a catalogue of a hundred referentials, the agent spends its
+          first steps working out where to look. A conversation keeps its own filter, and a referential it
+          <b> creates</b> for you joins it — narrowing a conversation never stops the work.
+        </P>
         <H>What it can hand you</H>
         <List size="sm" spacing={4} maw={860} mb="sm">
           <List.Item>
@@ -343,6 +357,14 @@ ORDER BY e.epss DESC LIMIT 20`}</Shell>
           A conversation is kept and is yours alone: ask several questions in a row, come back to it later. It lasts
           until you delete it — one conversation, or all of them, from the menu at the top right. Each tool call is
           shown with its result, so you can see where an answer comes from.
+        </P>
+        <H>Which model answers</H>
+        <P>
+          An administrator saves one or more <b>connectors</b> and picks the one in use; you see the result, not
+          the plumbing. When the connector says the model is a <b>small</b> one (1B or 3B), the assistant works
+          with five read-only tools and answers questions over one or two referentials — it will not write a
+          referential, hand you a file or build a query for you. Ask an administrator to switch to a bigger
+          model for that.
         </P>
         <P>
           Answers come from a language model: check anything that matters. The assistant is told never to invent a
@@ -371,10 +393,17 @@ ORDER BY e.epss DESC LIMIT 20`}</Shell>
         <List size="sm" spacing={4} maw={860} mb="sm">
           <List.Item>
             <b>The referentials</b> it may read. Only those: the agent cannot reach anything else, however the
-            question is worded.
+            question is worded. Or <b>every referential</b> its account may read, when the question is about the
+            catalogue as a whole — its reach then follows the rights of that account.
           </List.Item>
           <List.Item>
             <b>When</b> it runs: on a schedule, or right after one of those referentials publishes a new version.
+          </List.Item>
+          <List.Item>
+            <b>Only what is new</b>, if you want it. The question then carries the published version of each
+            referential and what its last version changed, and the agent is asked about the rows added or
+            changed since its previous run instead of the whole data. It pairs naturally with “after a
+            synchronization”.
           </List.Item>
           <List.Item>
             <b>The investigation</b> itself. Three examples are pre-filled for you: shadow IT against the CMDB,
@@ -393,9 +422,15 @@ ORDER BY e.epss DESC LIMIT 20`}</Shell>
         </P>
         <H>Following them</H>
         <P>
-          Each watchdog lists its executions: what started it, the verdict with its severity, the report the agent
-          wrote, the queries it went through, and whether each alert was delivered. <b>Run now</b> starts one on the
+          A watchdog that is working says so, and <b>its executions open by themselves</b>: the steps appear as it
+          goes, so you can see which referential it is reading and what came back. <b>Run now</b> starts one on the
           spot; it takes a moment, since the model is called several times.
+        </P>
+        <P>
+          Once it is over, the same list is how you check its work: the verdict with its severity, the report the
+          agent wrote, every query it went through — click one to see what the tool answered and how long it took —
+          and whether each alert was delivered. A run with no end date and nothing running is one the service
+          interrupted; start it again.
         </P>
       </>
     ),
@@ -939,14 +974,49 @@ POST /api/referentials/pdns/lookup  {"values": [...], "column": "rdata"}`}</Shel
             its sources <b>masked</b>, so personal data does not spread into a derived referential.
           </Text>
         </Alert>
-        <H>Time travel</H>
+        <H>Keeping versions, and going back to one</H>
         <P>
-          Keeping every published version adds a <b>History &amp; diff</b> tab where any two of them can be
-          compared. A kept version is a hard link on the Parquet file, so it costs no space until that version is
-          replaced; the retention policy drops the oldest ones. Set <b>the columns identifying a row</b> (the key by
-          default) so a modified row is told from a new one — without them, a change reads as one removal and one
-          addition. The assistant can read these differences too, which is how it answers "what is new since
-          Monday".
+          The <b>Versions &amp; diff</b> tab of a referential holds what is kept of it. Two things end up there:
+          <b> time travel</b>, which keeps every published version on its own and drops the oldest ones beyond the
+          retention, and <b>Save the current state</b>, which keeps the version published right now with a label —
+          what you do before a migration, a change of source, or anything you may want to undo. A kept version is a
+          hard link on the Parquet file, so it costs no space until that version is replaced, and a state you saved
+          is never dropped automatically.
+        </P>
+        <P>
+          Any two of them are compared there: added, removed and modified rows, with the before and after of each
+          column. Set <b>the columns identifying a row</b> (the key by default) so a modified row is told from a new
+          one — without them, a change reads as one removal and one addition. The assistant reads these differences
+          too, which is how it answers "what is new since Monday".
+        </P>
+        <P>
+          <b>Restore</b> publishes the data of a kept version again. It is published as a <b>new version</b>, not
+          rewound: the history keeps every step, the sorted copies, the profile and the quality rules are computed
+          again, and the state published right now is saved first — so a restore made by mistake is one more restore
+          away. The referential is then <b>frozen</b>, because the next scheduled update would read the source again
+          and undo it.
+        </P>
+        <H>Freezing a referential</H>
+        <P>
+          <b>Freeze this version</b>, in the menu beside <b>Update</b>, keeps the published version as it is: the
+          schedule, the check at startup and the sync folder leave it alone, and an update started by hand is
+          refused while it lasts. Use it while you investigate something, or to hold a version that must not move.
+          The banner on the referential says who froze it and why, with <b>Resume automatic updates</b> next to it.
+        </P>
+        <H>Connectors to a model, and small models</H>
+        <P>
+          <b>Settings › Assistant</b> holds as many <b>connectors</b> as you like — a server, an API, a model,
+          generation parameters — and one is in use. Test one before switching to it, duplicate one to try
+          another model on the same gateway (the copy carries the key), and switch with one click: the chat,
+          the agent and the watchdogs follow immediately. API keys and header values are stored encrypted and
+          never come back out of the server, so the form edits a connector it cannot read.
+        </P>
+        <P>
+          Tick <b>This is a small model</b> for a 1B or 3B: agent mode then offers five read-only tools instead
+          of twenty-five, runs one tool call at a time, concludes within four steps, keeps results and row
+          limits small, uses a short prompt, and runs a tool call the model wrote as text. It answers questions
+          over one or two referentials; it will not write anything. That is a property of the model, which is
+          why it lives on the connector and not in the settings.
         </P>
         <H>Watchdogs</H>
         <P>

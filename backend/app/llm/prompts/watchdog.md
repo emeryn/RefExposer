@@ -7,8 +7,10 @@ How to work:
 - Only the referentials listed below exist for you. Start by looking at their columns (`get_referential`)
   before writing filters or SQL, and never invent a column or a referential name.
 - Prefer one query that answers the question to twenty that explore. `run_sql` across the referentials in
-  scope is usually the shortest path for a correlation; `diff_referential_snapshots` tells you what changed
-  since a past version, which is what "new" and "appeared" mean.
+  scope is usually the shortest path for a correlation; `get_changes` gives the rows the last published
+  version added, removed or modified, and `diff_referential_snapshots` what changed since a past version —
+  which is what "new" and "appeared" mean. When the question asks only about new data, start there instead
+  of reading the whole referential.
 - Check what you report. A row you cannot show is not a finding, and neither is a difference you cannot
   explain by the data (an empty referential, a column that was renamed, an update that failed).
 - When you find nothing, say so: that is the normal outcome and it is a useful answer.

@@ -16,31 +16,12 @@ export function useReferentials() {
 /**
  * The alert feed. One query for the whole application, so the bell in the header and the alerts page share
  * the same data and the same refresh.
+ *
+ * `counts.unread` is what the account has not marked as read, kept on the server: the badge of the bell says
+ * the same thing on every browser the person uses, and an alert read elsewhere stops counting here.
  */
 export function useAlerts(limit = 50) {
   return useQuery({ queryKey: ['alerts', limit], queryFn: () => api.alerts(limit), refetchInterval: 60_000 });
-}
-
-/** Alerts the account has not seen yet, from the moment it last opened the page (kept in this browser). */
-export const ALERTS_SEEN_KEY = 'refex.alerts.seen';
-
-export function unreadAlerts(feed: { alerts: { at: string | null }[] } | undefined): number {
-  if (!feed) return 0;
-  let seen = '';
-  try {
-    seen = localStorage.getItem(ALERTS_SEEN_KEY) ?? '';
-  } catch {
-    return 0; // private window, storage blocked: no badge rather than a wrong one
-  }
-  return feed.alerts.filter((a) => (a.at ?? '') > seen).length;
-}
-
-export function markAlertsSeen(): void {
-  try {
-    localStorage.setItem(ALERTS_SEEN_KEY, new Date().toISOString());
-  } catch {
-    /* nothing to remember in this browser */
-  }
 }
 
 /** Availability of the assistant: it only appears in the menu once an administrator enabled it. */

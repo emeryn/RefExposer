@@ -11,10 +11,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 from . import __version__
 from . import appsettings, logsetup, network, syslog
 from . import mcp
-from .api import admin, admin_referentials, alerts_api, assistant_api, auth, config_transfer, discovery_api, endpoints_api, federation_api, notifications_api, branding, catalog, records, referentials, secrets_api, settings_api, system, tasks_api, watchdog_api
+from .api import admin, admin_referentials, alerts_api, assistant_api, auth, llm_profiles, config_transfer, discovery_api, endpoints_api, federation_api, notifications_api, branding, catalog, records, referentials, secrets_api, settings_api, system, tasks_api, watchdog_api
 from .auth import bootstrap_admin, purge_expired_sessions
 from .crypto import check_key
-from . import secretstore
+from . import llmprofiles, secretstore
 from .db import dispose_db, init_db, session_factory
 from .api.deps import ORJSONResponse
 from .service import Service
@@ -91,6 +91,8 @@ async def lifespan(app: FastAPI):
     appsettings.clear_cache()
     with session_factory()() as db:
         bootstrap_admin(db, settings)
+        # An instance configured before the profiles existed gets its connection as a profile, once
+        llmprofiles.bootstrap(db)
         purge_expired_sessions(db)
         network.set_proxy(appsettings.load(db, "proxy"))
         if not settings.local_login:
@@ -148,6 +150,7 @@ app.include_router(mcp.router, prefix="/api")
 app.include_router(assistant_api.router, prefix="/api")
 app.include_router(watchdog_api.router, prefix="/api")
 app.include_router(alerts_api.router, prefix="/api")
+app.include_router(llm_profiles.router, prefix="/api")
 app.include_router(discovery_api.router, prefix="/api")
 app.include_router(notifications_api.router, prefix="/api")
 app.include_router(config_transfer.router, prefix="/api")
