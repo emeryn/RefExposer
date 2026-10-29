@@ -559,6 +559,218 @@ export interface AlertFeed {
   kinds: AlertKind[];
 }
 
+// --------------------------------------------------------------------------- relational search
+
+/** One kind of identifier the instance recognises, and the columns of the catalogue that hold it. */
+export interface EntityType {
+  name: string;
+  label: string;
+  description: string;
+  /** Shown first: the identifiers an investigation usually starts from */
+  pivot: boolean;
+  columns: EntityColumn[];
+}
+
+export interface EntityColumn {
+  referential_id: string;
+  referential_name: string;
+  category: string;
+  column: string;
+  type: string;
+  entity: string;
+  /** The definition says so, rather than the values of the column */
+  declared: boolean;
+  /** A lookup here only reads the relevant blocks (sorted or indexed column) */
+  fast: boolean;
+  /** Why this column cannot be looked up, when it cannot (a referential too large to be read whole) */
+  refused: string | null;
+}
+
+export interface EntityCatalogue {
+  types: EntityType[];
+  categories: string[];
+  /** A value does not have to be an identifier: `auto` also searches the text of the catalogue */
+  match_modes: { name: MatchMode; description: string }[];
+  limits: { max_depth: number; max_nodes: number; max_rows_per_lookup: number; budget_seconds: number };
+}
+
+/**
+ * How a value is looked for. `auto` does both passes, which is what makes an investigation a superset of the
+ * global search rather than a narrower mode beside it.
+ */
+export type MatchMode = 'auto' | 'exact' | 'text';
+
+/** One relational search. The same object is what a saved search stores and replays. */
+export interface InvestigationSpec {
+  /** A single seed; `values` takes several. One of the two is required. */
+  value?: string;
+  /** Several seeds: what ties them together comes back in `connections` */
+  values?: string[];
+  entity?: string | null;
+  depth?: number;
+  scope?: string[];
+  follow?: string[];
+  rows_per_lookup?: number;
+  max_nodes?: number;
+  match?: MatchMode;
+}
+
+/** A value of the graph, or a referential that evidences one. */
+export interface GraphNode {
+  id: string;
+  /** `entity`: a value · `query`: the free text that was asked about · `source`: a referential */
+  kind: 'entity' | 'query' | 'source';
+  entity: string | null;
+  value: string;
+  label: string;
+  category?: string;
+  depth: number;
+  rows: number;
+  referentials: string[];
+  seed?: boolean;
+  /** Which seed this is, when it is one */
+  seed_index?: number;
+  /** The seeds this node was reached from: more than one makes it a meeting point */
+  seeds: number[];
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  /** `found_in`: the value is in that referential · `same_row`: the two values share one of its rows */
+  kind: 'found_in' | 'same_row';
+  referential_id: string;
+  label: string;
+  rows: number;
+}
+
+/** The rows of one referential that are the evidence behind an edge. */
+export interface InvestigationHit {
+  referential_id: string;
+  referential_name: string;
+  category: string;
+  /** The typed column for an exact hit; `text` when the row merely mentions the value */
+  column: string;
+  /** null for a text hit: no single column is the reason */
+  entity: string | null;
+  values: string[];
+  row_count: number;
+  rows: Row[];
+  /** `exact`: a typed lookup · `text`: the value is mentioned somewhere in the row */
+  how: 'exact' | 'text';
+}
+
+/** One seed of an investigation, as it was read. */
+export interface InvestigationSeed {
+  index: number;
+  /** null when the value is not a recognised identifier: it was searched as text */
+  entity: string | null;
+  value: string;
+  id: string;
+  candidates: string[];
+  type: EntityType | null;
+  /** Which passes actually ran for this seed */
+  searched: { exact: boolean; text: boolean };
+}
+
+/** One step of a chain of evidence between two seeds. */
+export interface ConnectionStep {
+  id: string;
+  label: string;
+  kind: GraphNode['kind'];
+  entity: string | null;
+  /** The referentials whose rows justify this hop (absent on the first step) */
+  via?: string[];
+}
+
+/**
+ * What ties two seeds together: the value both of them reach, and the shortest chain of evidence through it.
+ * Only shared *values* count — two seeds merely living in the same referential is not a link.
+ */
+export interface Connection {
+  seeds: [number, number] | number[];
+  through: { id: string; label: string; kind: GraphNode['kind']; entity: string | null };
+  hops: number;
+  path: ConnectionStep[];
+  /** How many values tie this pair, of which `through` is the closest */
+  meeting_points: number;
+}
+
+/** A value several seeds reach. */
+export interface SharedNode {
+  id: string;
+  kind: GraphNode['kind'];
+  entity: string | null;
+  label: string;
+  seeds: number[];
+  referentials: string[];
+}
+
+export interface Investigation {
+  spec: InvestigationSpec & { values: string[] };
+  /** The first seed, kept for a caller written before several were possible */
+  seed: InvestigationSeed;
+  seeds: InvestigationSeed[];
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  hits: InvestigationHit[];
+  connections: Connection[];
+  shared: SharedNode[];
+  stats: {
+    seeds: number;
+    connections: number;
+    shared: number;
+    referentials_searched: number;
+    referentials_matched: number;
+    columns_searched: number;
+    entities: number;
+    sources: number;
+    edges: number;
+    rows: number;
+    queries: number;
+    truncated: boolean;
+  };
+  warnings: string[];
+  /** Present when the investigation came from replaying a saved search */
+  search?: SavedSearch;
+}
+
+/** What this account may do with a saved search. */
+export type SearchLevel = 'owner' | 'edit' | 'read';
+
+export interface SearchShare {
+  id?: number;
+  level: 'read' | 'edit';
+  user_id: number | null;
+  username?: string | null;
+  group_id: number | null;
+  group?: string | null;
+}
+
+export interface SavedSearch {
+  id: number;
+  name: string;
+  description: string;
+  spec: InvestigationSpec;
+  tags: string[];
+  owner_id: number;
+  owner: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+  last_run_at: string | null;
+  level: SearchLevel;
+  shared: boolean;
+  /** Only served to the owner and to whoever may edit it */
+  shares?: SearchShare[];
+}
+
+/** Features off by default until they have earned their place (Settings › Experimental features). */
+export interface ExperimentalSettings {
+  /** Relational search: the Investigate page, its endpoints and its assistant tools */
+  relational_search: boolean;
+}
+
 /** What counts as an alert here (Settings › Notifications & alerts). */
 export interface AlertsSettings {
   hidden_kinds: AlertKind[];
@@ -1189,6 +1401,7 @@ export interface AllSettings {
   assistant_parameters: Record<string, unknown>;
   alerts: AlertsSettings;
   alert_kinds: AlertKind[];
+  experimental: ExperimentalSettings;
   local_login: boolean;
   log_level: LogLevel;
   public_url: string | null;

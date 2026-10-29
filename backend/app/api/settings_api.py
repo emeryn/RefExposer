@@ -22,7 +22,8 @@ from .deps import get_service, public_base
 
 router = APIRouter(prefix="/admin/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
-Section = Literal["proxy", "ldap", "oidc", "branding", "syslog", "mfa", "mcp", "smtp", "assistant", "alerts"]
+Section = Literal["proxy", "ldap", "oidc", "branding", "syslog", "mfa", "mcp", "smtp", "assistant", "alerts",
+                  "experimental"]
 
 
 
@@ -54,6 +55,8 @@ def get_settings_all(request: Request, db: Session = Depends(get_db), service: S
         # Which kinds the alert feed reports at all (alerts.py); the kinds themselves never change per instance
         "alerts": appsettings.public("alerts", appsettings.load(db, "alerts")),
         "alert_kinds": list(alert_kinds),
+        # Features off by default until they have earned their place (appsettings.ExperimentalSettings)
+        "experimental": appsettings.public("experimental", appsettings.load(db, "experimental")),
         "assistant_default_prompt": assistant_default_prompt(),
         # What the chosen API would receive, so the effective parameters are visible without a call
         "assistant_parameters": parameters_for(appsettings.load(db, "assistant")),

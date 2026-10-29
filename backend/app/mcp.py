@@ -149,6 +149,18 @@ def _compact_preview(data: Any, args: dict[str, Any]) -> Any:
     return data
 
 
+def _compact_investigation(data: Any, args: dict[str, Any]) -> Any:
+    """An investigation for a model: the evidence and the relations, without the full rows of every hit."""
+    if not isinstance(data, dict):
+        return data
+    hits = [{**h, "rows": (h.get("rows") or [])[:3]} for h in data.get("hits") or []]
+    nodes = [{k: n.get(k) for k in ("id", "kind", "entity", "value", "label", "depth", "rows", "referentials",
+                                    "seeds")}
+             for n in data.get("nodes") or []]
+    return {k: data.get(k) for k in ("seeds", "stats", "warnings", "connections", "shared") if k in data} | {
+        "hits": hits, "nodes": nodes, "relations": data.get("edges") or []}
+
+
 def _compact_detail(data: Any, args: dict[str, Any]) -> Any:
     if isinstance(data, dict) and isinstance(data.get("current_run"), dict):
         run = data["current_run"]
@@ -179,6 +191,38 @@ TOOLS: list[Tool] = [
          lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/lookup/{_p(a['value'])}", None, None)),
     Tool("search", "Search a value in every referential.", {"q": S, "limit": I}, ("q",),
          lambda a: ("GET", "/api/search", {"q": a["q"], "limit": a.get("limit", 5)}, None)),
+    Tool("investigate",
+         "What the whole catalogue ties to a value: the referentials carrying it, the rows that are the evidence, and the "
+         "relations they lead to. A superset of `search`, so prefer it: an identifier (CVE, IP, network, domain, hash, CPE, "
+         "CWE, ATT&CK technique, e-mail, AS number) is recognised and looked up in every column holding that kind of value "
+         "whatever each source calls it, *and* the text of the catalogue is searched — so plain text (a vendor, a product, "
+         "a binary, a label) works too and is never refused. `depth` 2 or 3 follows the identifiers found in the matching "
+         "rows, which is how a CVE reaches the products, exploits and techniques tied to it, or how a vendor name reaches "
+         "its CVEs. Pass **several** values (`values`) to answer what ties them together: `connections` then gives the "
+         "shortest chain of evidence between each pair, through a value both of them reach, and each hop names the "
+         "referential whose rows justify it. Two values only meet where their expansions overlap, so use depth 2 or 3 for "
+         "that. `match`: auto (both, the default), exact (typed lookups only), text (like `search`). `follow` restricts "
+         "the expansion to some entity types, `scope` to some referentials or `category:<name>`.",
+         {"value": S, "values": {"type": "array", "items": S,
+                                 "description": "Several values at once: `connections` then reports what ties them "
+                                                "together and the shortest chain of evidence between each pair"},
+          "entity": S, "depth": I, "scope": {"type": "array", "items": S},
+          "follow": {"type": "array", "items": S}, "rows_per_lookup": I,
+          "match": {"type": "string", "enum": ["auto", "exact", "text"]}}, (),
+         lambda a: ("POST", "/api/investigate", None,
+                    {"depth": min(int(a.get("depth") or 1), 3),
+                     "rows_per_lookup": min(int(a.get("rows_per_lookup") or 5), 20),
+                     **{k: a[k] for k in ("value", "values", "entity", "scope", "follow", "match") if a.get(k)}}),
+         shape=_compact_investigation),
+    Tool("entity_types",
+         "The kinds of identifier this instance recognises, and which referential column holds each one. Call it to find "
+         "out what `investigate` can pivot on before guessing.",
+         {}, (), lambda a: ("GET", "/api/investigate/entities", None, None)),
+    Tool("list_saved_searches", "Relational searches this account owns or had shared with it.", {}, (),
+         lambda a: ("GET", "/api/searches", None, None)),
+    Tool("run_saved_search", "Replay a saved relational search (see list_saved_searches) with the rights of this account.",
+         {"id": I}, ("id",), lambda a: ("POST", f"/api/searches/{int(a['id'])}/run", None, None),
+         shape=_compact_investigation),
     Tool("run_sql", "Read-only DuckDB SQL over the referentials (tables named after the referentials, see sql_schema).",
          {"sql": S, "max_rows": I}, ("sql",),
          lambda a: ("POST", "/api/sql", None, {"sql": a["sql"], "max_rows": min(int(a.get("max_rows") or 100), 1000)})),
@@ -293,6 +337,10 @@ USER_TOOLS: list[Tool] = [
          lambda a: ("POST", f"/api/referentials/{_p(a['id'])}/lookup", None,
                     {k: a[k] for k in ("values", "column") if a.get(k) is not None})),
     _TOOL["search"],
+    _TOOL["investigate"],
+    _TOOL["entity_types"],
+    _TOOL["list_saved_searches"],
+    _TOOL["run_saved_search"],
     Tool("column_stats", "Statistics of a column: distinct values, most frequent ones, min / max.", {"id": REF_ID, "column": S},
          ("id", "column"), lambda a: ("GET", f"/api/referentials/{_p(a['id'])}/columns/{_p(a['column'])}/stats", None, None)),
     Tool("get_changes", "Rows added, removed or modified by the last version.",
@@ -321,11 +369,27 @@ USER_TOOLS: list[Tool] = [
     _TOOL["sql_schema"],
 ]
 SQL_TOOLS = {"run_sql", "sql_schema"}
+# Tools of an experimental feature: offered only where an administrator turned the feature on, so a model is
+# never handed a tool whose endpoint would answer "not enabled here"
+EXPERIMENTAL_TOOLS = {"relational_search": frozenset({"investigate", "entity_types", "list_saved_searches",
+                                                      "run_saved_search"})}
+
+
+def hidden_tools(db: Any) -> frozenset[str]:
+    """Tool names to leave out, given which experimental features are off on this instance."""
+    from . import appsettings
+
+    cfg = appsettings.load(db, "experimental")
+    return frozenset(name for feature, names in EXPERIMENTAL_TOOLS.items()
+                     if not getattr(cfg, feature, False) for name in names)
 
 USER_INSTRUCTIONS = (
     "RefExposer exposes referentials (threat intelligence, IP ranges, vulnerabilities, internal lists...) as tables. "
     "Start with list_referentials, then get_referential for the columns of one. Exact values: lookup or lookup_many on the "
-    "key; filters and text search: query_rows; a value in every referential: search. What changed since a past version: "
+    "key; filters and text search: query_rows. A value and everything tied to it across the catalogue: investigate — it "
+    "recognises an identifier (CVE, IP, domain, hash, CPE...) and looks it up in every column holding that kind of value, "
+    "and it searches the text too, so plain words work as well; prefer it to search, which only lists matches. "
+    "entity_types says what it recognises. What changed since a past version: "
     "list_referential_snapshots, then diff_referential_snapshots. You only see the referentials your account may read, "
     "and the personal data columns of a referential that has any are masked."
 )
@@ -373,10 +437,12 @@ class McpCaller:
     """Calls the REST API in-process, with the token of the caller (elevated by a signed header on the admin server)."""
 
     def __init__(self, request: Request, token: str, token_id: int, read_only: bool, profile: Profile = ADMIN,
-                 can_sql: bool = True):
+                 can_sql: bool = True, hidden: frozenset[str] = frozenset()):
         self.request, self.token, self.token_id, self.read_only = request, token, token_id, read_only
         self.profile = profile
-        self.tools = [t for t in profile.tools if not (t.write and read_only) and (can_sql or t.name not in SQL_TOOLS)]
+        self.tools = [t for t in profile.tools
+                      if not (t.write and read_only) and (can_sql or t.name not in SQL_TOOLS)
+                      and t.name not in hidden]
         self.by_name = {t.name: t for t in self.tools}
 
     def endpoints(self, text: str) -> list[dict[str, str]]:
@@ -471,14 +537,18 @@ for _path in ("/mcp", "/mcp/user"):
 
 
 @router.post("/mcp", summary="Administration MCP server (JSON-RPC 2.0, Streamable HTTP)")
-async def mcp_post(request: Request, account: dict[str, Any] = Depends(mcp_account)):
-    return await _serve(request, McpCaller(request, account["token"], account["token_id"], account["read_only"]))
+async def mcp_post(request: Request, account: dict[str, Any] = Depends(mcp_account),
+                   db: Session = Depends(get_db)):
+    return await _serve(request, McpCaller(request, account["token"], account["token_id"], account["read_only"],
+                                           hidden=hidden_tools(db)))
 
 
 @router.post("/mcp/user", summary="MCP data server: the referentials readable with the token (JSON-RPC 2.0, Streamable HTTP)")
-async def mcp_user_post(request: Request, account: dict[str, Any] = Depends(mcp_user_account)):
+async def mcp_user_post(request: Request, account: dict[str, Any] = Depends(mcp_user_account),
+                        db: Session = Depends(get_db)):
     user = account["user"]
-    return await _serve(request, McpCaller(request, account["token"], account["token_id"], True, USER, can_sql=user.can_use_sql))
+    return await _serve(request, McpCaller(request, account["token"], account["token_id"], True, USER,
+                                           can_sql=user.can_use_sql, hidden=hidden_tools(db)))
 
 
 async def _serve(request: Request, caller: McpCaller):

@@ -571,16 +571,34 @@ class AlertsSettings(BaseModel):
 
 M = TypeVar("M", bound=BaseModel)
 
+class ExperimentalSettings(BaseModel):
+    """Features kept **off by default** until they have earned their place.
+
+    An experimental feature is complete and tested, but young: its shape may still change, and the cost of one
+    of its queries is not yet known against every catalogue. Rather than ship it to everyone and discover that
+    on a production instance, an administrator turns it on where it is wanted.
+
+    Turning one off hides it everywhere at once — the menu, the pages, the REST endpoints and the tools of the
+    assistant — so a feature that is off cannot be reached by knowing a URL.
+    """
+
+    # Relational search (investigate.py): start from a value, follow it across the catalogue, keep and share
+    # the searches. Off by default because a deep walk reads a great many referentials, and what that costs
+    # depends on the catalogue it runs against.
+    relational_search: bool = False
+
+
 SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSettings, "oidc": OidcSettings, "branding": BrandingSettings,
                                          "syslog": SyslogSettings, "tasks": TasksSettings,
                                          "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
                                          "notifications": NotificationsSettings, "federation": FederationSettings,
-                                         "assistant": AssistantSettings, "alerts": AlertsSettings}
+                                         "assistant": AssistantSettings, "alerts": AlertsSettings,
+                                         "experimental": ExperimentalSettings}
 # *Names* of the fields kept encrypted in each section — never their values, so these are safe to log
 SECRET_FIELDS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
                                              "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
                                              "notifications": (), "federation": (), "assistant": ("api_key",),
-                                             "alerts": ()}
+                                             "alerts": (), "experimental": ()}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()

@@ -76,6 +76,9 @@ referentials:
 
     key: cveID                      # key: lookup, differences between versions
     search_columns: [cveID, product] # full-text search columns (default: text columns)
+    entities:                       # relational search: corrects what a column holds (investigations.md).
+      cweID: cwe                    # Recognised from the values on its own; declare one only for a column a
+      notes: ""                     # pattern gets wrong, or "" to keep a column out of it entirely.
     schedule: "15 */4 * * *"        # cron (REFEX_TIMEZONE time zone); absent = manual
     max_age: 1d                     # staleness threshold (30m, 12h, 2d, 1w)
     enabled: true

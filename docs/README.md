@@ -30,6 +30,7 @@ Everything about running RefExposer, declaring referentials and opening them to 
 | [Users, rights and authentication](users-and-rights.md) | Roles, rights per referential and per category, service accounts for tools, LDAP / Active Directory, OpenID Connect, access approval, two-factor authentication, and the security of the sign-in itself. |
 | [Search, downloads and the API](api.md) | Searching a referential, the download formats, the generated REST API of each referential, the SQL console sandbox, and the two MCP servers. |
 | [Governance, confidentiality and quality](data-governance.md) | Visibility and ownership, referentials encrypted at rest, masking personal data columns, quality rules and the quality gate, and time travel between published versions. |
+| [Relational search (investigations)](investigations.md) | *Experimental, off by default.* Starting from any value and following it across the catalogue: entity types recognised from the values, the graph of what a value touches, the bounds of a walk, and saved searches shared with accounts or groups. |
 
 ## Watch it
 

@@ -433,8 +433,10 @@ def execute(service: Any, task_id: int, trigger: str = "manual", username: str |
             # A watchdog only looks: the tools that change something are off whatever the settings allow
             read_only = cfg.model_copy(update={"allow_writes": False})
             caller = agentlib.Caller(service.app, service, {"cookie": f"refex_session={token}"}, None, scope)
+            from .mcp import hidden_tools
+
             worker = agentlib.Agent(caller, read_only, provider, current, agent_mode=True,
-                                    system_prompt=default_prompt())
+                                    system_prompt=default_prompt(), hidden_tools=hidden_tools(db))
             in_scope = (sorted(scope) if scope is not None
                         else sorted(r.id for r in service.refs.values() if current.can_read(r.id)))
             previous = db.scalars(

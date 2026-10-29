@@ -26,13 +26,13 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconBell, IconBrush, IconCheck, IconFileText, IconKey, IconLock, IconMail, IconRobot, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconWorldUpload, IconX } from '@tabler/icons-react';
+import { IconBell, IconBrush, IconCheck, IconFileText, IconFlask, IconKey, IconLock, IconMail, IconRobot, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconWorldUpload, IconX } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useBranding } from '../../api/hooks';
-import type { BrandingSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
+import type { BrandingSettings, ExperimentalSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
 import { BrandHeader } from '../../components/Brand';
 import { CodeSnippet, CopyIcon } from '../../components/Common';
 import { SavedSecret } from '../../components/SavedSecret';
@@ -77,6 +77,53 @@ function Steps({ steps }: { steps: TestStep[] }) {
   );
 }
 
+
+function ExperimentalTab({ initial }: { initial: ExperimentalSettings }) {
+  const [cfg, setCfg] = useState(initial);
+  useEffect(() => setCfg(initial), [initial]);
+  const save = useSave('experimental');
+  const dirty = JSON.stringify(cfg) !== JSON.stringify(initial);
+  return (
+    <Grid gutter="md">
+      <Grid.Col span={{ base: 12, lg: 8 }}>
+        <Stack>
+          <Section title="Experimental features" icon={<IconFlask size={18} />}>
+            <Text size="sm" c="dimmed">
+              Features that are complete and tested, but young: their shape may still change, and what one of
+              their queries costs is not yet known against every catalogue. They are <b>off by default</b> so
+              that you decide where to try them, rather than discovering them on a production instance.
+            </Text>
+            <Alert color="gray" variant="light" p="xs">
+              <Text size="xs">
+                Turning one off hides it everywhere at once — the menu, the pages, the REST endpoints and the
+                tools of the assistant. A feature that is off cannot be reached by knowing a URL.
+              </Text>
+            </Alert>
+            <Switch
+              checked={cfg.relational_search}
+              onChange={(e) => setCfg((c) => ({ ...c, relational_search: e.currentTarget.checked }))}
+              label="Relational search (Investigate)"
+              description="Start from a value — an identifier or plain text — and follow it across the whole
+                catalogue: which referentials carry it, the rows that prove it, and a graph of what they lead
+                to. Searches can be kept and shared with accounts or groups. A deep walk reads a great many
+                referentials, so try it on your own catalogue before opening it to everyone."
+            />
+          </Section>
+          <Group>
+            <Button onClick={() => save.mutate(cfg)} loading={save.isPending} disabled={!dirty}>
+              Save
+            </Button>
+            {dirty && (
+              <Text size="xs" c="dimmed">
+                Unsaved changes
+              </Text>
+            )}
+          </Group>
+        </Stack>
+      </Grid.Col>
+    </Grid>
+  );
+}
 
 function Section({ title, children, icon }: { title: string; children: ReactNode; icon?: ReactNode }) {
   return (
@@ -1077,6 +1124,19 @@ export default function SettingsPage() {
           >
             Assistant
           </Tabs.Tab>
+          <Tabs.Tab
+            value="experimental"
+            leftSection={<IconFlask size={16} />}
+            rightSection={
+              data.experimental?.relational_search ? (
+                <Badge size="xs" color="orange">
+                  1 on
+                </Badge>
+              ) : null
+            }
+          >
+            Experimental
+          </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="network">
           <ProxyTab initial={data.proxy} envProxy={data.environment_proxy} />
@@ -1107,6 +1167,9 @@ export default function SettingsPage() {
         </Tabs.Panel>
         <Tabs.Panel value="notifications">
           <NotificationsPage />
+        </Tabs.Panel>
+        <Tabs.Panel value="experimental">
+          <ExperimentalTab initial={data.experimental ?? { relational_search: false }} />
         </Tabs.Panel>
         <Tabs.Panel value="secrets">
           <SecretsPage />

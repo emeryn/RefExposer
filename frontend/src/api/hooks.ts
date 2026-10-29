@@ -28,6 +28,15 @@ export function useAlerts(limit = 50, dismissed = false) {
   });
 }
 
+/**
+ * Availability of the relational search. It is an **experimental feature**, off until an administrator turns
+ * it on, so the menu entry, the route and the assistant tools all follow this one answer rather than letting
+ * the page fail on an endpoint that is not there.
+ */
+export function useInvestigate() {
+  return useQuery({ queryKey: ['investigate-status'], queryFn: api.investigateStatus, staleTime: 60_000 });
+}
+
 /** Availability of the assistant: it only appears in the menu once an administrator enabled it. */
 export function useAssistant() {
   return useQuery({ queryKey: ['assistant'], queryFn: api.assistant, staleTime: 60_000 });

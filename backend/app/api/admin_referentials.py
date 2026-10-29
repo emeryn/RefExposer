@@ -66,7 +66,9 @@ def _clean(config: dict[str, Any]) -> dict[str, Any]:
     for k, v in config.items():
         if v is None or v == "" or v == [] or v == {}:
             continue
-        if isinstance(v, dict) and k not in ("options", "headers"):
+        # Free-form maps whose empty values carry meaning: a reading option set to "", a header deliberately
+        # emptied, a column taken out of the relational search with `entities: {col: ""}`
+        if isinstance(v, dict) and k not in ("options", "headers", "entities"):
             v = _clean(v)
             if not v:  # e.g. quality: {rules: []}
                 continue

@@ -24,6 +24,7 @@ import {
   IconChevronDown,
   IconDatabaseCog,
   IconBell,
+  IconGraph,
   IconDatabasePlus,
   IconDog,
   IconHelp,
@@ -44,7 +45,7 @@ import {
 } from '@tabler/icons-react';
 import { Suspense, lazy, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { useAlerts, useAssistant, useBranding, useReferentials } from './api/hooks';
+import { useAlerts, useAssistant, useBranding, useInvestigate, useReferentials } from './api/hooks';
 import { BrandHeader } from './components/Brand';
 import { useAuth } from './auth/AuthContext';
 import LoginPage from './auth/LoginPage';
@@ -69,6 +70,7 @@ const SqlConsole = lazy(() => import('./pages/SqlConsole'));
 const ChatPage = lazy(() => import('./pages/ChatPage'));
 const WatchdogPage = lazy(() => import('./pages/WatchdogPage'));
 const AlertsPage = lazy(() => import('./pages/AlertsPage'));
+const InvestigatePage = lazy(() => import('./pages/InvestigatePage'));
 const InternalEditor = lazy(() => import('./pages/InternalEditor'));
 const HelpPage = lazy(() => import('./pages/help/HelpPage'));
 
@@ -218,6 +220,7 @@ function Shell() {
   const location = useLocation();
   const { data: refs } = useReferentials();
   const { data: assistant } = useAssistant();
+  const { data: investigate } = useInvestigate();
   const { data: alerts } = useAlerts(200);
 
   const byCategory = useMemo(() => {
@@ -233,6 +236,10 @@ function Shell() {
   const main: { to: string; label: string; icon: typeof IconBell; active: boolean; badge?: number }[] = [
     { to: '/', label: 'Dashboard', icon: IconLayoutDashboard, active: path === '/' },
     { to: '/search', label: 'Global search', icon: IconSearch, active: path.startsWith('/search') },
+    // Experimental, so only once an administrator turned it on (Settings › Experimental features)
+    ...(investigate?.enabled
+      ? [{ to: '/investigate', label: 'Investigate', icon: IconGraph, active: path.startsWith('/investigate') }]
+      : []),
     ...(me?.can_use_sql ? [{ to: '/sql', label: 'SQL console', icon: IconSql, active: path.startsWith('/sql') }] : []),
     // Only when an administrator enabled the assistant for this account
     ...(assistant?.available ? [{ to: '/chat', label: 'Assistant', icon: IconRobot, active: path.startsWith('/chat') }] : []),
@@ -399,6 +406,9 @@ function Shell() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/r/:id/:tab?" element={<ReferentialPage />} />
           <Route path="/search" element={<SearchPage />} />
+          {/* Experimental: the route follows the same answer as the menu, so a bookmarked URL does not
+              open a page whose endpoints are not there */}
+          {investigate?.enabled && <Route path="/investigate" element={<InvestigatePage />} />}
           {me?.can_use_sql && <Route path="/sql" element={<SqlConsole />} />}
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/watchdogs" element={<WatchdogPage />} />

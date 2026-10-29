@@ -470,6 +470,62 @@ class AlertRead(Base):
     __table_args__ = (UniqueConstraint("user_id", "alert_id", name="uq_alert_read"),)
 
 
+class SavedSearch(Base):
+    """A relational search kept by an account, and possibly shared (investigate.py).
+
+    The query itself is `spec`, the plain data an investigation is replayed from: a saved search is a question,
+    not a result. Replaying it reads the catalogue as it is *now*, with the rights of whoever opens it — so a
+    search shared with a colleague shows them what they may read, never what the author may read. Two levels:
+    `read` replays it, `edit` also changes and reshares it.
+    """
+
+    __tablename__ = "saved_searches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(String(1000), default="")
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # The investigation to replay: value, entity type, depth, scope, types followed
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    owner: Mapped[User] = relationship(lazy="joined")
+    shares: Mapped[list["SavedSearchShare"]] = relationship(
+        back_populates="search", cascade="all, delete-orphan", lazy="selectin")
+
+
+class SavedSearchShare(Base):
+    """One account or one group a saved search is shared with, and what they may do with it.
+
+    Shaped like `Grant`: a user or a group, never both. Sharing a search gives access to the *question*, and
+    nothing else — the data each person sees when they replay it still follows their own grants.
+    """
+
+    __tablename__ = "saved_search_shares"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    search_id: Mapped[int] = mapped_column(ForeignKey("saved_searches.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    level: Mapped[str] = mapped_column(String(16), default="read")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+
+    search: Mapped[SavedSearch] = relationship(back_populates="shares")
+    user: Mapped[User | None] = relationship(lazy="joined")
+    group: Mapped[Group | None] = relationship(lazy="joined")
+
+    __table_args__ = (
+        CheckConstraint("(user_id IS NULL) <> (group_id IS NULL)", name="ck_search_share_subject"),
+        CheckConstraint("level IN ('read', 'edit')", name="ck_search_share_level"),
+        UniqueConstraint("search_id", "user_id", "group_id", name="uq_search_share"),
+    )
+
+
 class AuditLog(Base):
     """Kept even when the user is deleted (no foreign key)."""
 

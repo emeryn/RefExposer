@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .. import appsettings
+from .. import appsettings, mcp
 from ..auth import CurrentUser, audit, require_user
 from ..db import get_db
 from ..llm import agent as agentlib
@@ -250,7 +250,8 @@ def send_message(conversation_id: str, body: MessageIn, request: Request, db: Se
     history.append({"role": "user", "content": body.content})
 
     scope = frozenset(conv.referential_ids or []) or None
-    worker = agentlib.Agent(agentlib.Caller.of(request, scope), cfg, provider, user, agent_mode=body.agent)
+    worker = agentlib.Agent(agentlib.Caller.of(request, scope), cfg, provider, user, agent_mode=body.agent,
+                            hidden_tools=mcp.hidden_tools(db))
     audit(db, "assistant.ask", user=user, target=f"conversation:{conv.id}", request=request,
           detail={"agent": worker.agent_mode, "model": cfg.model, "chars": len(body.content),
                   "scope": sorted(scope) if scope else None})

@@ -341,6 +341,10 @@ class ReferentialConfig(BaseModel):
     # that the whole row (a row is then either added or removed, never modified).
     primary_key_columns: list[str] = Field(default_factory=list, max_length=20)
     search_columns: list[str] = Field(default_factory=list)
+    # {column: entity type} overriding what entities.py recognises from the values — for a column a pattern
+    # gets wrong, or one whose values carry no prefix of their own (a CWE stored as 79). An empty type ("")
+    # takes a column out of the relational search.
+    entities: dict[str, str] = Field(default_factory=dict, max_length=100)
     # Internal referentials only: typed columns of the rows managed in RefExposer
     columns: list[ColumnDef] = Field(default_factory=list)
 
@@ -499,6 +503,19 @@ class ReferentialConfig(BaseModel):
     def _check_max_age(cls, v: str | None) -> str | None:
         if v:
             parse_duration(v)
+        return v
+
+    @field_validator("entities")
+    @classmethod
+    def _check_entities(cls, v: dict[str, str]) -> dict[str, str]:
+        from .entities import BY_NAME
+
+        for column, entity in v.items():
+            if not column.strip():
+                raise ValueError("entities: a column name is empty")
+            if entity and entity not in BY_NAME:
+                raise ValueError(f"entities.{column}: unknown entity type '{entity}' "
+                                 f"(available: {', '.join(sorted(BY_NAME))})")
         return v
 
     @field_validator("options")

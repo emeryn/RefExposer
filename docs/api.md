@@ -14,7 +14,10 @@ The **Search** tab of each referential has two modes:
   - The result separates the values found (with their details) from the missing ones.
   - It can be exported to CSV.
 
-The **Global search** (top bar, `Ctrl+K`) queries every accessible referential at once.
+The **Global search** (top bar, `Ctrl+K`) queries every accessible referential at once and lists the matches.
+[Investigate](investigations.md) is a superset of it: the same text search, plus exact lookups when the value
+is a recognised identifier (found whatever each source calls its column), plus the graph of what the matching
+rows lead to.
 
 ## Downloading a referential
 

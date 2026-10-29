@@ -55,7 +55,9 @@ class Small:
 
     # The tools a small model can actually choose between. Reading only, and no artifact tools: handing back
     # a file or a query is a judgement call that goes wrong more often than it helps at this size.
-    TOOLS = ("list_referentials", "get_referential", "query_rows", "lookup", "search")
+    # `investigate` is offered even here: one call answers what a value touches across the catalogue, where a
+    # small model would otherwise need a search and a lookup per referential
+    TOOLS = ("list_referentials", "get_referential", "query_rows", "lookup", "search", "investigate")
     # Plus this one when the account may use SQL, because one query often replaces four tool calls
     SQL_TOOLS = ("run_sql", "sql_schema")
     # Tool calls honoured per step: the rest of a burst is dropped, with the first result to work from
@@ -296,19 +298,24 @@ def _artifact_tools() -> dict[str, Tool]:
     return ARTIFACT_TOOLS
 
 
-def tools_for(cfg: AssistantSettings, user: CurrentUser) -> list[Tool]:
+def tools_for(cfg: AssistantSettings, user: CurrentUser,
+              hidden: frozenset[str] = frozenset()) -> list[Tool]:
     """The tools offered to the model, which are the ones this account may actually use.
 
     Reading tools come from the data MCP server (the same ones an agent gets with an API token). The tools that
     change something are the administration ones, offered only when writes are allowed; the API then refuses
     anything this account may not do, exactly as in the interface.
 
+    `hidden` drops the tools of an experimental feature an administrator has not turned on, so the model is
+    never offered a call whose endpoint would only answer that the feature is off (mcp.hidden_tools).
+
     A small model gets a short list: the choice is the hard part at that size, not the call.
     """
     if cfg.small_model:
-        wanted = set(Small.TOOLS) | (set(Small.SQL_TOOLS) if user.can_use_sql else set())
+        wanted = (set(Small.TOOLS) | (set(Small.SQL_TOOLS) if user.can_use_sql else set())) - hidden
         return [t for t in USER_TOOLS if t.name in wanted]
-    tools = [t for t in USER_TOOLS if t.name not in ("run_sql", "sql_schema") or user.can_use_sql]
+    tools = [t for t in USER_TOOLS
+             if t.name not in hidden and (t.name not in ("run_sql", "sql_schema") or user.can_use_sql)]
     tools += list(_artifact_tools().values())
     if user.can_use_sql:
         tools.append(TOOLS_BY_NAME["preview_source"])
@@ -373,14 +380,15 @@ class Agent:
     """Runs one exchange: the model answers, calls tools, reads their results and answers again."""
 
     def __init__(self, caller: Caller, cfg: AssistantSettings, provider: Provider, user: CurrentUser,
-                 agent_mode: bool, system_prompt: str | None = None):
+                 agent_mode: bool, system_prompt: str | None = None,
+                 hidden_tools: frozenset[str] = frozenset()):
         self.caller = caller
         self.cfg = cfg
         self.provider = provider
         self.user = user
         self.agent_mode = agent_mode and cfg.agent_enabled
         self.guard = Guard(frozenset() if cfg.allow_confidential else confidential_ids(caller.service))
-        self.tools = tools_for(cfg, user) if self.agent_mode else []
+        self.tools = tools_for(cfg, user, hidden_tools) if self.agent_mode else []
         self.by_name = {t.name: t for t in self.tools}
         # Replaces the prompt of the settings (a watchdog has its own job and its own answer format)
         self.base_prompt = system_prompt

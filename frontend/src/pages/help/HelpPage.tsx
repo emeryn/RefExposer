@@ -249,6 +249,11 @@ const USER: Section[] = [
           descriptions… Exact matches on a referential key come first.
         </P>
         <P>
+          For an <b>identifier</b> rather than free text — a CVE, an address, a domain, a hash —{' '}
+          <Anchor component={Link} to="/investigate">Investigate</Anchor> goes further: it recognises what the value
+          is, finds it whatever each source calls its column, and follows it to what it touches.
+        </P>
+        <P>
           Inside a referential, the <b>Search</b> tab combines a text search with facets: click values to filter, set ranges on numbers
           and dates, then open the result in the explorer or export it.
         </P>
@@ -285,6 +290,119 @@ const USER: Section[] = [
             each index takes about the size of the data.
           </Text>
         </Alert>
+      </>
+    ),
+  },
+  {
+    id: 'investigate',
+    title: 'Investigate',
+    // An experimental feature: the section is only of use where an administrator turned it on
+    body: () => (
+      <>
+        <Alert color="orange" variant="light" maw={860} p="sm" mb="sm">
+          <Text size="sm">
+            <b>Experimental feature.</b> If you cannot see <i>Investigate</i> in the menu, an administrator has
+            not turned it on for this instance (<i>Settings › Experimental</i>). It works, but it is young:
+            what it looks like may still change.
+          </Text>
+        </Alert>
+        <P>
+          Global search answers <i>is this value somewhere?</i>.{' '}
+          <Anchor component={Link} to="/investigate">Investigate</Anchor> answers the question behind it:{' '}
+          <b>what does this value touch?</b> — which referentials carry it, which rows prove it, and what those
+          rows lead to. Anything global search finds, it finds: it is the same search plus the relations.
+        </P>
+        <P>
+          Type an <b>identifier</b> — a CVE, an IP address, a network, a domain, a hash, a CPE, a CWE, an
+          ATT&amp;CK technique, an e-mail address, an AS number — and it is recognised for <b>what it is</b>, so
+          it is found whatever each source calls the column holding it: the same CVE is <Code>cveID</Code> in one
+          feed, <Code>cve</Code> in the next and <Code>id</Code> in the third, and you never have to know which.
+        </P>
+        <P>
+          Or type <b>anything at all</b>: a vendor, a product, a binary name, a few words. That is searched as
+          text across your referentials, and the identifiers found in the matching rows are the way into the
+          graph — searching <Code>Palo Alto</Code> reaches the CVEs of that vendor, and from there everything
+          tied to them. For an identifier both happen at once, which is how a CVE merely <i>mentioned</i> in an
+          incident note turns up next to the feeds that carry it properly. Each result says whether it was an{' '}
+          <b>exact</b> match on a column or a <b>mention</b> in the row. <b>How to look</b> lets you ask for one
+          pass only.
+        </P>
+        <H>Several values: what ties them together</H>
+        <P>
+          Add as many values as you like (up to eight). The question then becomes not what each one touches but{' '}
+          <b>what links them</b>: the page finds the values they <b>both</b> reach and shows the shortest chain
+          of evidence between each pair, with the referential that justifies every hop — so you can read the
+          rows behind the link rather than take it on trust.
+        </P>
+        <P>
+          Two values merely living in the same referential is <b>not</b> a link: every CVE is in the EPSS feed,
+          so that would tie any two of them together and tell you nothing. A link runs through a shared{' '}
+          <i>value</i> — a technique, a product, an address. And two values only meet where their searches
+          overlap, so if nothing comes back, raising the <b>depth</b> is usually what finds it; the page says so
+          instead of leaving you to guess.
+        </P>
+        <H>Depth: from a value to a picture</H>
+        <P>
+          At depth 1 you get where the value is, plus the identifiers sitting in the same rows — the affected
+          platform, the weakness, the technique, the host serving an exploit. Raise the <b>depth</b> to 2 or 3 and
+          those are looked up in turn: that is what takes you from one CVE to the products it affects, the
+          exploits that target it, and the other vulnerabilities sharing a technique with it. <b>Only these
+          referentials</b> and <b>only follow these kinds</b> keep a walk to the point.
+        </P>
+        <H>Reading the graph</H>
+        <P>
+          A <b>circle</b> is a value, a <b>square</b> a referential, a <b>diamond</b> the text you searched for.
+          A dashed line puts the value <b>in</b> that referential; a solid arrow means two values{' '}
+          <b>share a row</b> of it. Click any node to see the rows behind it, open the referential, or start a new
+          investigation from that value. Nothing in the graph is asserted without a row you can read.
+        </P>
+        <P>
+          With several values, the <b>ring</b> around a node tells you which one reached it, and a{' '}
+          <b>yellow double ring</b> marks a value several of them reach. If the picture comes out too tight — a
+          rich catalogue draws a crowded graph — the <b>spacing</b> slider holds the nodes further apart, live,
+          without searching again; <b>clicking a kind in the legend</b> hides it (the referentials, the URLs,
+          whatever is in the way); and the <b>enlarge</b> button gives the graph the whole window, with the rows
+          of whatever you select in a pane beside it instead of a drawer over the top.
+        </P>
+        <H>Carrying on from what you see</H>
+        <P>
+          You rarely know the right question first. <b>Expand from here</b>, on any value in the graph, adds what
+          that value touches and <b>keeps everything already on screen</b> — so you follow a thread without
+          losing your place. Clicking a <b>row</b> in the panel offers every one of its values with the same
+          button: that is how you follow a product name, a ticket or a label, which no pattern recognises as an
+          identifier.
+        </P>
+        <P>
+          Nothing is drawn twice when the graph grows, and an expansion never invents a link between your
+          values: a value you reach by exploring belongs to the branch you came from. If expanding turns up
+          something several of your values reach, the page tells you and offers to search again — the chains
+          between values are worked out by the search, once, rather than guessed at afterwards.
+        </P>
+        <Alert color="gray" maw={860} p="sm" mb="sm">
+          <Text size="sm">
+            A popular value can be tied to a great deal, so every walk is <b>bounded</b> — nodes, rows, queries and
+            time. When a bound cuts something off, the page says so in a <i>Partial answer</i> notice rather than
+            quietly serving you half the picture. A referential too large to be scanned for a column that is
+            neither sorted nor indexed is skipped and says why.
+          </Text>
+        </Alert>
+        <H>Keeping and sharing a search</H>
+        <P>
+          <b>Keep this search</b> stores the <b>question</b>, not its answer: replaying it later reads the
+          catalogue as it is then, so a referential added since is included. Share one with an account or a group
+          and they can replay it — <b>with their own rights</b>. A colleague with narrower access sees fewer
+          referentials through the very same search, and sharing never widens anybody. <i>Replay and change it</i>{' '}
+          lets them edit it too; deleting stays with you.
+        </P>
+        <P>
+          You can share with <b>your groups and the people in them</b>: signing in does not give everyone the list
+          of accounts. To reach someone outside your groups, share with a group you both belong to.
+        </P>
+        <P>
+          Personal data columns are <b>always masked</b> here, even if you are allowed to reveal them in the Data
+          tab — an investigation spreads values across referentials, which is the last place for a credential or a
+          name to surface.
+        </P>
       </>
     ),
   },

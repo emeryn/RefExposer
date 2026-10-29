@@ -10,6 +10,11 @@ import type {
   BulkResult,
   AlertDetail,
   AlertFeed,
+  EntityCatalogue,
+  Investigation,
+  InvestigationSpec,
+  SavedSearch,
+  SearchShare,
   LlmProfile,
   LlmProfileDraft,
   CatalogEntry,
@@ -180,6 +185,29 @@ export const api = {
       `/api/alerts?limit=${limit}${dismissed ? '&dismissed=true' : ''}${(kinds ?? []).map((k) => `&kind=${enc(k)}`).join('')}`,
     ),
   alert: (id: string) => request<AlertDetail>(`/api/alerts/${enc(id)}`),
+  // Relational search: an experimental feature, so its availability is asked for before anything is shown
+  investigateStatus: () => request<{ enabled: boolean; experimental: boolean }>('/api/investigate/status'),
+  entityCatalogue: () => request<EntityCatalogue>('/api/investigate/entities'),
+  investigate: (spec: InvestigationSpec) => request<Investigation>('/api/investigate', json('POST', spec)),
+  // Saved searches hold the question, not its result: replaying one reads the catalogue as it is then
+  // Deliberately narrow for an ordinary account: its own groups, and the people in them
+  shareTargets: () =>
+    request<{
+      users: { id: number; username: string; display_name: string | null }[];
+      groups: { id: number; name: string; description: string | null }[];
+      scoped_to_groups: boolean;
+    }>('/api/searches/share-targets'),
+  searches: (mine = false) =>
+    request<{ searches: SavedSearch[]; owned: number }>(`/api/searches${mine ? '?mine=true' : ''}`),
+  savedSearch: (id: number) => request<SavedSearch>(`/api/searches/${id}`),
+  createSearch: (body: { name: string; description: string; spec: InvestigationSpec; tags: string[] }) =>
+    request<SavedSearch>('/api/searches', json('POST', body)),
+  updateSearch: (id: number, body: { name: string; description: string; spec: InvestigationSpec; tags: string[] }) =>
+    request<SavedSearch>(`/api/searches/${id}`, json('PUT', body)),
+  deleteSearch: (id: number) => request<{ deleted: number }>(`/api/searches/${id}`, json('DELETE')),
+  shareSearch: (id: number, shares: SearchShare[]) =>
+    request<SavedSearch>(`/api/searches/${id}/shares`, json('PUT', { shares })),
+  runSearch: (id: number) => request<Investigation>(`/api/searches/${id}/run`, json('POST')),
   // Read is per account: `ids` null marks every alert this account can see
   markAlerts: (ids: string[] | null, read = true) =>
     request<{ changed: number; unread: number }>('/api/alerts/read', json('POST', { ids, read })),
