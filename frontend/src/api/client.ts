@@ -175,12 +175,21 @@ export const api = {
     ),
 
   // Alerts: watchdog findings and referential drifts, newest first
-  alerts: (limit = 50, kinds?: string[]) =>
-    request<AlertFeed>(`/api/alerts?limit=${limit}${(kinds ?? []).map((k) => `&kind=${enc(k)}`).join('')}`),
+  alerts: (limit = 50, kinds?: string[], dismissed = false) =>
+    request<AlertFeed>(
+      `/api/alerts?limit=${limit}${dismissed ? '&dismissed=true' : ''}${(kinds ?? []).map((k) => `&kind=${enc(k)}`).join('')}`,
+    ),
   alert: (id: string) => request<AlertDetail>(`/api/alerts/${enc(id)}`),
   // Read is per account: `ids` null marks every alert this account can see
   markAlerts: (ids: string[] | null, read = true) =>
     request<{ changed: number; unread: number }>('/api/alerts/read', json('POST', { ids, read })),
+  // Deleting is per account too: the alert leaves this feed until the thing behind it happens again.
+  // `ids` null takes the whole list concerned — the feed when deleting, the deleted ones when restoring
+  dismissAlerts: (ids: string[] | null, dismissed = true) =>
+    request<{ changed: number; total: number; unread: number; deleted: number }>(
+      '/api/alerts/dismiss',
+      json('POST', { ids, dismissed }),
+    ),
 
   // Watchdogs: scheduled investigations run by the assistant on a fixed scope
   watchdogs: () => request<WatchdogTask[]>('/api/watchdogs'),

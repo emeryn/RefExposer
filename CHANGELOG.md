@@ -30,8 +30,10 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - **Alerts**: one list of what needs a look — watchdog findings, failed updates, stale data, quality rules
   failing, a volume that drifted — with the report, the log, the rules or the figures behind one click.
   Alerts are **marked as read per account** (an alert comes back unread when the thing behind it happens
-  again), and an administrator sets **what counts as an alert** in *Settings › Notifications & alerts*: the
-  kinds reported, the severity below which nothing is, and the volume change that makes a drift.
+  again) and can be **deleted from one account's feed** — out of the list and out of its counts, listed in a
+  *Deleted* tab that puts any of it back, and coming back on its own if the thing behind it happens again.
+  An administrator sets **what counts as an alert** in *Settings › Notifications & alerts*: the kinds
+  reported, the severity below which nothing is, and the volume change that makes a drift.
 - A watchdog can watch **every referential its account may read** instead of a fixed list, and can be asked to
   investigate **only what is new**: its question then carries the published version of each referential in
   scope and what its last version changed, and it is told to ask for the changes (`get_changes`,
@@ -61,6 +63,19 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   with public defaults. Scripts mirror the base images and vendor the dependencies, and a build with nothing
   reachable at all (`--network none`) is documented and verified.
 
+### Fixed
+
+- **Searching or filtering a column whose type is not character data** (a `UUID` key, a `BLOB`) no longer fails
+  with *No function matches the given name and argument types `lower(UUID)`*: such a column reads as text in
+  the interface but is not `VARCHAR` to DuckDB, so every text operation now casts it explicitly — and the
+  prefix search of a large referential, which compares the column with a literal, only uses columns that
+  really are character data.
+- The **Alerts badge in the menu** counted every alert instead of the unread ones, so marking them read left
+  it there; it now says the same thing as the bell in the header.
+- The **referential filter of a conversation** could not be picked with the mouse: its dropdown was rendered in
+  a portal, so a click on an option counted as a click outside the popover and closed it before the pick
+  registered (the keyboard worked). It now opens inside the popover.
+
 ### Changed
 
 - A unified referential now reads its sources **masked**, so personal data does not spread into a derived
@@ -71,6 +86,15 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **The address of a federation peer is no longer concatenated** with the catalog path: an address carrying a
+  query or a fragment (`https://peer/#`) made the call ask for the root of the host instead of the catalog —
+  with the API token of the peer's service account in the header. The address is now rebuilt from its parts,
+  and one carrying `?` or `#` is refused when the peer is saved. The host was, and stays, checked by
+  `network.validate_outbound()` before every call, with redirects not followed.
+- **A rejected settings value is no longer written to the log.** A pydantic validation message quotes the
+  input it refused, and the input there may be a decrypted secret: only the field and the kind of error are
+  logged now. `appsettings.SECRETS` is renamed `SECRET_FIELDS`, which is what it holds — the *names* of the
+  encrypted fields.
 - The frontend is built on **`nginx-unprivileged:*-alpine-slim`**: 21 OS packages instead of 71, without the
   dynamic modules it never used (xslt, image-filter, njs) nor `curl`. `libxml2`, `libcurl` and `brotli` are
   not in the image at all, which clears eight advisories a registry scanner was reporting — three of them with

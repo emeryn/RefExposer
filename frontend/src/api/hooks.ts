@@ -20,8 +20,12 @@ export function useReferentials() {
  * `counts.unread` is what the account has not marked as read, kept on the server: the badge of the bell says
  * the same thing on every browser the person uses, and an alert read elsewhere stops counting here.
  */
-export function useAlerts(limit = 50) {
-  return useQuery({ queryKey: ['alerts', limit], queryFn: () => api.alerts(limit), refetchInterval: 60_000 });
+export function useAlerts(limit = 50, dismissed = false) {
+  return useQuery({
+    queryKey: ['alerts', limit, dismissed],
+    queryFn: () => api.alerts(limit, undefined, dismissed),
+    refetchInterval: 60_000,
+  });
 }
 
 /** Availability of the assistant: it only appears in the menu once an administrator enabled it. */

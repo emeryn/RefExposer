@@ -11,7 +11,7 @@ import re
 import threading
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 
 from .crypto import decrypt, encrypt
@@ -576,10 +576,11 @@ SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSett
                                          "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
                                          "notifications": NotificationsSettings, "federation": FederationSettings,
                                          "assistant": AssistantSettings, "alerts": AlertsSettings}
-SECRETS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
-                                       "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
-                                       "notifications": (), "federation": (), "assistant": ("api_key",),
-                                       "alerts": ()}
+# *Names* of the fields kept encrypted in each section — never their values, so these are safe to log
+SECRET_FIELDS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
+                                             "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
+                                             "notifications": (), "federation": (), "assistant": ("api_key",),
+                                             "alerts": ()}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()
@@ -589,7 +590,7 @@ def _read(db: Session, key: str) -> BaseModel:
     model = SECTIONS[key]
     row = db.get(AppSetting, key)
     data = dict(row.value) if row else {}
-    for f in SECRETS[key]:
+    for f in SECRET_FIELDS[key]:
         if data.get(f):
             try:
                 data[f] = decrypt(data[f])
@@ -598,8 +599,14 @@ def _read(db: Session, key: str) -> BaseModel:
                 data[f] = ""
     try:
         return model.model_validate(data)
+    except ValidationError as e:
+        # Only which field is wrong and why, never the value: a pydantic message quotes the input it
+        # rejected, and the input here may be a decrypted secret
+        log.error("Invalid %s settings, defaults used: %s", key,
+                  "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['type']}" for err in e.errors()))
+        return model()
     except Exception as e:  # noqa: BLE001
-        log.error("Invalid %s settings, defaults used: %s", key, e)
+        log.error("Invalid %s settings, defaults used: %s", key, type(e).__name__)
         return model()
 
 
@@ -627,7 +634,7 @@ def load(db: Session, key: str) -> BaseModel:
 def merge_secrets(key: str, incoming: dict[str, Any], current: BaseModel) -> dict[str, Any]:
     """Empty or missing secrets keep the stored value; `<field>_clear: true` removes it."""
     data = dict(incoming)
-    for f in SECRETS[key]:
+    for f in SECRET_FIELDS[key]:
         if data.pop(f"{f}_clear", False):
             data[f] = ""
         elif not data.get(f):
@@ -637,7 +644,7 @@ def merge_secrets(key: str, incoming: dict[str, Any], current: BaseModel) -> dic
 
 def save(db: Session, key: str, value: BaseModel, username: str | None) -> None:
     stored = value.model_dump()
-    for f in SECRETS[key]:
+    for f in SECRET_FIELDS[key]:
         if stored.get(f):
             stored[f] = encrypt(stored[f])
     row = db.get(AppSetting, key)
@@ -658,7 +665,7 @@ def audit_safe(key: str, value: BaseModel) -> dict[str, Any]:
     """
     out: dict[str, Any] = {}
     for name, field in value.model_dump().items():
-        if name in SECRETS[key]:
+        if name in SECRET_FIELDS[key]:
             out[name] = "***" if field else ""
         elif name == "headers" and isinstance(field, dict):
             out[name] = {h: "***" for h in field}
@@ -669,7 +676,7 @@ def audit_safe(key: str, value: BaseModel) -> dict[str, Any]:
 
 def public(key: str, value: BaseModel) -> dict[str, Any]:
     data = value.model_dump()
-    for f in SECRETS[key]:
+    for f in SECRET_FIELDS[key]:
         data[f"{f}_set"] = bool(data.get(f))
         data[f] = ""
     return data

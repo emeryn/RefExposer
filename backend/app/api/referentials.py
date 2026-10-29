@@ -22,7 +22,7 @@ from ..config import ReferentialConfig
 from ..db import get_db
 from ..engine import SqlError, SqlTimeout, rows_to_records
 from ..service import Service
-from ..sqlbuild import OPERATORS, QueryError, TableQuery, lit, parquet_reader, parse_filters, qi, type_kind
+from ..sqlbuild import OPERATORS, QueryError, TableQuery, is_sql_text, lit, parquet_reader, parse_filters, qi, text_expr, type_kind
 from ..storage import RefPaths, iso, utcnow
 from .deps import get_ref, get_ref_with_data, get_service, require_table
 from ..bloom import normalize as bloom_normalize
@@ -157,8 +157,7 @@ def _key_source(service: Service, ref: ReferentialConfig, reveal: bool = False) 
     """(table or sorted copy to read, condition template) for exact lookups on the key."""
     cols = _columns(service, ref)
     view = _views(service, ref, reveal).get(ref.key) or _source(service, ref, reveal)
-    direct = type_kind(cols.get(ref.key, "VARCHAR")) == "text"
-    return view, (qi(ref.key) if direct else f"CAST({qi(ref.key)} AS VARCHAR)")
+    return view, text_expr(ref.key, cols.get(ref.key, "VARCHAR"))
 
 
 def _run_query(fn):
@@ -467,7 +466,7 @@ def lookup_batch(
     cols = _columns(service, ref)
     shown = _reveal(db, request, ref, user, reveal)
     view = _views(service, ref, shown).get(column) or _source(service, ref, shown)
-    if type_kind(cols[column]) == "text":
+    if is_sql_text(cols[column]):
         # Constant IN list: pushed down to the parquet scan (row groups skipped on sorted data)
         sql = f"SELECT {k} AS __key, * FROM {qi(view)} WHERE {k} IN ({', '.join(lit(v) for v in wanted)})"
     else:

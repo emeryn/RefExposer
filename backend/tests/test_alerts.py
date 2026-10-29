@@ -349,3 +349,93 @@ def test_an_alert_this_account_cannot_see_cannot_be_marked(env):
                                         "user_id": _id(env, "reader"), "level": "read"})
     client = new_client(env, "reader", USER_PASSWORD)
     assert client.post("/api/alerts/read", json={"ids": ["ref:remote:failure"]}).json()["changed"] == 0
+
+
+# --------------------------------------------------------------------------- deleted from a feed
+
+def test_an_alert_can_be_deleted_from_the_feed_and_put_back(env):
+    break_remote(env)
+    assert any(a["id"] == "ref:remote:failure" for a in feed(env)["alerts"])
+
+    gone = env.post("/api/alerts/dismiss", json={"ids": ["ref:remote:failure"]})
+    assert gone.status_code == 200, gone.text
+    assert gone.json()["changed"] == 1 and gone.json()["deleted"] == 1
+    answer = feed(env)
+    assert not any(a["id"] == "ref:remote:failure" for a in answer["alerts"])
+    assert answer["counts"]["deleted"] == 1
+    # Out of the list, but not out of reach: it is listed on its own and its detail still opens
+    deleted = feed(env, dismissed=True)["alerts"]
+    assert [a["id"] for a in deleted] == ["ref:remote:failure"]
+    assert deleted[0]["dismissed"] is True and deleted[0]["read"] is True
+    assert env.get("/api/alerts/ref:remote:failure").status_code == 200
+
+    back = env.post("/api/alerts/dismiss", json={"ids": ["ref:remote:failure"], "dismissed": False})
+    assert back.json()["changed"] == 1 and back.json()["deleted"] == 0
+    assert any(a["id"] == "ref:remote:failure" for a in feed(env)["alerts"])
+
+
+def test_deleting_one_is_also_a_delete_on_its_own_route(env):
+    break_remote(env)
+    assert env.delete("/api/alerts/ref:remote:failure").status_code == 200
+    assert not any(a["id"] == "ref:remote:failure" for a in feed(env)["alerts"])
+    # Already gone, and an alert this account cannot see: both unknown as far as this account is concerned
+    assert env.delete("/api/alerts/ref:remote:failure").status_code == 404
+    assert env.delete("/api/alerts/ref:nope:failure").status_code == 404
+
+
+def test_a_deleted_alert_is_out_of_the_counts(env):
+    break_remote(env)
+    before = feed(env)["counts"]
+    env.post("/api/alerts/dismiss", json={"ids": ["ref:remote:failure"]})
+    after = feed(env)["counts"]
+    assert after["total"] == before["total"] - 1
+    assert after["failure"] == before["failure"] - 1
+    assert after["unread"] == before["unread"] - 1
+
+
+def test_everything_shown_can_be_deleted_at_once_and_restored_at_once(env):
+    break_remote(env)
+    refresh(env, "pdns")
+    total = feed(env)["counts"]["total"]
+    assert total > 0
+    assert env.post("/api/alerts/dismiss", json={}).json()["changed"] == total
+    assert feed(env)["alerts"] == [] and feed(env)["counts"]["deleted"] == total
+    assert env.post("/api/alerts/dismiss", json={"dismissed": False}).json()["changed"] == total
+    assert feed(env)["counts"]["total"] == total
+
+
+def test_a_deleted_alert_comes_back_when_it_happens_again(env):
+    """Deleting remembers the date of what was dismissed, like marking it read does."""
+    break_remote(env)
+    env.post("/api/alerts/dismiss", json={})
+    assert feed(env)["alerts"] == []
+    refresh(env, "remote", force=True)  # it fails again, later
+    alert = next(a for a in feed(env)["alerts"] if a["id"] == "ref:remote:failure")
+    assert alert["read"] is False and alert["dismissed"] is False
+
+
+def test_deleting_belongs_to_the_account_that_did_it(env):
+    break_remote(env)
+    create_user(env, "other")
+    env.post("/api/admin/grants", json={"referential_id": "remote",
+                                        "user_id": _id(env, "other"), "level": "read"})
+    env.post("/api/alerts/dismiss", json={})
+    client = new_client(env, "other", USER_PASSWORD)
+    assert any(a["id"] == "ref:remote:failure" for a in feed(client)["alerts"])
+
+
+def test_an_alert_this_account_cannot_see_cannot_be_deleted(env):
+    break_remote(env)
+    create_user(env, "reader")
+    env.post("/api/admin/grants", json={"referential_id": "countries",
+                                        "user_id": _id(env, "reader"), "level": "read"})
+    client = new_client(env, "reader", USER_PASSWORD)
+    assert client.post("/api/alerts/dismiss", json={"ids": ["ref:remote:failure"]}).json()["changed"] == 0
+
+
+def test_marking_a_deleted_alert_unread_puts_it_back(env):
+    break_remote(env)
+    env.post("/api/alerts/dismiss", json={"ids": ["ref:remote:failure"]})
+    assert env.post("/api/alerts/read", json={"ids": ["ref:remote:failure"], "read": False}).json()["changed"] == 1
+    alert = next(a for a in feed(env)["alerts"] if a["id"] == "ref:remote:failure")
+    assert alert["read"] is False and alert["dismissed"] is False

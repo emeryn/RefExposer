@@ -253,10 +253,13 @@ def test_profile(profile_id: int, request: Request, db: Session = Depends(get_db
     try:
         health = build(cfg, service.settings, appsettings.load(db, "proxy")).health()
     except LLMError as e:
+        # LLMError carries the diagnostic an administrator needs (which server, which status), never a
+        # traceback; the same bounded message is stored and returned
+        reason = str(e)[:500]
         profile.last_test_at, profile.last_test_ok = utcnow(), False
-        profile.last_test_error = str(e)[:500]
+        profile.last_test_error = reason
         db.commit()
-        return {"ok": False, "error": str(e), "models": [], "model_found": False}
+        return {"ok": False, "error": reason, "models": [], "model_found": False}
     profile.last_test_at, profile.last_test_ok, profile.last_test_error = utcnow(), True, None
     db.commit()
     audit(db, "llm_profile.test", user=admin, target=f"llm-profile:{profile.id}", request=request,

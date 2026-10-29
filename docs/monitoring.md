@@ -20,17 +20,26 @@ affected items, the queries it went through, whether each notification was deliv
 update**, the **failing quality rules** with their pass rates, or the **figures** of the drift — and a link to
 the referential or the watchdog.
 
-- **Nothing to acknowledge, nothing to clean up.** The list is built from the state of the referentials and the
-  recorded watchdog runs, so an alert disappears on its own once the thing behind it is fixed, and it can never
-  disagree with what the rest of the interface shows.
+- **Nothing to clean up.** The list is built from the state of the referentials and the recorded watchdog runs,
+  so an alert disappears on its own once the thing behind it is fixed, and it can never disagree with what the
+  rest of the interface shows.
 - **Filtered by what you may see**: a referential you cannot read is not there, a watchdog belongs to its owner
   (administrators see every one), and ordinary accounts get no watchdog alerts at all.
-- The **badge on the bell** counts what arrived since you last opened the page; that mark is kept in your
-  browser, so it is per person and per device, and nothing about it is stored on the server.
+- **Read** is kept per account on the server: opening an alert marks it read, and the envelope on each line
+  marks it read or unread again. The **badge on the bell and in the menu counts what you have not read**, so it
+  says the same thing on every browser you use and clears itself as you go through the list.
+- **Deleting** one goes further: *Delete* (the bin on a line, or the button for everything shown) takes it out
+  of your feed and out of its counts — yours only, and nothing about the referential or the watchdog is
+  touched. The *Deleted* tab lists what you removed and puts any of it back.
+- An alert you have **read or deleted comes back** if the thing behind it happens again: the marker remembers
+  the date of what was acknowledged, so the same referential failing a second time is news.
 - This is the **in-application** view. Pushing the same events out by e-mail or webhook is
   [notification channels](#notifications-e-mail-webhooks), configured per channel; the two are independent.
 
-API: `GET /api/alerts?limit=&kind=` (`watchdog`, `failure`, `quality`, `stale`, `drift`), `GET /api/alerts/{id}`.
+API: `GET /api/alerts?limit=&kind=&dismissed=` (kinds `watchdog`, `failure`, `quality`, `stale`, `drift`;
+`dismissed=true` lists what you deleted), `GET /api/alerts/{id}`, `POST /api/alerts/read` and
+`POST /api/alerts/dismiss` (`{"ids": [...] | null, "read" | "dismissed": true | false}`),
+`DELETE /api/alerts/{id}`.
 
 ## Notifications (e-mail, webhooks)
 

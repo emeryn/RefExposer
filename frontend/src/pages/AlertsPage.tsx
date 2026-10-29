@@ -26,10 +26,12 @@ import {
   IconChartArrowsVertical,
   IconClock,
   IconDog,
+  IconArrowBackUp,
   IconMail,
   IconMailOpened,
   IconRefresh,
   IconShieldCheck,
+  IconTrash,
 } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
@@ -58,7 +60,17 @@ const KIND: Record<AlertKind, { label: string; icon: typeof IconBell; hint: stri
   drift: { label: 'Drift', icon: IconChartArrowsVertical, hint: 'The last version changed the volume a lot' },
 };
 
-function AlertRow({ alert, onOpen, onRead }: { alert: Alert; onOpen: () => void; onRead: (read: boolean) => void }) {
+function AlertRow({
+  alert,
+  onOpen,
+  onRead,
+  onDismiss,
+}: {
+  alert: Alert;
+  onOpen: () => void;
+  onRead: (read: boolean) => void;
+  onDismiss: (dismissed: boolean) => void;
+}) {
   const kind = KIND[alert.kind];
   return (
     <Card withBorder padding="sm" opacity={alert.read ? 0.6 : 1}>
@@ -88,14 +100,32 @@ function AlertRow({ alert, onOpen, onRead }: { alert: Alert; onOpen: () => void;
           <Text size="xs" c="dimmed">
             {fmtRelative(alert.at)}
           </Text>
-          <Tooltip label={alert.read ? 'Mark as unread' : 'Mark as read'}>
+          {!alert.dismissed && (
+            <Tooltip label={alert.read ? 'Mark as unread' : 'Mark as read'}>
+              <ActionIcon
+                variant="subtle"
+                color={alert.read ? 'gray' : 'blue'}
+                onClick={() => onRead(!alert.read)}
+                aria-label={alert.read ? 'Mark as unread' : 'Mark as read'}
+              >
+                {alert.read ? <IconMailOpened size={16} /> : <IconMail size={16} />}
+              </ActionIcon>
+            </Tooltip>
+          )}
+          <Tooltip
+            label={
+              alert.dismissed
+                ? 'Put it back in the feed'
+                : 'Delete it from your feed — it comes back if it happens again'
+            }
+          >
             <ActionIcon
               variant="subtle"
-              color={alert.read ? 'gray' : 'blue'}
-              onClick={() => onRead(!alert.read)}
-              aria-label={alert.read ? 'Mark as unread' : 'Mark as read'}
+              color={alert.dismissed ? 'blue' : 'red'}
+              onClick={() => onDismiss(!alert.dismissed)}
+              aria-label={alert.dismissed ? 'Restore' : 'Delete'}
             >
-              {alert.read ? <IconMailOpened size={16} /> : <IconMail size={16} />}
+              {alert.dismissed ? <IconArrowBackUp size={16} /> : <IconTrash size={16} />}
             </ActionIcon>
           </Tooltip>
         </Group>
@@ -104,7 +134,17 @@ function AlertRow({ alert, onOpen, onRead }: { alert: Alert; onOpen: () => void;
   );
 }
 
-function Detail({ id, onClose, onRead }: { id: string; onClose: () => void; onRead: (read: boolean) => void }) {
+function Detail({
+  id,
+  onClose,
+  onRead,
+  onDismiss,
+}: {
+  id: string;
+  onClose: () => void;
+  onRead: (read: boolean) => void;
+  onDismiss: (dismissed: boolean) => void;
+}) {
   const { data, isLoading, error } = useQuery({ queryKey: ['alert', id], queryFn: () => api.alert(id) });
   const alert = data?.alert;
   return (
@@ -258,14 +298,30 @@ function Detail({ id, onClose, onRead }: { id: string; onClose: () => void; onRe
             <Anchor component={Link} to={alert.link} onClick={onClose} size="sm">
               Open {alert.referential_name ?? alert.watchdog_name ?? 'it'} <IconArrowRight size={14} style={{ verticalAlign: -2 }} />
             </Anchor>
-            <Button
-              size="xs"
-              variant="default"
-              leftSection={alert.read ? <IconMail size={14} /> : <IconMailOpened size={14} />}
-              onClick={() => onRead(!alert.read)}
-            >
-              {alert.read ? 'Mark as unread' : 'Mark as read'}
-            </Button>
+            <Group gap="xs">
+              {!alert.dismissed && (
+                <Button
+                  size="xs"
+                  variant="default"
+                  leftSection={alert.read ? <IconMail size={14} /> : <IconMailOpened size={14} />}
+                  onClick={() => onRead(!alert.read)}
+                >
+                  {alert.read ? 'Mark as unread' : 'Mark as read'}
+                </Button>
+              )}
+              <Button
+                size="xs"
+                variant="default"
+                color={alert.dismissed ? 'blue' : 'red'}
+                leftSection={alert.dismissed ? <IconArrowBackUp size={14} /> : <IconTrash size={14} />}
+                onClick={() => {
+                  onDismiss(!alert.dismissed);
+                  onClose();
+                }}
+              >
+                {alert.dismissed ? 'Put it back' : 'Delete'}
+              </Button>
+            </Group>
           </Group>
         </Stack>
       )}
@@ -275,30 +331,59 @@ function Detail({ id, onClose, onRead }: { id: string; onClose: () => void; onRe
 
 export default function AlertsPage() {
   const qc = useQueryClient();
-  const { data, isLoading, error, refetch, isFetching } = useAlerts(200);
+  // Two lists: the feed, and what this account has deleted from it
+  const [view, setView] = useState<'open' | 'deleted'>('open');
+  const deletedView = view === 'deleted';
+  const { data, isLoading, error, refetch, isFetching } = useAlerts(200, deletedView);
   const [kind, setKind] = useState('all');
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
 
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['alerts'] });
+    qc.invalidateQueries({ queryKey: ['alert'] });
+  };
+  const failed = (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' });
+
   /** Read is per account and kept on the server: `null` means every alert of this feed. */
   const mark = useMutation({
     mutationFn: ({ ids, read }: { ids: string[] | null; read: boolean }) => api.markAlerts(ids, read),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['alerts'] });
-      qc.invalidateQueries({ queryKey: ['alert'] });
-    },
-    onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
+    onSuccess: invalidate,
+    onError: failed,
   });
   const read = (ids: string[] | null, value: boolean) => mark.mutate({ ids, read: value });
+
+  /**
+   * Deleting is per account too: the line leaves the feed and its counts, and comes back on its own if the
+   * thing behind it happens again. `null` takes the whole list shown.
+   */
+  const dismiss = useMutation({
+    mutationFn: ({ ids, dismissed }: { ids: string[] | null; dismissed: boolean }) => api.dismissAlerts(ids, dismissed),
+    onSuccess: (answer, { ids, dismissed }) => {
+      invalidate();
+      const what = ids ? `${answer.changed} alert(s)` : 'Every alert shown';
+      notifications.show({
+        title: dismissed ? 'Deleted' : 'Put back',
+        message: dismissed
+          ? `${what} removed from your feed — it comes back if it happens again.`
+          : `${what} back in your feed.`,
+        color: dismissed ? 'orange' : 'teal',
+      });
+    },
+    onError: failed,
+  });
+  const remove = (ids: string[] | null, value = true) => dismiss.mutate({ ids, dismissed: value });
 
   const shown = useMemo(
     () =>
       (data?.alerts ?? []).filter(
-        (a) => (kind === 'all' || a.kind === kind) && (!unreadOnly || !a.read),
+        // Everything in the deleted list is read by definition: the unread filter does not apply there
+        (a) => (kind === 'all' || a.kind === kind) && (deletedView || !unreadOnly || !a.read),
       ),
-    [data, kind, unreadOnly],
+    [data, kind, unreadOnly, deletedView],
   );
   const counts = data?.counts ?? {};
+  const deleted = deletedView ? (data?.alerts.length ?? 0) : (counts.deleted ?? 0);
   // Only the kinds this instance reports: an administrator can hide some of them in the settings
   const kinds = data?.kinds ?? (Object.keys(KIND) as AlertKind[]);
 
@@ -311,29 +396,63 @@ export default function AlertsPage() {
         <div>
           <Title order={2}>Alerts</Title>
           <Text c="dimmed" size="sm">
-            What needs a look, newest first: the findings of your watchdogs and the referentials that drifted —
-            an update that failed, data gone stale, quality rules failing, a volume that moved a lot.
+            {deletedView
+              ? 'What you removed from your feed. Putting one back brings it into the list again.'
+              : `What needs a look, newest first: the findings of your watchdogs and the referentials that drifted —
+                 an update that failed, data gone stale, quality rules failing, a volume that moved a lot.`}
           </Text>
         </div>
         <Group gap="xs">
-          <Button
-            variant="default"
-            leftSection={<IconMailOpened size={16} />}
-            onClick={() => read(null, true)}
-            loading={mark.isPending}
-            disabled={!counts.unread}
-          >
-            Mark all as read
-          </Button>
+          {deletedView ? (
+            <Button
+              variant="default"
+              leftSection={<IconArrowBackUp size={16} />}
+              onClick={() => remove(null, false)}
+              loading={dismiss.isPending}
+              disabled={!(data?.alerts.length ?? 0)}
+            >
+              Put them all back
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="default"
+                leftSection={<IconMailOpened size={16} />}
+                onClick={() => read(null, true)}
+                loading={mark.isPending}
+                disabled={!counts.unread}
+              >
+                Mark all as read
+              </Button>
+              <Button
+                variant="default"
+                color="red"
+                leftSection={<IconTrash size={16} />}
+                onClick={() => remove(shown.map((a) => a.id))}
+                loading={dismiss.isPending}
+                disabled={!shown.length}
+              >
+                Delete {kind === 'all' && !unreadOnly ? 'all' : 'these'}
+              </Button>
+            </>
+          )}
           <ActionIcon variant="default" size="lg" loading={isFetching} onClick={() => refetch()} aria-label="Refresh">
             <IconRefresh size={18} />
           </ActionIcon>
         </Group>
       </Group>
 
-      <SimpleGrid cols={{ base: 2, sm: 4 }}>
-        <StatCard label="Open alerts" value={counts.total ?? 0} icon={<IconBell size={20} />} color={counts.total ? 'orange' : 'teal'} />
-        <StatCard label="Unread" value={counts.unread ?? 0} icon={<IconMail size={20} />} color={counts.unread ? 'blue' : 'teal'} />
+      <SimpleGrid cols={{ base: 2, sm: deletedView ? 3 : 4 }}>
+        <StatCard
+          label={deletedView ? 'Deleted alerts' : 'Open alerts'}
+          value={counts.total ?? 0}
+          icon={<IconBell size={20} />}
+          color={counts.total ? 'orange' : 'teal'}
+        />
+        {/* Everything in the deleted list is read, so that figure says nothing there */}
+        {!deletedView && (
+          <StatCard label="Unread" value={counts.unread ?? 0} icon={<IconMail size={20} />} color={counts.unread ? 'blue' : 'teal'} />
+        )}
         <StatCard
           label="Referentials"
           value={(counts.failure ?? 0) + (counts.stale ?? 0) + (counts.quality ?? 0) + (counts.drift ?? 0)}
@@ -358,20 +477,39 @@ export default function AlertsPage() {
             ...kinds.map((k) => ({ value: k, label: `${KIND[k].label} (${counts[k] ?? 0})` })),
           ]}
         />
-        <Switch
-          label="Unread only"
-          checked={unreadOnly}
-          onChange={(e) => setUnreadOnly(e.currentTarget.checked)}
-        />
+        <Group gap="sm">
+          {!deletedView && (
+            <Switch
+              label="Unread only"
+              checked={unreadOnly}
+              onChange={(e) => setUnreadOnly(e.currentTarget.checked)}
+            />
+          )}
+          {/* The deleted ones stay reachable: nothing is lost, it is only out of the feed */}
+          <SegmentedControl
+            value={view}
+            onChange={(v) => setView(v as 'open' | 'deleted')}
+            w="fit-content"
+            data={[
+              { value: 'open', label: 'Feed' },
+              { value: 'deleted', label: `Deleted${deleted ? ` (${deleted})` : ''}` },
+            ]}
+          />
+        </Group>
       </Group>
 
       {shown.length === 0 ? (
-        <EmptyState icon={<IconBell size={28} />} title={unreadOnly ? 'Nothing unread' : 'Nothing to report'}>
-          {unreadOnly
-            ? 'Every alert you can see has been read.'
-            : kind === 'all'
-              ? 'No watchdog finding, and every referential you can see is up to date and passing its rules.'
-              : 'No alert of this kind.'}
+        <EmptyState
+          icon={<IconBell size={28} />}
+          title={deletedView ? 'Nothing deleted' : unreadOnly ? 'Nothing unread' : 'Nothing to report'}
+        >
+          {deletedView
+            ? 'You have not removed any alert from your feed.'
+            : unreadOnly
+              ? 'Every alert you can see has been read.'
+              : kind === 'all'
+                ? 'No watchdog finding, and every referential you can see is up to date and passing its rules.'
+                : 'No alert of this kind.'}
         </EmptyState>
       ) : (
         <Stack gap={6}>
@@ -384,6 +522,7 @@ export default function AlertsPage() {
                 if (!a.read) read([a.id], true);
               }}
               onRead={(value) => read([a.id], value)}
+              onDismiss={(value) => remove([a.id], value)}
             />
           ))}
         </Stack>
@@ -391,8 +530,9 @@ export default function AlertsPage() {
 
       <Text size="xs" c="dimmed">
         This list is built from the state of the referentials and the recorded watchdog runs: an alert
-        disappears on its own once the thing behind it is fixed, and one you have read comes back unread if it
-        happens again. Read is yours alone, and what counts as an alert here is set in{' '}
+        disappears on its own once the thing behind it is fixed, and one you have read — or deleted — comes
+        back if it happens again. Read and deleted are yours alone and change nothing about the referential or
+        the watchdog behind the alert; what counts as an alert here is set in{' '}
         <Anchor component={Link} to="/admin/settings/notifications" size="xs">
           Settings › Notifications &amp; alerts
         </Anchor>
@@ -404,6 +544,7 @@ export default function AlertsPage() {
           id={open}
           onClose={() => setOpen(null)}
           onRead={(value) => read([open], value)}
+          onDismiss={(value) => remove([open], value)}
         />
       )}
     </Stack>

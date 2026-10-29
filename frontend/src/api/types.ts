@@ -547,11 +547,13 @@ export interface Alert {
   has_report: boolean;
   /** Marked as read by this account, and nothing newer happened since */
   read: boolean;
+  /** Deleted from the feed of this account: only listed when the deleted ones are asked for */
+  dismissed: boolean;
 }
 
 export interface AlertFeed {
   alerts: Alert[];
-  /** total, unread, one per kind and one per severity (lowercase) */
+  /** total, unread, deleted, one per kind and one per severity (lowercase) */
   counts: Record<string, number>;
   /** The kinds this instance reports at all: an administrator can hide some of them */
   kinds: AlertKind[];

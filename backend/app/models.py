@@ -447,13 +447,13 @@ class WatchdogRun(Base):
 
 
 class AlertRead(Base):
-    """An alert one account has marked as read.
+    """What one account has done with an alert: marked it read, or deleted it from its feed.
 
     Alerts are not rows: the feed is computed from the state of the referentials and the recorded watchdog runs
-    (alerts.py), so "read" is kept on the side, per account and per alert identifier. `at` is the date the alert
+    (alerts.py), so this is kept on the side, per account and per alert identifier. `at` is the date the alert
     carried when it was marked, because the identifier of a referential alert is stable: the same condition
-    happening again (a referential that fails again) comes back unread instead of staying hidden behind an
-    acknowledgement of the previous one.
+    happening again (a referential that fails again) comes back unread — and back in the feed when it had been
+    deleted — instead of staying hidden behind an acknowledgement of the previous one.
     """
 
     __tablename__ = "alert_reads"
@@ -464,6 +464,8 @@ class AlertRead(Base):
     # ISO 8601 date of the alert when it was marked; empty for an alert that carries no date
     at: Mapped[str] = mapped_column(String(40), default="")
     read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    # Deleted from the feed of this account: out of the list and out of its counts, until it happens again
+    dismissed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     __table_args__ = (UniqueConstraint("user_id", "alert_id", name="uq_alert_read"),)
 

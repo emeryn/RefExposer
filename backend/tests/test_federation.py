@@ -134,3 +134,19 @@ def test_peer_settings_checks(env):
     assert r.status_code == 422 and "API token" in r.json()["detail"]
     r = env.post("/api/admin/federation/peers/unknown/sync")
     assert r.status_code == 400
+    # An address carrying a query or a fragment would send the call — and the API token with it — to a path
+    # other than the catalog once the path is appended
+    for bad in ("https://peer.example/?x=1", "https://peer.example/#"):
+        r = env.put("/api/admin/federation/peers/x", json={"url": bad, "token": "t"})
+        assert r.status_code == 422, bad
+
+
+def test_the_catalog_address_is_built_from_the_parts_of_the_peer_address():
+    from app.federation import CATALOG_PATH, catalog_url
+
+    assert catalog_url("https://peer.example") == "https://peer.example" + CATALOG_PATH
+    assert catalog_url("https://peer.example/") == "https://peer.example" + CATALOG_PATH
+    assert catalog_url("https://peer.example/refex/") == "https://peer.example/refex" + CATALOG_PATH
+    for bad in ("https://peer.example/#", "https://peer.example/?a=b"):
+        with pytest.raises(ValueError):
+            catalog_url(bad)

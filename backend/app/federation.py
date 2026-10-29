@@ -22,7 +22,7 @@ import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, Field, field_validator
@@ -73,6 +73,8 @@ class Peer(BaseModel):
             raise ValueError("URL of the RefExposer instance expected (https://refexposer.example.com)")
         if re.match(r"^https?://[^/]*@", v):
             raise ValueError("no credentials in the URL: give the API token")
+        if "?" in v or "#" in v:
+            raise ValueError("the address of the instance only, without ? or #")
         return v
 
     @field_validator("schedule")
@@ -83,7 +85,7 @@ class Peer(BaseModel):
 
     @property
     def host(self) -> str:
-        return (urlparse(self.url).hostname or "").lower()
+        return (urlsplit(self.url).hostname or "").lower()
 
 
 class FederationSettings(BaseModel):
@@ -193,6 +195,22 @@ def forget_peer(service: "Service", name: str) -> None:
         _save_state(service, state)
 
 
+def catalog_url(url: str) -> str:
+    """Address of the catalog of a peer, built from the parts of its address rather than concatenated.
+
+    Appending the path to the address as text sends the request somewhere else as soon as the address of the
+    peer carries a query or a fragment (`https://peer/#` + the path asks for `https://peer/`), and the call
+    carries the API token of a service account: the path it reaches has to be the path meant.
+    """
+    value = (url or "").strip()
+    # The characters, not the parts urlsplit() reports: a trailing '#' splits into an *empty* fragment and
+    # would still cut the path off the request
+    if "?" in value or "#" in value:
+        raise ValueError("address of the peer: the address of the instance only, without ? or #")
+    parts = urlsplit(value)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") + CATALOG_PATH, "", ""))
+
+
 def fetch_catalog(service: "Service", url: str, token: str) -> dict[str, Any]:
     """Catalog of the peer, read with the token of its service account."""
     import httpx
@@ -206,8 +224,8 @@ def fetch_catalog(service: "Service", url: str, token: str) -> dict[str, Any]:
     # carries the API token of the service account on the peer, so redirects are not followed: the catalog is
     # at a known path, and a 302 would hand that token to whoever answers next.
     try:
-        target = validate_outbound(url.rstrip("/") + CATALOG_PATH, what="address of the peer")
-    except UnsafeUrl as e:
+        target = validate_outbound(catalog_url(url), what="address of the peer")
+    except (UnsafeUrl, ValueError) as e:
         raise FederationError(str(e)) from e
     try:
         with http_client(service.settings, follow_redirects=False) as client:

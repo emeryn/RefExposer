@@ -1,7 +1,7 @@
 import duckdb
 import pytest
 
-from app.sqlbuild import Filter, QueryError, TableQuery, build_source_sql, lit, parse_filters, type_kind
+from app.sqlbuild import Filter, QueryError, TableQuery, build_source_sql, is_sql_text, lit, parse_filters, type_kind
 
 
 def test_literal_escaping():
@@ -22,6 +22,9 @@ def test_type_kind():
     assert type_kind("DECIMAL(10,2)") == "number"
     assert type_kind("TIMESTAMP WITH TIME ZONE") == "temporal"
     assert type_kind("STRUCT(a INTEGER)") == "struct"
+    # UUID, BLOB and the like read as text for the interface but are not character data to DuckDB
+    assert type_kind("UUID") == "text" and not is_sql_text("UUID")
+    assert is_sql_text("VARCHAR") and not is_sql_text("BLOB") and not is_sql_text("VARCHAR[]")
 
 
 @pytest.fixture()
@@ -62,6 +65,22 @@ def test_search_and_sort(con):
     assert con.execute(tq.select_sql(10)).fetchall()[0][0] == "FR"
     tq = TableQuery("t", COLS, sort="-d,code", select=["code"])
     assert [r[0] for r in con.execute(tq.select_sql(10)).fetchall()] == ["it's", "FR", "DE"]
+
+
+def test_a_uuid_column_is_searched_and_filtered_through_a_cast(con):
+    """lower(UUID) has no candidate function in DuckDB: every text operation needs an explicit cast."""
+    con.execute("CREATE TABLE u AS SELECT * FROM (VALUES "
+                "(CAST('00000000-0000-0000-0000-0000000000a1' AS UUID), 'nginx'), "
+                "(CAST('00000000-0000-0000-0000-0000000000b2' AS UUID), 'apache')) v(guid, title)")
+    cols = {"guid": "UUID", "title": "VARCHAR"}
+    # Free text search: the search columns are picked automatically, the UUID one among them
+    assert con.execute(TableQuery("u", cols, search="nginx").count_sql()).fetchone()[0] == 1
+    assert con.execute(TableQuery("u", cols, search="0000a1").count_sql()).fetchone()[0] == 1
+    for op, value, expected in [("contains", "a1", 1), ("ncontains", "a1", 1), ("startswith", "000", 2),
+                                ("endswith", "b2", 1), ("regex", "^0000", 2), ("isnull", "false", 2),
+                                ("eq", "00000000-0000-0000-0000-0000000000a1", 1)]:
+        tq = TableQuery("u", cols, filters=[Filter("guid", op, value)])
+        assert con.execute(tq.count_sql()).fetchone()[0] == expected, f"{op}={value}"
 
 
 def test_unknown_column(con):

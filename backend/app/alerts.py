@@ -14,6 +14,11 @@ drift. What is left out there is out of the feed for everyone, so the bell in th
 **Read** is kept per account (`AlertRead`), not per alert: an alert is a computed line, and acknowledging one only
 means this person has seen it. It comes back unread when the thing behind it happens again, because the marker
 remembers the date of what was acknowledged.
+
+**Deleting** one goes further: the same marker carries a `dismissed` flag, and a dismissed alert is out of the
+feed and out of its counts for that account — nobody else's — until the thing behind it happens again. Nothing
+about the referential or the watchdog is touched, and the deleted ones stay listable (`dismissed=True`) so one
+can be put back.
 """
 
 from __future__ import annotations
@@ -59,6 +64,8 @@ class Alert:
     has_report: bool = False
     # This account has marked it read (and the thing behind it has not happened again since)
     read: bool = False
+    # This account has deleted it from its feed: only listed when the deleted ones are asked for
+    dismissed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -169,14 +176,16 @@ def shown_kinds(db: Session) -> tuple[str, ...]:
     return tuple(k for k in KINDS if cfg.shows(k))  # type: ignore[attr-defined]
 
 
-def read_markers(db: Session, user: CurrentUser) -> dict[str, str]:
-    """{alert id: date it carried when this account marked it read}."""
-    return {r.alert_id: r.at or ""
+def read_markers(db: Session, user: CurrentUser) -> dict[str, tuple[str, bool]]:
+    """{alert id: (date it carried when this account marked it, deleted from the feed)}."""
+    return {r.alert_id: (r.at or "", bool(r.dismissed))
             for r in db.scalars(select(AlertRead).where(AlertRead.user_id == user.id))}
 
 
 def feed(db: Session, service: Any, user: CurrentUser, limit: int = 50,
-         kinds: list[str] | None = None) -> list[dict[str, Any]]:
+         kinds: list[str] | None = None, dismissed: bool | None = False) -> list[dict[str, Any]]:
+    """The feed of this account. `dismissed`: False the alerts it has not deleted (the feed proper), True only
+    the deleted ones, None both — what marking and deleting work against."""
     cfg = appsettings.load(db, "alerts")
     wanted = set(kinds or KINDS) & set(shown_kinds(db))
     alerts = [a for a in _referential_alerts(service, user, cfg) if a.kind in wanted]
@@ -187,7 +196,11 @@ def feed(db: Session, service: Any, user: CurrentUser, limit: int = 50,
     marked = read_markers(db, user)
     for alert in alerts:
         # Marked, and nothing newer happened since: the date of the alert is the date of what was acknowledged
-        alert.read = alert.id in marked and marked[alert.id] >= (alert.at or "")
+        at, gone = marked.get(alert.id, ("", False))
+        alert.read = alert.id in marked and at >= (alert.at or "")
+        alert.dismissed = alert.read and gone
+    if dismissed is not None:
+        alerts = [a for a in alerts if a.dismissed is dismissed]
     # Newest first; an entry without a date (never updated) goes last, and severity breaks a tie
     alerts.sort(key=lambda a: (a.at or "", _rank(a.severity)), reverse=True)
     return [a.to_dict() for a in alerts[:min(limit, MAX_ALERTS)]]
@@ -208,18 +221,38 @@ class UnknownAlert(LookupError):
     """No such alert, or it is not one this account may see."""
 
 
-def mark(db: Session, service: Any, user: CurrentUser, ids: list[str] | None, read: bool) -> int:
-    """Mark alerts of this account read (or unread again). `ids` None: every alert of its feed.
-
-    Only alerts the account actually sees can be marked, so an identifier is never a way to learn that
-    something exists. Returns how many lines changed.
-    """
-    import datetime as dt
-
-    current = {a["id"]: (a["at"] or "") for a in feed(db, service, user, limit=MAX_ALERTS)}
+def _targets(db: Session, service: Any, user: CurrentUser, ids: list[str] | None,
+             dismissed: bool | None) -> tuple[dict[str, str], list[str], dict[str, AlertRead]]:
+    """What a marking acts on: the dates of the alerts in scope, the identifiers to touch, and the markers
+    already stored for them. Only alerts the account actually sees are in scope, so an identifier is never a
+    way to learn that something exists."""
+    current = {a["id"]: (a["at"] or "")
+               for a in feed(db, service, user, limit=MAX_ALERTS, dismissed=dismissed)}
     wanted = list(current) if ids is None else [i for i in dict.fromkeys(ids) if i in current]
     existing = {r.alert_id: r for r in db.scalars(
         select(AlertRead).where(AlertRead.user_id == user.id, AlertRead.alert_id.in_(wanted or [""])))}
+    return current, wanted, existing
+
+
+def _purge(db: Session, user: CurrentUser) -> None:
+    """A marker whose alert went away years ago has nothing left to hide. A deleted one is kept: its alert may
+    well still be there, and dropping the marker would put it back in the feed."""
+    import datetime as dt
+
+    db.execute(delete(AlertRead)
+               .where(AlertRead.user_id == user.id, AlertRead.dismissed.is_(False),
+                      AlertRead.read_at < utcnow() - dt.timedelta(days=KEEP_READ_DAYS))
+               # Deleted in the database, not evaluated against the rows of the session: those come back from
+               # SQLite without a timezone, and comparing them in Python raises
+               .execution_options(synchronize_session=False))
+
+
+def mark(db: Session, service: Any, user: CurrentUser, ids: list[str] | None, read: bool) -> int:
+    """Mark alerts of this account read (or unread again). `ids` None: every alert of its feed.
+
+    Returns how many lines changed. Marking one unread also puts it back in the feed if it had been deleted.
+    """
+    current, wanted, existing = _targets(db, service, user, ids, dismissed=None if ids else False)
     changed = 0
     for alert_id in wanted:
         row = existing.get(alert_id)
@@ -234,13 +267,33 @@ def mark(db: Session, service: Any, user: CurrentUser, ids: list[str] | None, re
         elif (row.at or "") != current[alert_id]:
             row.at, row.read_at = current[alert_id][:40], utcnow()
             changed += 1
-    # A marker whose alert went away years ago has nothing left to hide
-    db.execute(delete(AlertRead)
-               .where(AlertRead.user_id == user.id,
-                      AlertRead.read_at < utcnow() - dt.timedelta(days=KEEP_READ_DAYS))
-               # Deleted in the database, not evaluated against the rows of the session: those come back from
-               # SQLite without a timezone, and comparing them in Python raises
-               .execution_options(synchronize_session=False))
+    _purge(db, user)
+    db.commit()
+    return changed
+
+
+def dismiss(db: Session, service: Any, user: CurrentUser, ids: list[str] | None, dismissed: bool = True) -> int:
+    """Delete alerts from the feed of this account, or put deleted ones back. `ids` None: every alert of the
+    list concerned — the feed when deleting, the deleted ones when restoring.
+
+    A deleted alert is read too: it is gone from the list and from its counts, and it comes back on its own
+    when the thing behind it happens again. Nothing is changed for anybody else. Returns how many changed.
+    """
+    current, wanted, existing = _targets(db, service, user, ids, dismissed=not dismissed)
+    changed = 0
+    for alert_id in wanted:
+        row = existing.get(alert_id)
+        if row is None:
+            if not dismissed:  # nothing stored, so nothing was deleted
+                continue
+            db.add(AlertRead(user_id=user.id, alert_id=alert_id, at=current[alert_id][:40], dismissed=True))
+            changed += 1
+            continue
+        if bool(row.dismissed) == dismissed and (row.at or "") == current[alert_id]:
+            continue
+        row.dismissed, row.at, row.read_at = dismissed, current[alert_id][:40], utcnow()
+        changed += 1
+    _purge(db, user)
     db.commit()
     return changed
 
@@ -248,7 +301,8 @@ def mark(db: Session, service: Any, user: CurrentUser, ids: list[str] | None, re
 def detail(db: Session, service: Any, user: CurrentUser, alert_id: str) -> dict[str, Any]:
     """The alert with what it takes to act on it: the report of a watchdog, the logs of a failed update, the
     failing quality rules, the figures of a drift."""
-    found = next((a for a in feed(db, service, user, limit=MAX_ALERTS) if a["id"] == alert_id), None)
+    # Deleted ones included: their detail stays readable from the list of what this account removed
+    found = next((a for a in feed(db, service, user, limit=MAX_ALERTS, dismissed=None) if a["id"] == alert_id), None)
     if found is None:
         raise UnknownAlert(alert_id)
     out: dict[str, Any] = {"alert": found}

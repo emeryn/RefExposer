@@ -266,6 +266,9 @@ export default function ChatPage() {
                     value={scope}
                     onChange={pickScope}
                     disabled={busy}
+                    // Inside the popover, not in a portal: a click on an option of a portalled dropdown
+                    // counts as a click outside and closes the popover before the pick registers
+                    comboboxProps={{ withinPortal: false }}
                   />
                   <Text size="xs" c="dimmed">
                     {status.writes

@@ -209,12 +209,22 @@ const USER: Section[] = [
           it found, the <b>log of the failed update</b>, the <b>rules that are failing</b> and by how much, or
           the <b>figures</b> of the drift — plus a link straight to the referential.
         </P>
-        <H>Read, and read again</H>
+        <H>Read, deleted, and back again</H>
         <P>
           Opening an alert marks it as <b>read</b>, and the envelope on each line marks it read or unread again.
-          Read is yours alone: it changes nothing for your colleagues, and nothing about the referential or the
-          watchdog behind it. An alert you have read <b>comes back unread</b> if the thing behind it happens
-          again — the same referential failing a second time is news.
+          The badge on the bell and in the menu counts what you have <b>not read</b>, so it clears itself as you
+          go through the list — and says the same thing on every browser you use, because read is kept on the
+          server. It is yours alone: it changes nothing for your colleagues, and nothing about the referential
+          or the watchdog behind it.
+        </P>
+        <P>
+          To get a line out of the way for good, <b>delete</b> it: the bin on a line, or the button that takes
+          everything currently shown. A deleted alert leaves your feed and its counts — again, yours only. The{' '}
+          <b>Deleted</b> tab lists what you removed and puts any of it back, so nothing is ever lost.
+        </P>
+        <P>
+          An alert you have read, or deleted, <b>comes back</b> if the thing behind it happens again — the same
+          referential failing a second time is news.
         </P>
         <P>
           The list itself is built from the current state, not from a mailbox: an alert disappears on its own

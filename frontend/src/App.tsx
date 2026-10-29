@@ -238,7 +238,8 @@ function Shell() {
     ...(assistant?.available ? [{ to: '/chat', label: 'Assistant', icon: IconRobot, active: path.startsWith('/chat') }] : []),
     // Scheduled investigations: the same agent, so the same condition — plus its agent mode
     ...(assistant?.watchdogs ? [{ to: '/watchdogs', label: 'Watchdogs', icon: IconDog, active: path.startsWith('/watchdogs') }] : []),
-    { to: '/alerts', label: 'Alerts', icon: IconBell, active: path.startsWith('/alerts'), badge: alerts?.counts.total },
+    // The badge counts what has not been read, like the bell: marking them read clears it
+    { to: '/alerts', label: 'Alerts', icon: IconBell, active: path.startsWith('/alerts'), badge: alerts?.counts.unread },
     { to: '/downloads', label: 'Downloads', icon: IconDownload, active: path.startsWith('/downloads') },
     ...(me?.can_create_internal
       ? [{ to: '/internal/new', label: 'New internal referential', icon: IconDatabasePlus, active: path === '/internal/new' }]

@@ -243,6 +243,9 @@ RESERVED_PARAMS = {"q", "sort", "limit", "offset", "columns", "format", "count",
 
 _NUMERIC = re.compile(r"^(TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT|FLOAT|DOUBLE|DECIMAL.*)$")
 _TEMPORAL = re.compile(r"^(DATE|TIME.*|TIMESTAMP.*|INTERVAL)$")
+# Types DuckDB treats as character data: the others (UUID, BLOB, BIT, ENUM of another database...) read as
+# "text" for the interface but have to be cast before lower(), contains() or a comparison with a literal
+_TEXTUAL = re.compile(r"^(VARCHAR|CHAR|BPCHAR|TEXT|STRING)$")
 
 
 def type_kind(t: str) -> str:
@@ -258,6 +261,18 @@ def type_kind(t: str) -> str:
     if t == "BOOLEAN":
         return "boolean"
     return "text"
+
+
+def is_sql_text(t: str) -> bool:
+    """The column already holds characters, so `lower()`, `contains()` and a comparison with a string literal
+    take it as it is. Types such as UUID, BLOB or BIT read as text (`type_kind`) but are not VARCHAR to DuckDB:
+    lower(UUID) has no candidate function, and they need an explicit CAST (see `text_expr`)."""
+    return bool(_TEXTUAL.match(t.upper()))
+
+
+def text_expr(col: str, ctype: str) -> str:
+    """The column as something the text functions accept: itself when it is already VARCHAR, cast otherwise."""
+    return qi(col) if is_sql_text(ctype) else f"CAST({qi(col)} AS VARCHAR)"
 
 
 @dataclass
@@ -313,13 +328,14 @@ def prefix_range(col: str, value: str) -> str:
 def _condition(col: str, ctype: str, op: str, value: str, fast: bool = False) -> str:
     c = qi(col)
     kind = type_kind(ctype)
-    if fast and kind == "text" and op == "startswith":
+    if fast and is_sql_text(ctype) and op == "startswith":
         return prefix_range(col, value)
-    text = f"CAST({c} AS VARCHAR)"
+    text = text_expr(col, ctype)
     low = f"lower({lit(value)})"
+    textual = is_sql_text(ctype)  # a literal goes in as it is; anything else is cast to the column type
 
     def typed(v: str) -> str:
-        return lit(v) if kind == "text" else f"CAST({lit(v)} AS {ctype})"
+        return lit(v) if textual else f"CAST({lit(v)} AS {ctype})"
 
     if op == "isnull":
         empty = f"({c} IS NULL OR len({c}) = 0)" if kind == "list" else f"{c} IS NULL"
@@ -339,11 +355,10 @@ def _condition(col: str, ctype: str, op: str, value: str, fast: bool = False) ->
             pred = any_match(f"list_contains({values}, lower(CAST(x AS VARCHAR)))")
             return pred if op == "in" else "NOT " + pred
     if kind in ("list", "struct") and op in ("eq", "ne", "gt", "gte", "lt", "lte"):
-        c, kind = text, "text"
+        # Compared as its text rendering, so the value is a plain literal
+        c, kind, textual = text, "text", True
 
     if op == "eq":
-        if kind == "text":
-            return f"{c} = {lit(value)}"
         return f"{c} = {typed(value)}"
     if op == "ne":
         return f"{c} IS DISTINCT FROM {typed(value)}"
@@ -405,7 +420,7 @@ class TableQuery:
         """Text columns a search can use on a large referential: the sorted and indexed ones among the search
         columns, or all of them when the referential does not name any (prefix search)."""
         wanted = self.search_columns or self.fast_columns
-        return [c for c in wanted if c in self.fast_columns and type_kind(self.columns.get(c, "")) == "text"]
+        return [c for c in wanted if c in self.fast_columns and is_sql_text(self.columns.get(c, ""))]
 
     @property
     def fast_filter(self) -> str | None:
@@ -460,10 +475,7 @@ class TableQuery:
             if not cols:
                 cols = list(self.columns)[:30]
             low = f"lower({lit(self.search.strip())})"
-            ors = [
-                f"contains(lower({qi(c) if type_kind(self.columns[c]) == 'text' else f'CAST({qi(c)} AS VARCHAR)'}), {low})"
-                for c in cols
-            ]
+            ors = [f"contains(lower({text_expr(c, self.columns[c])}), {low})" for c in cols]
             conds.append("(" + " OR ".join(ors) + ")")
         return (" WHERE " + " AND ".join(conds)) if conds else ""
 
