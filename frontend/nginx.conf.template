@@ -1,3 +1,7 @@
+# Generated when the container starts, from this template, by the nginx image's own entrypoint: see
+# docker-entrypoint.d/16-refexposer-resolver.envsh and the Dockerfile. `${NAME}` is substituted,
+# `$name` is an nginx variable and is left alone.
+#
 # Original protocol: the one forwarded by an upstream TLS reverse proxy, otherwise ours
 map $http_x_forwarded_proto $refex_forwarded_proto {
     default $http_x_forwarded_proto;
@@ -20,7 +24,23 @@ server {
 
     # API, OpenAPI docs and exports are served by the backend
     location /api/ {
-        proxy_pass http://backend:8000;
+        # The address of the backend is resolved **at request time**, not once when nginx starts.
+        #
+        # This is what lets the interface come back on its own. A backend container that is recreated often
+        # comes back on another address; nginx, having resolved the name at start-up, would keep sending to
+        # the old one and answer 502 to everything until nginx itself were restarted — the whole interface
+        # then sits on an error it can do nothing about, which is exactly what a reconnecting frontend
+        # cannot fix. A variable in proxy_pass forces the lookup to happen per request, and `valid=` caps
+        # how long an answer is reused.
+        #
+        # ${NGINX_LOCAL_RESOLVERS} is the DNS of the container runtime, read from the container's own
+        # /etc/resolv.conf when it starts, so this works the same on Docker and on rootless Podman without
+        # an address being written down here. $request_uri carries the original path and query, which is
+        # what proxy_pass passed on its own while it named the upstream directly.
+        resolver ${NGINX_LOCAL_RESOLVERS} valid=10s;
+        resolver_timeout 5s;
+        set $refex_backend "http://${REFEX_BACKEND}";
+        proxy_pass $refex_backend$request_uri;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

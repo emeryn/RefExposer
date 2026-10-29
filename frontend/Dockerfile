@@ -3,7 +3,8 @@
 ARG NODE_IMAGE=node:22-alpine
 # -alpine-slim: nginx without the dynamic modules we do not use (xslt, image-filter, njs) and without
 # curl. 21 packages instead of 71, so libxml2, libcurl and brotli - and their advisories - are simply
-# not in the image. nginx.conf only uses built-in directives (gzip, proxy_pass, map, try_files).
+# not in the image. The configuration only uses built-in directives (gzip, proxy_pass, resolver, map,
+# try_files), and envsubst, which generates it at start-up, comes with the base image.
 ARG NGINX_IMAGE=nginxinc/nginx-unprivileged:1.31-alpine-slim
 
 # --- build
@@ -33,7 +34,22 @@ RUN if [ "$OS_UPDATE" = "1" ]; then \
         fi; \
         apk --no-cache upgrade; \
     fi
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# The server configuration is generated when the container starts rather than frozen here, so that the DNS
+# of the container runtime and the address of the backend are the ones of the deployment. The point is the
+# `resolver` of nginx.conf.template: without it, a backend container that comes back on another address stays
+# unreachable until nginx is restarted, and no amount of reconnecting in the browser can get past that.
+#
+# It is written to /tmp because the container runs read-only, and included from there: the main nginx.conf is
+# pointed at that directory, and the build fails if the line it replaces ever changes in the base image.
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY docker-entrypoint.d/ /docker-entrypoint.d/
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
+    NGINX_ENVSUBST_OUTPUT_DIR=/tmp/nginx-conf \
+    NGINX_ENVSUBST_FILTER='^(REFEX_BACKEND|NGINX_LOCAL_RESOLVERS)$' \
+    REFEX_BACKEND=backend:8000
+RUN chmod +x /docker-entrypoint.d/*.envsh \
+    && sed -i 's|include /etc/nginx/conf.d/\*\.conf;|include /tmp/nginx-conf/*.conf;|' /etc/nginx/nginx.conf \
+    && grep -q 'include /tmp/nginx-conf/\*\.conf;' /etc/nginx/nginx.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 # The base image already runs as this account; stated here so the image is checked as unprivileged
 USER 101:101

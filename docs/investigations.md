@@ -155,10 +155,29 @@ crowded graph and no single constant suits every one of them. It only re-runs th
 a large graph it is applied when the slider is released rather than while it is dragged, because the
 simulation is quadratic in the number of nodes.
 
+**Zooming and moving about**: the buttons zoom, and the picture is **dragged** with the pointer. Zooming
+without being able to move would be a magnifying glass bolted to the table — the middle of a crowded graph is
+rarely the part worth reading. *Fit* brings the whole graph back. A drag that ends on the background is a move
+of the view and not a click, so moving about never clears what you had selected.
+
 **Hiding a kind of element**: clicking an entry of the legend takes that kind out of the picture — the
-referentials, the URLs, whatever is crowding it. Hidden nodes leave the *layout* too, so what is left actually
-spreads out instead of keeping the holes. Seeds are always shown, and a line under the graph says how many
-nodes are hidden, so a filtered picture is never mistaken for the whole one.
+referentials, the URLs, whatever is crowding it. **None** puts every kind away at once and **All** brings them
+back, which is usually the quicker way round: hide everything, then bring back the one or two kinds you are
+actually following. Hidden nodes leave the *layout* too, so what is left actually spreads out instead of
+keeping the holes. Seeds are always shown, and a line under the graph says how many nodes are hidden, so a
+filtered picture is never mistaken for the whole one.
+
+**Setting a relation aside**: clicking a line names what it asserts — which two values, in which referential,
+on how many rows — and offers to take it out of the picture. A relation known to be irrelevant draws the
+layout towards a value that does not matter, and one line too many is what makes a graph unreadable. It is
+taken out of the *picture* only: the rows behind it stay in the Evidence tab, because the graph is a way of
+reading the evidence and not a replacement for it. The count of what was set aside sits in the legend and
+brings everything back in one click.
+
+How the picture is arranged — the spacing, the hidden kinds, the relations set aside — belongs to the page and
+not to the graph, so **enlarging it keeps your work**: the same arrangement is drawn in the window and in the
+tab. A new search starts from a clean picture, since the previous arrangement describes nodes that may not be
+there any more.
 
 **Enlarging it**: the graph takes the whole window, with the rows of the selected node in a pane beside it
 rather than in a drawer over the picture they describe. Several seeds are pinned around the centre — two of
@@ -209,6 +228,17 @@ Nothing is re-implemented here:
 
 A saved search holds the **question** — the value, its type, the depth, the scope — not its result. Replaying
 it reads the catalogue as it is *then*, so a referential added last week is in the next replay.
+
+It also holds **the investigation you actually arrived at**, which is rarely the first question: the steps you
+followed by hand (`expansions`), and what you took out of the picture (`hidden_kinds`, `hidden_edges`). The
+steps are kept as steps, never as a stored picture — each one names the value, how it was looked up, and the
+node it hung from — so a replay runs the search and then follows each step again, in order, against the
+catalogue as it is now. A step whose node is no longer there, because the value left the referential or
+because this account may not read it, is left out and said so, rather than being hung somewhere it does not
+belong.
+
+Those three fields describe the picture and not the walk, so `POST /api/investigate` ignores them: they are
+stored with the question and replayed by the interface.
 
 Sharing one gives access to that question and to nothing else: **whoever replays it uses their own rights**. A
 colleague with narrower grants sees fewer referentials through the very same search, and an author with broad

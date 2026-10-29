@@ -600,6 +600,22 @@ export interface EntityCatalogue {
  */
 export type MatchMode = 'auto' | 'exact' | 'text';
 
+/**
+ * One step grown by hand: a value followed from a node already on screen.
+ *
+ * Kept as part of the question rather than as a result, like everything else a saved search holds: replaying
+ * it looks the value up again, in the catalogue as it is then. `from` is the node it was followed from, so a
+ * replay hangs the step back where it belongs — and leaves it out, with a word about it, if that node is no
+ * longer found.
+ */
+export interface Expansion {
+  value: string;
+  /** The entity type it was looked up as, or null when it was followed as plain text */
+  entity: string | null;
+  /** Identifier of the node it was expanded from */
+  from: string;
+}
+
 /** One relational search. The same object is what a saved search stores and replays. */
 export interface InvestigationSpec {
   /** A single seed; `values` takes several. One of the two is required. */
@@ -613,6 +629,12 @@ export interface InvestigationSpec {
   rows_per_lookup?: number;
   max_nodes?: number;
   match?: MatchMode;
+  /** Steps grown by hand after the search, replayed in order */
+  expansions?: Expansion[];
+  /** Kinds of element left out of the picture (entity types, `source`, `query`) */
+  hidden_kinds?: string[];
+  /** Relations set aside, as `source|target|kind|referential_id|label` */
+  hidden_edges?: string[];
 }
 
 /** A value of the graph, or a referential that evidences one. */

@@ -49,8 +49,10 @@ import { useAlerts, useAssistant, useBranding, useInvestigate, useReferentials }
 import { BrandHeader } from './components/Brand';
 import { useAuth } from './auth/AuthContext';
 import LoginPage from './auth/LoginPage';
+import type { Me } from './api/types';
 import ForcedPasswordChange from './auth/PasswordChange';
 import PendingPage from './auth/PendingPage';
+import { ConnectionBanner, ConnectionWatcher, UnreachableScreen } from './components/Connection';
 import { HEALTH, HealthDot } from './components/Status';
 import Dashboard from './pages/Dashboard';
 import ReferentialPage from './pages/ReferentialPage';
@@ -200,14 +202,27 @@ function UserMenu() {
 }
 
 export default function App() {
-  const { me, isLoading } = useAuth();
+  const { me, isLoading, unreachable } = useAuth();
   useBranding(); // title of the browser tab and public URL, before sign-in too
+  return (
+    <>
+      {/* Above every branch: an outage has to be recovered from whether or not anybody is signed in */}
+      <ConnectionWatcher />
+      <Content me={me} isLoading={isLoading} unreachable={unreachable} />
+    </>
+  );
+}
+
+function Content({ me, isLoading, unreachable }: { me: Me | null; isLoading: boolean; unreachable: boolean }) {
   if (isLoading)
     return (
       <Center mih="100vh">
         <Loader />
       </Center>
     );
+  // An unreachable backend is not a signed-out account: offering a form that cannot work would have somebody
+  // typing their password in and concluding their account is broken
+  if (unreachable) return <UnreachableScreen />;
   if (!me) return <LoginPage />;
   if (me.status === 'pending') return <PendingPage />;
   if (me.must_change_password) return <ForcedPasswordChange />;
@@ -395,6 +410,9 @@ function Shell() {
       </AppShell.Navbar>
 
       <AppShell.Main>
+        {/* Over the pages rather than inside the header, which has a fixed height: what is on screen stays
+            on screen during an outage, and this is what keeps that honest */}
+        <ConnectionBanner />
         <Suspense
           fallback={
             <Center h={200}>

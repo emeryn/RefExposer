@@ -289,6 +289,8 @@ WantedBy=default.target
 
 - `%h` is the home folder of the account. Adapt the paths if the folders are elsewhere.
 - `:Z` / `:z` label the folders for **SELinux** (RHEL, Rocky, Fedora). They are ignored elsewhere.
+- `Tmpfs=/tmp` is **required** on the frontend, not merely hardening: the container runs read-only and writes
+  its generated nginx configuration there (see *When the backend restarts* below).
 - Without a reverse proxy on the host, publish `PublishPort=8080:8080` instead. Without root, a port below 1024 cannot be used directly.
 
 ### 4. Start
@@ -316,6 +318,45 @@ If nothing is generated, check the files with `/usr/libexec/podman/quadlet -dryr
 | Change a setting | edit `refexposer.env`, then `systemctl --user restart refexposer-backend` |
 
 Back up as with Docker: the database dump, `~/refexposer/data/`, and `REFEX_SECRET_KEY` kept apart. `podman volume rm refexposer-db` **deletes the database**.
+
+## When the backend restarts
+
+An update, a crash, a rebooted machine: the backend goes away for a while and has to come back **without
+anybody pressing F5** in the open tabs. Two things make that work, and both matter.
+
+**The frontend container re-resolves the address of the backend.** `nginx` resolves a name in `proxy_pass`
+once, when it loads its configuration, and keeps the answer for as long as it runs. A backend container that
+is recreated often comes back on another address — and `nginx` would then answer `502` to everything until
+*it* were restarted too, which no amount of retrying in the browser can get past. So the address is resolved
+per request instead, against the DNS of the container runtime:
+
+- the configuration is generated when the container starts, from `/etc/nginx/templates/default.conf.template`
+  into **`/tmp/nginx-conf`**, because the container runs with a read-only root filesystem and `/tmp` is its
+  one writable place. A deployment that drops `Tmpfs=/tmp` (Podman) or the `tmpfs` entry (Compose) leaves
+  nginx with no site at all;
+- the nameservers come from the container's own `/etc/resolv.conf`, so nothing names an address: Docker's
+  embedded DNS and rootless Podman's `aardvark-dns` both work as they are;
+- `REFEX_BACKEND` (default `backend:8000`) says where the backend is, should it not be a container of the
+  same stack.
+
+**The interface reconnects on its own.** A request that gets no answer — or a `502`/`503`/`504` carrying no
+JSON, which is the proxy answering for a backend that is not there — switches the interface to *not
+answering*: it says so over the pages, keeps showing what was last read rather than emptying itself, and
+polls the public `GET /api/health` with a backoff. When that answers, everything on screen is refetched and
+the session carries on. Nothing is lost, and nobody has to reload. A session that **expired** during the
+outage is a different thing and is treated as one: the sign-in page comes back saying so, and signing in
+returns to the page that was open.
+
+What to check when a tab stays on *the server is not answering*:
+
+```bash
+curl -fsS http://127.0.0.1:8080/api/health          # through the frontend: {"status":"ok"}
+docker compose ps                                   # or: systemctl --user status refexposer-backend
+docker compose logs --tail 50 backend
+```
+
+A `502` from the first command with a healthy backend means the frontend container is older than this
+mechanism: recreate it (`docker compose up -d --force-recreate frontend`).
 
 ## Public URL
 

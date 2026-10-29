@@ -45,6 +45,19 @@ def feature_status(db: Session = Depends(get_db), user: CurrentUser = Depends(re
 
 # --------------------------------------------------------------------------- the search itself
 
+class ExpansionIn(BaseModel):
+    """One step grown by hand from a node already on screen, kept so a saved search can be replayed whole."""
+
+    # `from` is a keyword, so the field is named for Python and spelled `from` on the wire and in storage
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    value: str = Field(..., min_length=1, max_length=2048)
+    entity: str | None = Field(None, max_length=40,
+                               description="The type it was looked up as; null when followed as plain text")
+    from_node: str = Field(..., alias="from", max_length=2100,
+                           description="Identifier of the node it was expanded from")
+
+
 class SpecIn(BaseModel):
     """One relational search. The same body is what a saved search stores and replays."""
 
@@ -73,6 +86,20 @@ class SpecIn(BaseModel):
     match: Literal["auto", "exact", "text"] = Field(
         "auto", description="auto: exact lookups where the value is a recognised identifier **and** a text "
                             "search of the catalogue · exact: typed lookups only · text: like the global search")
+
+    # The three fields below describe the picture that was worked on, not the walk: the search itself ignores
+    # them. They are here so that a saved search holds the whole investigation and not just its first
+    # question — the steps followed by hand are replayed, in order, as searches of their own, and what was
+    # taken out of the picture is taken out of it again.
+    expansions: list[ExpansionIn] = Field(
+        default_factory=list, max_length=40,
+        description="Steps grown by hand from a node of the graph, replayed in order after the search")
+    hidden_kinds: list[str] = Field(
+        default_factory=list, max_length=60,
+        description="Kinds of element left out of the picture (entity types, `source`, `query`)")
+    hidden_edges: list[str] = Field(
+        default_factory=list, max_length=400,
+        description="Relations set aside, as `source|target|kind|referential_id|label`")
 
     @model_validator(mode="after")
     def _one_seed_at_least(self) -> "SpecIn":
@@ -282,7 +309,7 @@ def create_search(body: SearchIn, request: Request, db: Session = Depends(get_db
                   user: CurrentUser = Depends(require_user)) -> dict[str, Any]:
     """A saved search holds the question, not its result: replaying it reads the catalogue as it is then."""
     search = SavedSearch(name=body.name.strip(), description=body.description.strip(),
-                         owner_id=user.id, spec=body.spec.model_dump(), tags=body.tags,
+                         owner_id=user.id, spec=body.spec.model_dump(by_alias=True), tags=body.tags,
                          updated_by=user.username)
     db.add(search)
     db.commit()
@@ -303,7 +330,8 @@ def update_search(search_id: int, body: SearchIn, request: Request, db: Session 
                   user: CurrentUser = Depends(require_user)) -> dict[str, Any]:
     search, level = _get(db, user, search_id, need="edit")
     search.name, search.description = body.name.strip(), body.description.strip()
-    search.spec, search.tags, search.updated_by = body.spec.model_dump(), body.tags, user.username
+    search.spec, search.tags, search.updated_by = (body.spec.model_dump(by_alias=True), body.tags,
+                                                   user.username)
     db.commit()
     audit(db, "search.update", user=user, request=request, target=f"search:{search.id}",
           detail={"name": search.name, "value": body.spec.value[:200]})

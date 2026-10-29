@@ -1,0 +1,18 @@
+#!/bin/sh
+# Prepare the generation of the server configuration, which the next entrypoint script performs.
+#
+# Sourced, not run (`.envsh`): what it exports has to reach `20-envsubst-on-templates.sh`, which turns
+# /etc/nginx/templates/default.conf.template into the configuration nginx reads.
+set -eu
+
+# The generated configuration goes to /tmp, because the container runs with a **read-only root filesystem**
+# and /tmp is its one writable place. `20-envsubst-on-templates.sh` gives up quietly when its output
+# directory is not writable, so the directory has to be there and writable before it runs.
+mkdir -p "${NGINX_ENVSUBST_OUTPUT_DIR:-/tmp/nginx-conf}"
+
+# `15-local-resolvers.envsh` reads the nameservers of the container out of /etc/resolv.conf, which is what
+# makes the configuration work on Docker and on Podman without an address being written down here. Should a
+# runtime give none, keep Docker's embedded DNS rather than leaving the directive empty: nginx refuses to
+# start on `resolver ;`, and a frontend that does not start is worse than one that guesses.
+NGINX_LOCAL_RESOLVERS="${NGINX_LOCAL_RESOLVERS:-127.0.0.11}"
+export NGINX_LOCAL_RESOLVERS

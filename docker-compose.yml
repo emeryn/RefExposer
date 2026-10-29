@@ -169,6 +169,10 @@ services:
     <<: *hardening
     # nginx writes its temporary files (request bodies, proxy buffers) to /var/cache/nginx
     tmpfs: ["/tmp", "/var/cache/nginx"]
+    environment:
+      # Where to reach the backend. nginx resolves it at each request rather than once at start-up, so the
+      # interface follows a backend container that comes back on another address (frontend/nginx.conf.template)
+      REFEX_BACKEND: ${REFEX_BACKEND:-backend:8000}
     depends_on:
       backend:
         condition: service_healthy

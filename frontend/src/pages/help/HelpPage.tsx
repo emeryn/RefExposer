@@ -360,9 +360,20 @@ const USER: Section[] = [
           With several values, the <b>ring</b> around a node tells you which one reached it, and a{' '}
           <b>yellow double ring</b> marks a value several of them reach. If the picture comes out too tight — a
           rich catalogue draws a crowded graph — the <b>spacing</b> slider holds the nodes further apart, live,
-          without searching again; <b>clicking a kind in the legend</b> hides it (the referentials, the URLs,
-          whatever is in the way); and the <b>enlarge</b> button gives the graph the whole window, with the rows
-          of whatever you select in a pane beside it instead of a drawer over the top.
+          without searching again; zoom in and <b>drag the picture</b> to move about it; and the{' '}
+          <b>enlarge</b> button gives the graph the whole window, with the rows of whatever you select in a pane
+          beside it instead of a drawer over the top.
+        </P>
+        <P>
+          Two ways of taking things out of the way. <b>Clicking a kind in the legend</b> hides it — the
+          referentials, the URLs, whatever is crowding the picture — and <b>None</b> puts every kind away at
+          once so you can bring back just the one or two you are following. <b>Clicking a line</b> names the
+          relation it draws, which two values and on how many rows of which referential, and offers to set it
+          aside: one line too many is what makes a graph unreadable, and a relation you know to be irrelevant
+          pulls the layout towards a value that does not matter. Set aside means out of the <b>picture</b> — the
+          rows stay in <i>Evidence</i>, and the legend brings everything back in one click. However you arrange
+          the picture, enlarging it <b>keeps your work</b>: it is the same arrangement in the window and in the
+          tab.
         </P>
         <H>Carrying on from what you see</H>
         <P>
@@ -389,7 +400,11 @@ const USER: Section[] = [
         <H>Keeping and sharing a search</H>
         <P>
           <b>Keep this search</b> stores the <b>question</b>, not its answer: replaying it later reads the
-          catalogue as it is then, so a referential added since is included. Share one with an account or a group
+          catalogue as it is then, so a referential added since is included. The steps you followed by hand are
+          kept with it, and so is how you arranged the picture, because the investigation you arrived at is
+          rarely the question you began with — replaying it runs the search and then <b>follows each step
+          again</b>, looking its value up afresh. If a step hung from something the catalogue no longer gives
+          you, the page leaves it out and says which, rather than drawing it somewhere it does not belong. Share one with an account or a group
           and they can replay it — <b>with their own rights</b>. A colleague with narrower access sees fewer
           referentials through the very same search, and sharing never widens anybody. <i>Replay and change it</i>{' '}
           lets them edit it too; deleting stays with you.

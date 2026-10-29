@@ -1,3 +1,5 @@
+import { reportSessionLost } from './client';
+import { reportReachable, reportUnreachable } from './connection';
 import type { AgentStep, Artifact } from './types';
 
 /** Events the backend sends while it answers (server-sent events over the POST response). */
@@ -27,17 +29,28 @@ export async function askAssistant(
   onEvent: (event: AssistantEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`/api/assistant/conversations/${encodeURIComponent(conversationId)}/messages`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    signal,
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-      'X-Requested-With': 'RefExposer',
-    },
-    body: JSON.stringify({ content, agent }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api/assistant/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        'X-Requested-With': 'RefExposer',
+      },
+      body: JSON.stringify({ content, agent }),
+    });
+  } catch (e) {
+    // This stream does not go through `request()`, so it reports into the same two places by hand: an
+    // outage noticed here starts the same reconnection as one noticed anywhere else
+    if (e instanceof DOMException && e.name === 'AbortError') throw e;
+    reportUnreachable();
+    throw new Error('the server could not be reached — the interface reconnects on its own');
+  }
+  reportReachable();
+  if (res.status === 401) reportSessionLost();
   if (!res.ok || !res.body) {
     let message = `${res.status} ${res.statusText}`;
     try {

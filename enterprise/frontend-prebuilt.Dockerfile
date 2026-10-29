@@ -30,7 +30,17 @@ RUN if [ "$OS_UPDATE" = "1" ]; then \
         fi; \
         apk --no-cache upgrade; \
     fi
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Same configuration as the normal image, generated when the container starts: see frontend/Dockerfile for
+# why (the `resolver`, which is what lets the interface survive a backend that comes back on another address)
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY docker-entrypoint.d/ /docker-entrypoint.d/
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
+    NGINX_ENVSUBST_OUTPUT_DIR=/tmp/nginx-conf \
+    NGINX_ENVSUBST_FILTER='^(REFEX_BACKEND|NGINX_LOCAL_RESOLVERS)$' \
+    REFEX_BACKEND=backend:8000
+RUN chmod +x /docker-entrypoint.d/*.envsh \
+    && sed -i 's|include /etc/nginx/conf.d/\*\.conf;|include /tmp/nginx-conf/*.conf;|' /etc/nginx/nginx.conf \
+    && grep -q 'include /tmp/nginx-conf/\*\.conf;' /etc/nginx/nginx.conf
 # Built by `npm run build` on a machine that has a registry
 COPY --from=dist / /usr/share/nginx/html
 # The base image already runs as this account; stated here so the image is checked as unprivileged

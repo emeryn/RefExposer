@@ -45,9 +45,20 @@ Everything below is in this first published version.
   noise, and the analysis runs over the `same_row` edges only. Two values meet only where their expansions
   overlap, so when nothing is found and more depth could help, the answer says so instead of implying there is
   no link. In the graph a ring shows which seed reached a node and a double ring marks a meeting point.
-- The graph can be **filtered by kind of element** (click an entry of the legend) and **enlarged to the whole
-  window**, with the rows of the selected node in a pane beside it rather than a drawer over the picture.
-  Hidden nodes leave the layout too, so what is left spreads out, and a line says how many are hidden.
+- The graph can be **filtered by kind of element** (click an entry of the legend, or *None* to put every kind
+  away at once and bring back only what you are following) and **enlarged to the whole window**, with the rows
+  of the selected node in a pane beside it rather than a drawer over the picture. Hidden nodes leave the layout
+  too, so what is left spreads out, and a line says how many are hidden.
+- The picture can be **dragged** once zoomed in: zooming with no way to move is a magnifying glass bolted to
+  the table, since the middle of a crowded graph is rarely the part worth reading. A drag that ends on the
+  background moves the view without clearing the selection.
+- A **relation can be set aside**: clicking a line names what it asserts — which two values, on how many rows
+  of which referential — and offers to take it out of the picture, because one line too many is what makes a
+  graph unreadable and an irrelevant relation pulls the layout towards a value that does not matter. Out of
+  the *picture* only: the rows stay in the evidence, and the legend brings everything back in one click.
+- How the picture is arranged — spacing, hidden kinds, relations set aside — belongs to the page rather than to
+  the graph, so **enlarging it keeps that work** instead of resetting it: the same arrangement is drawn in the
+  window and in the tab.
 - **Growing the graph in place**: *Expand from here* on any value adds what it touches and keeps what is
   already on screen, and any value of any row can be expanded the same way — which is how you follow a
   product name or a ticket, things no pattern types as an identifier. Merging is exact because a node
@@ -70,7 +81,11 @@ Everything below is in this first published version.
   carry it properly; each hit says whether it was an `exact` match on a column or a `text` mention, and a
   referential already matched exactly is not searched again for the same value. `match` asks for one pass only.
 - **Saved searches, shared with accounts or groups**: a saved search holds the *question*, not its result, so
-  replaying it reads the catalogue as it is then. Sharing it shares the question only — whoever replays it uses
+  replaying it reads the catalogue as it is then. It holds the **whole investigation** and not only its first
+  question: the steps followed by hand and what was taken out of the picture are kept with it, the steps as
+  steps rather than as a stored picture, so a replay runs the search and then follows each one again against
+  the catalogue as it is now. A step that hung from a value the catalogue no longer gives that account is left
+  out and named, instead of being drawn somewhere it does not belong. Sharing it shares the question only — whoever replays it uses
   **their own rights**, so a colleague with narrower grants sees fewer referentials through the very same
   search and an author never widens anybody. Levels `read` (replay) and `edit` (replay and change); deleting
   stays with the owner. An ordinary account may share with its own groups and the people in them, so signing
@@ -137,6 +152,28 @@ Everything below is in this first published version.
 
 ### Fixed
 
+- **A restarted backend no longer leaves the interface stranded.** Two separate faults, either of which was
+  enough to make reloading the page the only way out:
+  - the frontend container resolved the address of the backend **once**, when nginx loaded its configuration.
+    A backend container recreated on another address was then unreachable, and nginx answered `502` to
+    everything until it was itself restarted — nothing the browser could do got past that. The configuration
+    is now generated when the container starts and resolves the name **at each request**, against the DNS of
+    the container runtime, so Docker and rootless Podman both work with nothing to configure;
+  - in the browser, a request that got no answer was indistinguishable from a refused one: React Query gave
+    up after its retries and every page stayed on whichever error it happened to get, for as long as the tab
+    was open. A failure that never reached the server — including a gateway error carrying no JSON, which is
+    the proxy answering for a backend that is not there — now says so over the pages, keeps what was last
+    read rather than emptying them, and polls the public liveness endpoint with a backoff. When it answers,
+    everything on screen is refetched and the session carries on; the network coming back or the tab
+    becoming visible again both probe at once instead of waiting out the backoff.
+- **An unreachable backend read as a signed-out account**: `me` failing for any reason was taken for *not
+  signed in*, so an outage at the wrong moment showed the sign-in page — a form that cannot work, which has
+  somebody typing their password in and concluding their account is broken. Only a `401` means signed out
+  now; anything else keeps the previous answer, and a cold start against a backend that is not there says
+  what is actually wrong.
+- **An expired session now says so.** The sign-in page explains that the session ended and signing in returns
+  to the page that was open, instead of the form appearing with no explanation behind a stack of
+  *401 Not authenticated* notices from whatever was loading at that moment.
 - **Searching or filtering a column whose type is not character data** (a `UUID` key, a `BLOB`) no longer fails
   with *No function matches the given name and argument types `lower(UUID)`*: such a column reads as text in
   the interface but is not `VARCHAR` to DuckDB, so every text operation now casts it explicitly — and the

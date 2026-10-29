@@ -1,15 +1,17 @@
-import { ActionIcon, Badge, Box, Group, Slider, Stack, Text, Tooltip } from '@mantine/core';
+import { ActionIcon, Badge, Box, Button, Group, Slider, Stack, Text, Tooltip } from '@mantine/core';
 import {
   IconArrowsMaximize,
   IconEye,
   IconEyeOff,
   IconFocusCentered,
+  IconHandStop,
   IconMaximize,
   IconMinimize,
+  IconUnlink,
   IconZoomIn,
   IconZoomOut,
 } from '@tabler/icons-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type PointerEvent as Pointer, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphEdge, GraphNode } from '../api/types';
 
 /**
@@ -22,6 +24,10 @@ import type { GraphEdge, GraphNode } from '../api/types';
  * The layout is deterministic — the seed of the pseudo random placement is the identifier of each node — so
  * the same investigation always draws the same picture, and the same node keeps its place when the graph is
  * replayed.
+ *
+ * What the picture *shows* — how far apart, which kinds are hidden, which relations were set aside — is not
+ * held here but passed in: the same graph is drawn twice, in the page and in the enlarged window, and work
+ * done on one of them has to survive moving to the other.
  */
 
 /** One colour per kind of identifier, plus one for a referential. Mantine tokens, so dark mode follows. */
@@ -67,6 +73,15 @@ const SEED_RINGS = [
 
 /** The key a node is filtered and legended by: its entity type, or what it is when it is not a value. */
 export const nodeKind = (node: GraphNode): string => (node.kind === 'entity' ? (node.entity ?? 'other') : node.kind);
+
+/**
+ * How one relation is named, here and in the page that remembers which ones were set aside.
+ *
+ * The same five fields as the merge of an expansion, and for the same reason: two values can share a row of
+ * one referential and another row of another one, and those are two relations, not one.
+ */
+export const edgeKey = (edge: GraphEdge): string =>
+  `${edge.source}|${edge.target}|${edge.kind}|${edge.referential_id}|${edge.label}`;
 
 const seedRing = (node: GraphNode, several: boolean): string | null => {
   if (!several) return null;
@@ -235,6 +250,10 @@ function shorten(text: string, max = 22): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+/** How a kind reads in the legend and in the sentence under the graph. */
+const kindLabel = (kind: string) =>
+  kind === 'source' ? 'referential' : kind === 'query' ? 'text searched' : kind;
+
 export function RelationGraph({
   nodes,
   edges,
@@ -244,6 +263,12 @@ export function RelationGraph({
   seedCount = 1,
   fullscreen = false,
   onFullscreen,
+  hidden,
+  onHidden,
+  removed,
+  onRemoved,
+  spacing,
+  onSpacing,
 }: {
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -256,16 +281,27 @@ export function RelationGraph({
   fullscreen?: boolean;
   /** Offered only when the page can enlarge the graph */
   onFullscreen?: (open: boolean) => void;
+  /**
+   * The kinds of element left out of the picture, and the relations set aside, held by the page rather than
+   * here: enlarging the graph draws a second component, and a filter that reset on the way there would
+   * undo the very work it was applied to. Hiding is not merely a display trick — what is hidden leaves the
+   * layout too, so what remains actually spreads out.
+   */
+  hidden: Set<string>;
+  onHidden: (next: Set<string>) => void;
+  /** Relations set aside, by `edgeKey`. The evidence behind them stays in the Evidence tab. */
+  removed: Set<string>;
+  onRemoved: (next: Set<string>) => void;
+  /** How far apart the simulation holds the nodes */
+  spacing: number;
+  onSpacing: (value: number) => void;
 }) {
-  // How far apart the simulation holds the nodes. A crowded graph is the normal case on a rich catalogue, so
-  // this is a control rather than a constant — and it only re-runs the layout, never the query.
-  const [spacing, setSpacing] = useState(1);
-  const [dragging, setDragging] = useState(1);
+  // What the slider shows while it is being dragged: on a large graph the layout only follows on release
+  const [dragging, setDragging] = useState(spacing);
+  useEffect(() => setDragging(spacing), [spacing]);
   const several = seedCount > 1;
-  // Kinds of element hidden from the picture. Hiding is not merely a display trick: the hidden nodes leave
-  // the layout too, so what is left actually spreads out — which is the point of hiding a crowded kind.
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
-  useEffect(() => setHidden(new Set()), [nodes, edges]);
+  /** The relation under consideration: clicking one offers to set it aside. */
+  const [edge, setEdge] = useState<string | null>(null);
 
   /** Every kind present, with how many nodes it has: the legend, and the filter. */
   const kinds = useMemo(() => {
@@ -273,22 +309,33 @@ export function RelationGraph({
     for (const n of nodes) counts.set(nodeKind(n), (counts.get(nodeKind(n)) ?? 0) + 1);
     return [...counts.entries()].sort((a, b) => b[1] - a[1]);
   }, [nodes]);
+  const allHidden = kinds.length > 0 && kinds.every(([kind]) => hidden.has(kind));
 
   const shown = useMemo(() => {
-    if (!hidden.size) return { nodes, edges };
+    const keptEdges = removed.size ? edges.filter((e) => !removed.has(edgeKey(e))) : edges;
+    if (!hidden.size) return { nodes, edges: keptEdges };
     // A seed is never hidden: it is the question, and a graph without it reads as someone else's
     const keep = nodes.filter((n) => n.seed || !hidden.has(nodeKind(n)));
     const ids = new Set(keep.map((n) => n.id));
-    return { nodes: keep, edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)) };
-  }, [nodes, edges, hidden]);
+    return { nodes: keep, edges: keptEdges.filter((e) => ids.has(e.source) && ids.has(e.target)) };
+  }, [nodes, edges, hidden, removed]);
 
   // The layout is the expensive part and depends only on the graph and how far apart it is asked to hold it
   const placed = useMemo(() => layout(shown.nodes, shown.edges, spacing, seedCount), [shown, spacing, seedCount]);
   const box = useMemo(() => extent(placed), [placed]);
   const [zoom, setZoom] = useState(1);
+  // Where the view is centred, in the units of the drawing. Zooming without being able to move is a
+  // magnifying glass bolted to the table: the middle of a crowded graph is rarely what you want to read.
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   const [hovered, setHovered] = useState<string | null>(null);
   const svg = useRef<SVGSVGElement>(null);
-  useEffect(() => setZoom(1), [nodes, edges]);
+  // A new graph is a new question: fit it again. Hiding a kind or setting a relation aside is not — the view
+  // you arranged stays where you put it.
+  useEffect(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setEdge(null);
+  }, [nodes, edges]);
   const live = nodes.length <= LIVE_LAYOUT_MAX;
 
   const byId = useMemo(() => new Map(placed.map((n) => [n.id, n])), [placed]);
@@ -304,15 +351,64 @@ export function RelationGraph({
     return set;
   }, [focus, shown.edges]);
 
-  const view = `${box.x + (box.w * (1 - 1 / zoom)) / 2} ${box.y + (box.h * (1 - 1 / zoom)) / 2} ${box.w / zoom} ${box.h / zoom}`;
+  const fit = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
 
-  const toggle = (kind: string) =>
-    setHidden((current) => {
-      const next = new Set(current);
-      if (next.has(kind)) next.delete(kind);
-      else next.add(kind);
-      return next;
-    });
+  /**
+   * Dragging the picture. The movement is in screen pixels and the view in the units of the drawing, so it
+   * is converted through the rendered size — and through the *uniform* scale the viewBox actually uses,
+   * which is the larger of the two ratios, or the picture would slide away from the pointer.
+   */
+  const drag = useRef<{ x: number; y: number; px: number; py: number; moved: boolean } | null>(null);
+  // A drag that ends on the background must not also read as a click, which clears the selection
+  const dragged = useRef(false);
+
+  const scale = useCallback(() => {
+    const rect = svg.current?.getBoundingClientRect();
+    if (!rect || !rect.width || !rect.height) return 1;
+    return Math.max(box.w / zoom / rect.width, box.h / zoom / rect.height);
+  }, [box.w, box.h, zoom]);
+
+  const onPointerDown = (e: Pointer<SVGSVGElement>) => {
+    if (e.button !== 0) return;
+    // Cleared here rather than after use: a gesture that ends outside the picture never produces a click,
+    // and a flag left raised would swallow the next real one
+    dragged.current = false;
+    drag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: Pointer<SVGSVGElement>) => {
+    const start = drag.current;
+    if (!start) return;
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    if (!start.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    start.moved = true;
+    dragged.current = true;
+    const s = scale();
+    // Beyond a graph's width in either direction there is nothing left to look at
+    const clamp = (v: number, span: number) => Math.max(-span, Math.min(span, v));
+    setPan({ x: clamp(start.px - dx * s, box.w), y: clamp(start.py - dy * s, box.h) });
+  };
+  const onPointerUp = (e: Pointer<SVGSVGElement>) => {
+    if (drag.current && e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    drag.current = null;
+  };
+
+  const view = `${box.x + (box.w * (1 - 1 / zoom)) / 2 + pan.x} ${box.y + (box.h * (1 - 1 / zoom)) / 2 + pan.y} ${box.w / zoom} ${box.h / zoom}`;
+
+  const toggle = (kind: string) => {
+    const next = new Set(hidden);
+    if (next.has(kind)) next.delete(kind);
+    else next.add(kind);
+    onHidden(next);
+  };
+
+  const chosen = useMemo(() => shown.edges.find((e) => edgeKey(e) === edge) ?? null, [shown.edges, edge]);
 
   if (!nodes.length) return null;
 
@@ -320,6 +416,18 @@ export function RelationGraph({
     <Stack gap="xs" style={fullscreen ? { height: '100%' } : undefined}>
       <Group justify="space-between" wrap="wrap" gap="xs">
         <Group gap={6} wrap="wrap">
+          {/* One switch for the whole legend: on a rich catalogue the useful move is usually to put
+              everything away and bring back the one or two kinds you are actually following */}
+          <Tooltip label={allHidden ? 'Bring every kind back' : 'Hide every kind at once, then bring back the ones you want'}>
+            <Button
+              size="compact-xs"
+              variant={allHidden ? 'filled' : 'default'}
+              leftSection={allHidden ? <IconEye size={13} /> : <IconEyeOff size={13} />}
+              onClick={() => onHidden(allHidden ? new Set() : new Set(kinds.map(([kind]) => kind)))}
+            >
+              {allHidden ? 'All' : 'None'}
+            </Button>
+          </Tooltip>
           {kinds.map(([kind, count]) => {
             const off = hidden.has(kind);
             return (
@@ -343,16 +451,23 @@ export function RelationGraph({
                     />
                   }
                 >
-                  {kind === 'source' ? 'referential' : kind === 'query' ? 'text searched' : kind} ({count})
+                  {kindLabel(kind)} ({count})
                 </Badge>
               </Tooltip>
             );
           })}
-          {!!hidden.size && (
-            <Tooltip label="Show every kind again">
-              <ActionIcon size="sm" variant="subtle" onClick={() => setHidden(new Set())} aria-label="Show all">
-                <IconEye size={14} />
-              </ActionIcon>
+          {!!removed.size && (
+            <Tooltip label="Bring back the relations you set aside">
+              <Badge
+                size="sm"
+                variant="outline"
+                color="orange"
+                style={{ cursor: 'pointer', textTransform: 'none' }}
+                leftSection={<IconUnlink size={11} />}
+                onClick={() => onRemoved(new Set())}
+              >
+                {removed.size} relation(s) set aside
+              </Badge>
             </Tooltip>
           )}
         </Group>
@@ -375,9 +490,9 @@ export function RelationGraph({
                 label={(v) => `${v.toFixed(1)}×`}
                 onChange={(v) => {
                   setDragging(v);
-                  if (live) setSpacing(v);
+                  if (live) onSpacing(v);
                 }}
-                onChangeEnd={setSpacing}
+                onChangeEnd={onSpacing}
                 aria-label="Spacing between the nodes"
               />
             </Group>
@@ -387,8 +502,8 @@ export function RelationGraph({
               <IconZoomOut size={16} />
             </ActionIcon>
           </Tooltip>
-          <Tooltip label="Fit the whole graph">
-            <ActionIcon variant="default" onClick={() => setZoom(1)} aria-label="Fit">
+          <Tooltip label="Fit the whole graph again">
+            <ActionIcon variant="default" onClick={fit} aria-label="Fit">
               <IconFocusCentered size={16} />
             </ActionIcon>
           </Tooltip>
@@ -411,6 +526,43 @@ export function RelationGraph({
         </Group>
       </Group>
 
+      {/* A relation under consideration: what it asserts, and the offer to take it out of the picture */}
+      {chosen && (
+        <Group
+          gap="xs"
+          wrap="nowrap"
+          p={6}
+          style={{
+            border: '1px solid var(--mantine-color-default-border)',
+            borderRadius: 'var(--mantine-radius-sm)',
+            background: 'var(--mantine-color-default-hover)',
+          }}
+        >
+          <IconUnlink size={16} style={{ color: 'var(--mantine-color-dimmed)', flexShrink: 0 }} />
+          <Text size="xs" style={{ minWidth: 0 }} truncate>
+            <b>{byId.get(chosen.source)?.label ?? chosen.source}</b>
+            {chosen.kind === 'same_row' ? ' shares a row with ' : ' is in '}
+            <b>{byId.get(chosen.target)?.label ?? chosen.target}</b> — {chosen.label} in {chosen.referential_id}
+            {chosen.rows ? `, ${chosen.rows} row(s)` : ''}
+          </Text>
+          <Button
+            size="compact-xs"
+            color="orange"
+            variant="light"
+            leftSection={<IconUnlink size={13} />}
+            onClick={() => {
+              onRemoved(new Set([...removed, edgeKey(chosen)]));
+              setEdge(null);
+            }}
+          >
+            Set it aside
+          </Button>
+          <Button size="compact-xs" variant="subtle" onClick={() => setEdge(null)}>
+            Keep it
+          </Button>
+        </Group>
+      )}
+
       <Box
         style={{
           border: '1px solid var(--mantine-color-default-border)',
@@ -428,7 +580,20 @@ export function RelationGraph({
           width="100%"
           role="img"
           aria-label={`Relations of the investigation: ${shown.nodes.length} nodes, ${shown.edges.length} relations`}
-          onClick={() => onSelect?.(null)}
+          style={{ cursor: 'grab', touchAction: 'none' }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onClick={() => {
+            // The end of a drag reaches here as a click: it is a move of the view, not a change of selection
+            if (dragged.current) {
+              dragged.current = false;
+              return;
+            }
+            onSelect?.(null);
+            setEdge(null);
+          }}
         >
           <defs>
             <marker id="rg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
@@ -436,24 +601,58 @@ export function RelationGraph({
             </marker>
           </defs>
 
-          {shown.edges.map((edge, i) => {
-            const a = byId.get(edge.source);
-            const b = byId.get(edge.target);
+          {shown.edges.map((edgeOf, i) => {
+            const a = byId.get(edgeOf.source);
+            const b = byId.get(edgeOf.target);
             if (!a || !b) return null;
-            const dim = near !== null && !(near.has(edge.source) && near.has(edge.target));
+            const dim = near !== null && !(near.has(edgeOf.source) && near.has(edgeOf.target));
+            const key = edgeKey(edgeOf);
+            const picked = key === edge;
             return (
-              <line
-                key={`${edge.source}-${edge.target}-${edge.kind}-${edge.referential_id}-${i}`}
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke={edge.kind === 'same_row' ? 'var(--mantine-color-blue-5)' : 'var(--mantine-color-default-border)'}
-                strokeWidth={edge.kind === 'same_row' ? 1.6 : 1.1}
-                strokeDasharray={edge.kind === 'found_in' ? '4 3' : undefined}
-                opacity={dim ? 0.12 : 0.75}
-                markerEnd={edge.kind === 'same_row' ? 'url(#rg-arrow)' : undefined}
-              />
+              <g key={`${key}-${i}`}>
+                {/* A line two pixels wide is not a target: an invisible fat one carries the pointer */}
+                <line
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke="transparent"
+                  strokeWidth={10}
+                  style={{ cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (dragged.current) {
+                      dragged.current = false;
+                      return;
+                    }
+                    setEdge((current) => (current === key ? null : key));
+                  }}
+                >
+                  <title>
+                    {edgeOf.kind === 'same_row'
+                      ? `${a.label} and ${b.label} share a row of ${edgeOf.referential_id} (${edgeOf.label}) — click to set this relation aside`
+                      : `${a.label} is in ${edgeOf.referential_id} (${edgeOf.label}) — click to set this relation aside`}
+                  </title>
+                </line>
+                <line
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke={
+                    picked
+                      ? 'var(--mantine-color-orange-6)'
+                      : edgeOf.kind === 'same_row'
+                        ? 'var(--mantine-color-blue-5)'
+                        : 'var(--mantine-color-default-border)'
+                  }
+                  strokeWidth={picked ? 3 : edgeOf.kind === 'same_row' ? 1.6 : 1.1}
+                  strokeDasharray={edgeOf.kind === 'found_in' ? '4 3' : undefined}
+                  opacity={dim && !picked ? 0.12 : 0.75}
+                  markerEnd={edgeOf.kind === 'same_row' ? 'url(#rg-arrow)' : undefined}
+                  style={{ pointerEvents: 'none' }}
+                />
+              </g>
             );
           })}
 
@@ -472,6 +671,11 @@ export function RelationGraph({
                 onMouseLeave={() => setHovered(null)}
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (dragged.current) {
+                    dragged.current = false;
+                    return;
+                  }
+                  setEdge(null);
                   onSelect?.(node);
                 }}
               >
@@ -552,14 +756,19 @@ export function RelationGraph({
             <b>yellow double ring</b> marks a value several of them reach — that is what ties them together.
           </>
         )}{' '}
-        Use the spacing control if the picture is too tight, and click a kind in the legend to hide it.
+        Use the spacing control if the picture is too tight, <b>drag the picture</b> to move around it once
+        zoomed in, click a kind in the legend to hide it, and click a line to set that relation aside.
       </Text>
-      {!!hidden.size && (
-        <Group gap={6} align="center">
-          <IconEyeOff size={14} style={{ color: 'var(--mantine-color-dimmed)' }} />
+      {(!!hidden.size || !!removed.size) && (
+        <Group gap={6} align="center" wrap="wrap">
+          <IconHandStop size={14} style={{ color: 'var(--mantine-color-dimmed)' }} />
           <Text size="xs" c="dimmed">
-            Showing {shown.nodes.length} of {nodes.length} nodes — {[...hidden].join(', ')} hidden. Seeds are
-            always shown.
+            Showing {shown.nodes.length} of {nodes.length} nodes and {shown.edges.length} of {edges.length}{' '}
+            relations.
+            {hidden.size ? ` ${[...hidden].map(kindLabel).join(', ')} hidden — seeds are always shown.` : ''}
+            {removed.size
+              ? ` ${removed.size} relation(s) set aside: taken out of the picture, not out of the evidence.`
+              : ''}
           </Text>
         </Group>
       )}

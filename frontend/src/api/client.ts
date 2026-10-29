@@ -75,6 +75,7 @@ import type {
   UploadResult,
   WebauthnOptions,
 } from './types';
+import { reportReachable, reportUnreachable } from './connection';
 
 export class ApiError extends Error {
   status: number;
@@ -84,36 +85,70 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The status of a request that never got an answer: the backend is down, the network is out, the proxy in
+ * front of it refused. Zero rather than nothing, so one check covers it wherever a status is looked at.
+ */
+export const UNREACHABLE = 0;
+export const isUnreachable = (err: unknown) => err instanceof ApiError && err.status === UNREACHABLE;
+
+const UNREACHABLE_MESSAGE = 'the server could not be reached — the interface reconnects on its own';
+
 /** Called on any 401 so that the application can go back to the login page. */
 let onUnauthorized: () => void = () => {};
 export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn;
 }
 
+/** For the one request that does not go through `request()`: the assistant's stream reads its own response. */
+export function reportSessionLost() {
+  onUnauthorized();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    credentials: 'same-origin',
-    headers: {
-      Accept: 'application/json',
-      // Required by the backend on cookie-authenticated mutations (CSRF protection)
-      'X-Requested-With': 'RefExposer',
-      ...(init?.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-      ...init?.headers,
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...init,
+      credentials: 'same-origin',
+      headers: {
+        Accept: 'application/json',
+        // Required by the backend on cookie-authenticated mutations (CSRF protection)
+        'X-Requested-With': 'RefExposer',
+        ...(init?.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+        ...init?.headers,
+      },
+    });
+  } catch (e) {
+    // `fetch` only rejects when nothing came back: an HTTP error is a resolved promise. So this is the
+    // backend being down or the network being out — unless the caller aborted, which is not a failure.
+    if (e instanceof DOMException && e.name === 'AbortError') throw e;
+    reportUnreachable();
+    throw new ApiError(UNREACHABLE, UNREACHABLE_MESSAGE);
+  }
   if (res.status === 401 && !path.startsWith('/api/auth/login')) onUnauthorized();
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
+    let answered = false;
     try {
       const body = await res.json();
+      answered = true;
       if (typeof body.detail === 'string') message = body.detail;
       else if (Array.isArray(body.detail)) message = body.detail.map((d: { msg: string }) => d.msg).join(', ');
     } catch {
       /* not JSON */
     }
+    // A gateway error that carries no JSON is the proxy answering for a backend that is not there — nginx is
+    // up, the application is not. The backend's own 502 (a failed online enrichment, say) does carry JSON,
+    // which is what tells the two apart: one is an outage to reconnect from, the other a refused request.
+    if (!answered && (res.status === 502 || res.status === 503 || res.status === 504)) {
+      reportUnreachable();
+      throw new ApiError(UNREACHABLE, UNREACHABLE_MESSAGE);
+    }
+    reportReachable();
     throw new ApiError(res.status, message);
   }
+  reportReachable();
   return res.json() as Promise<T>;
 }
 

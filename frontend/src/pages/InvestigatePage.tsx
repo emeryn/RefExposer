@@ -46,6 +46,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type {
   Connection,
+  Expansion,
   GraphNode,
   Investigation,
   InvestigationSpec,
@@ -651,6 +652,7 @@ function SavedList({ onOpen }: { onOpen: (search: SavedSearch) => void }) {
                 <Text size="xs" c="dimmed" lineClamp={1}>
                   {(s.spec.values?.length ? s.spec.values : [s.spec.value]).filter(Boolean).join(' + ')} · depth{' '}
                   {s.spec.depth ?? 1}
+                  {s.spec.expansions?.length ? ` · +${s.spec.expansions.length} step(s) by hand` : ''}
                   {s.description ? ` — ${s.description}` : ''}
                 </Text>
                 <Text size="xs" c="dimmed">
@@ -688,6 +690,13 @@ function SavedList({ onOpen }: { onOpen: (search: SavedSearch) => void }) {
   );
 }
 
+/**
+ * Keep the investigation — the question, and the work done on the picture since.
+ *
+ * What is kept is still never a result: the steps followed by hand are kept as steps, so replaying one looks
+ * its value up again in the catalogue as it is then. Dropping them would make a saved search unable to
+ * describe the investigation anyone actually arrived at.
+ */
 function SaveModal({ spec, onClose }: { spec: InvestigationSpec; onClose: () => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState((spec.values ?? []).join(' + ').slice(0, 120));
@@ -717,6 +726,21 @@ function SaveModal({ spec, onClose }: { spec: InvestigationSpec; onClose: () => 
         <Text size="xs" c="dimmed">
           What is kept is the question — <b>{(spec.values ?? []).join(', ')}</b>, depth {spec.depth ?? 1} — not
           the result: replaying it reads the catalogue as it is then.
+          {!!spec.expansions?.length && (
+            <>
+              {' '}
+              The {spec.expansions.length} step(s) you followed by hand are kept too, and looked up again in
+              the same order: {spec.expansions.map((e) => e.value).join(', ')}.
+            </>
+          )}
+          {!!(spec.hidden_kinds?.length || spec.hidden_edges?.length) && (
+            <>
+              {' '}
+              So is what you took out of the picture
+              {spec.hidden_kinds?.length ? ` (${spec.hidden_kinds.join(', ')})` : ''}
+              {spec.hidden_edges?.length ? ` and ${spec.hidden_edges.length} relation(s)` : ''}.
+            </>
+          )}
         </Text>
         <Group justify="flex-end">
           <Button variant="default" onClick={onClose}>
@@ -738,12 +762,41 @@ export default function InvestigatePage() {
   const [node, setNode] = useState<GraphNode | null>(null);
   const [saving, setSaving] = useState(false);
   const [tab, setTab] = useState<string | null>('graph');
-  // Expansions made since the last search, and the meeting points they turned up. The chains between seeds
-  // are computed by the backend, so a link found by expanding is reported and a fresh search offered rather
-  // than a chain being worked out here from a different rule.
-  const [expansions, setExpansions] = useState(0);
+  // Steps followed by hand since the last search, and the meeting points they turned up. The chains between
+  // seeds are computed by the backend, so a link found by expanding is reported and a fresh search offered
+  // rather than a chain being worked out here from a different rule.
+  const [steps, setSteps] = useState<Expansion[]>([]);
   const [newlyShared, setNewlyShared] = useState<string[]>([]);
   const [full, setFull] = useState(false);
+  /**
+   * How the picture is arranged. Held by the page, not by the graph: the graph is drawn twice — in the tab
+   * and in the enlarged window — and a filter that reset on the way to full screen would undo the work it
+   * was applied to. These travel into a saved search as well, so a shared investigation looks like the one
+   * that was shared.
+   */
+  const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(new Set());
+  const [removedEdges, setRemovedEdges] = useState<Set<string>>(new Set());
+  const [spacing, setSpacing] = useState(1);
+
+  /** The investigation as it would be kept: the search, the steps, and what was taken out of the picture. */
+  const keepable = useMemo(
+    (): InvestigationSpec => ({
+      ...spec,
+      expansions: steps,
+      hidden_kinds: [...hiddenKinds],
+      hidden_edges: [...removedEdges],
+    }),
+    [spec, steps, hiddenKinds, removedEdges],
+  );
+
+  /** A fresh graph: how the previous picture was arranged describes nodes that may not be there any more. */
+  const reset = () => {
+    setNode(null);
+    setSteps([]);
+    setNewlyShared([]);
+    setHiddenKinds(new Set());
+    setRemovedEdges(new Set());
+  };
 
   const { data: catalogue } = useQuery({ queryKey: ['entity-catalogue'], queryFn: api.entityCatalogue });
   const { data: refs } = useQuery({ queryKey: ['referentials'], queryFn: api.referentials });
@@ -752,9 +805,7 @@ export default function InvestigatePage() {
     mutationFn: (body: InvestigationSpec) => api.investigate(body),
     onSuccess: (answer) => {
       setResult(answer);
-      setNode(null);
-      setExpansions(0);
-      setNewlyShared([]);
+      reset();
       // With several values, what ties them together is what was asked for
       setTab(answer.connections.length ? 'links' : 'graph');
     },
@@ -777,13 +828,14 @@ export default function InvestigatePage() {
         follow: spec.follow,
         rows_per_lookup: spec.rows_per_lookup,
       }),
-    onSuccess: (added, { value, from }) => {
+    onSuccess: (added, { value, entity, from }) => {
       setResult((current) => {
         if (!current) return added;
         const before = new Set(meetingPoints(current));
         const next = merge(current, added, from);
         const fresh = meetingPoints(next).filter((id) => !before.has(id));
-        setExpansions((n) => n + 1);
+        // Kept as part of the question, so this step is in the search if it is saved
+        setSteps((current) => [...current, { value, entity, from: from.id }]);
         setNewlyShared((ids) => [...new Set([...ids, ...fresh])]);
         const grew = next.nodes.length - current.nodes.length;
         notifications.show({
@@ -801,15 +853,55 @@ export default function InvestigatePage() {
   const doExpand = (value: string, entity: string | null, from: GraphNode) =>
     expand.mutate({ value, entity, from });
 
+  /**
+   * Replay a kept investigation: the search, then every step that was followed by hand.
+   *
+   * Each step is a search of its own, merged the same way as when it was made by hand, so a replay reads the
+   * catalogue as it is now rather than showing a stored picture. A step whose node is no longer there — the
+   * value left the referential, or this account may not read it — is left out and said so, instead of being
+   * hung somewhere it does not belong.
+   */
   const replay = useMutation({
-    mutationFn: (id: number) => api.runSearch(id),
-    onSuccess: (answer) => {
-      setResult(answer);
+    mutationFn: async (id: number) => {
+      const answer = await api.runSearch(id);
+      const kept = (answer.search?.spec ?? {}) as InvestigationSpec;
+      let graph: Investigation = answer;
+      const applied: Expansion[] = [];
+      const missed: string[] = [];
+      for (const step of kept.expansions ?? []) {
+        const from = graph.nodes.find((n) => n.id === step.from);
+        if (!from) {
+          missed.push(step.value);
+          continue;
+        }
+        const added = await api.investigate({
+          values: [step.value],
+          ...(step.entity ? { entity: step.entity, match: 'exact' as MatchMode } : { match: 'auto' as MatchMode }),
+          depth: 1,
+          scope: kept.scope,
+          follow: kept.follow,
+          rows_per_lookup: kept.rows_per_lookup,
+        });
+        graph = merge(graph, added, from);
+        applied.push(step);
+      }
+      return { answer, graph, kept, applied, missed };
+    },
+    onSuccess: ({ answer, graph, kept, applied, missed }) => {
+      setResult(graph);
       setSpec({ ...EMPTY, ...answer.spec, values: answer.spec.values });
       setParams(urlFromSpec({ ...answer.spec, values: answer.spec.values }), { replace: true });
-      setNode(null);
-      setExpansions(0);
-      setNewlyShared([]);
+      reset();
+      setSteps(applied);
+      setHiddenKinds(new Set(kept.hidden_kinds ?? []));
+      setRemovedEdges(new Set(kept.hidden_edges ?? []));
+      if (missed.length) {
+        notifications.show({
+          title: `${missed.length} step(s) could not be replayed`,
+          message: `${missed.join(', ')} hung from a value the catalogue no longer gives you. The rest is here.`,
+          color: 'orange',
+        });
+      }
       setTab(answer.connections.length ? 'links' : 'graph');
     },
     onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
@@ -979,12 +1071,12 @@ export default function InvestigatePage() {
             )}
           </SimpleGrid>
 
-          {expansions > 0 && (
+          {steps.length > 0 && (
             <Callout
               color={newlyShared.length ? 'yellow' : 'gray'}
               variant="light"
               icon={<IconPlus size={18} />}
-              title={`Grown by hand: ${expansions} expansion${expansions > 1 ? 's' : ''}`}
+              title={`Grown by hand: ${steps.length} expansion${steps.length > 1 ? 's' : ''}`}
             >
               <Group justify="space-between" wrap="wrap" gap="sm">
                 <Text size="sm">
@@ -992,7 +1084,8 @@ export default function InvestigatePage() {
                     ? `Expanding turned up ${newlyShared.length} value(s) that several of your seeds reach. The
                        chains between them are worked out at search time, so search again to read them.`
                     : `What you expanded is in the graph and in the evidence. The links between your values
-                       are the ones found at search time.`}
+                       are the ones found at search time.`}{' '}
+                  Keeping this investigation keeps these steps: replaying it follows them again.
                 </Text>
                 {newlyShared.length > 0 && (
                   <Button size="xs" variant="light" onClick={submit} loading={run.isPending}>
@@ -1037,7 +1130,7 @@ export default function InvestigatePage() {
               )}
             </Group>
             <Button variant="default" leftSection={<IconDeviceFloppy size={16} />} onClick={() => setSaving(true)}>
-              Keep this search
+              {steps.length || hiddenKinds.size || removedEdges.size ? 'Keep this investigation' : 'Keep this search'}
             </Button>
           </Group>
 
@@ -1082,6 +1175,12 @@ export default function InvestigatePage() {
                   onSelect={setNode}
                   seedCount={stats.seeds}
                   onFullscreen={setFull}
+                  hidden={hiddenKinds}
+                  onHidden={setHiddenKinds}
+                  removed={removedEdges}
+                  onRemoved={setRemovedEdges}
+                  spacing={spacing}
+                  onSpacing={setSpacing}
                 />
               </Tabs.Panel>
               {stats.seeds > 1 && (
@@ -1178,6 +1277,12 @@ export default function InvestigatePage() {
                 seedCount={stats?.seeds ?? 1}
                 fullscreen
                 onFullscreen={setFull}
+                hidden={hiddenKinds}
+                onHidden={setHiddenKinds}
+                removed={removedEdges}
+                onRemoved={setRemovedEdges}
+                spacing={spacing}
+                onSpacing={setSpacing}
               />
             </div>
             <div
@@ -1231,7 +1336,7 @@ export default function InvestigatePage() {
           expanding={expand.isPending ? (expand.variables?.value ?? null) : null}
         />
       )}
-      {saving && <SaveModal spec={spec} onClose={() => setSaving(false)} />}
+      {saving && <SaveModal spec={keepable} onClose={() => setSaving(false)} />}
     </Stack>
   );
 }

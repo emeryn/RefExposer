@@ -1,6 +1,6 @@
 import { Alert, Box, Button, Center, Divider, Paper, PasswordInput, SegmentedControl, Stack, Text, TextInput } from '@mantine/core';
 import { BrandHero } from '../components/Brand';
-import { IconAlertCircle, IconKey, IconLock, IconUser } from '@tabler/icons-react';
+import { IconAlertCircle, IconClock, IconKey, IconLock, IconUser } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { useState, type FormEvent } from 'react';
 import { api } from '../api/client';
@@ -22,7 +22,7 @@ function takeAuthError(): string | null {
 }
 
 export default function LoginPage() {
-  const { setMe } = useAuth();
+  const { setMe, expired } = useAuth();
   const { data: providers } = useQuery({ queryKey: ['providers'], queryFn: api.providers, staleTime: 60_000 });
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -91,6 +91,13 @@ export default function LoginPage() {
         <BrandHero caption="Sign in to access the referentials" />
         <Paper withBorder shadow="sm" p="xl" radius="md">
           <Stack>
+            {/* Why the form appeared while they were working: a sign-in page with no explanation reads as a
+                fault of the application, and the answer is simply to sign in again */}
+            {expired && !error && (
+              <Alert color="blue" icon={<IconClock size={18} />} p="sm">
+                Your session ended, so you were signed out. Sign in again to carry on where you were.
+              </Alert>
+            )}
             {error && (
               <Alert color="red" icon={<IconAlertCircle size={18} />} p="sm">
                 {error}

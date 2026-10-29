@@ -45,12 +45,20 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 5_000,
       refetchOnWindowFocus: false,
+      // The network came back: ask again, even for a query still considered fresh — what is on screen was
+      // read before the outage
+      refetchOnReconnect: 'always',
       // Only a network failure or a server error is worth asking again: a refused request (400, 403, 404...) or a
       // query stopped by the timeout (408) gives the same answer, after the same wait
       retry: (count, err) => {
         const status = (err as { status?: number }).status;
+        // The server was not reached at all. A couple of quick attempts here for a blip, and no more: from
+        // there it is the connection watcher's business — it polls `/api/health` and refetches everything
+        // once the backend answers, instead of every query on the page retrying on its own schedule
+        if (status === 0) return count < 2;
         return count < 2 && (status === undefined || (status >= 500 && status !== 504));
       },
+      retryDelay: (count) => Math.min(1000 * 2 ** count, 10_000),
     },
   },
 });

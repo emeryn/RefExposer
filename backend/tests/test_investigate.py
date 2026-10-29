@@ -850,3 +850,32 @@ def test_a_value_picked_out_of_a_row_can_be_expanded_even_if_it_is_not_an_identi
     expanded = vulns.post("/api/investigate", json={"values": [row["product"]], "match": "auto", "depth": 1})
     assert expanded.status_code == 200, expanded.text
     assert "kev" in sources_of(expanded.json())
+
+
+def test_the_steps_followed_by_hand_are_part_of_the_question(vulns):
+    """A kept search holds the expansions and what was taken out of the picture, spelled as they were given.
+
+    They describe the picture, not the walk, so the search itself ignores them — but a saved search that
+    dropped them could only replay the first question, never the investigation anyone arrived at.
+    """
+    saved = _save(vulns, expansions=[{"value": "T1190", "entity": "attack_technique", "from": "cve:CVE-2024-3400"},
+                                     {"value": "Palo Alto", "entity": None, "from": "source:kev"}],
+                  hidden_kinds=["cwe", "source"],
+                  hidden_edges=["cve:CVE-2024-3400|source:kev|found_in|kev|cveID"])
+    kept = vulns.get(f"/api/searches/{saved['id']}").json()["spec"]
+    # `from` survives as `from`: the field is named for Python but stored the way the interface reads it
+    assert [(e["value"], e["entity"], e["from"]) for e in kept["expansions"]] == [
+        ("T1190", "attack_technique", "cve:CVE-2024-3400"),
+        ("Palo Alto", None, "source:kev"),
+    ]
+    assert kept["hidden_kinds"] == ["cwe", "source"]
+    assert kept["hidden_edges"] == ["cve:CVE-2024-3400|source:kev|found_in|kev|cveID"]
+    # And they change nothing about the search itself
+    assert sources_of(vulns.post(f"/api/searches/{saved['id']}/run").json()) == [
+        "advisories", "epss", "exploits", "kev"]
+
+
+def test_an_expansion_names_where_it_hangs_from(vulns):
+    """A step without the node it was followed from cannot be replayed anywhere, so it is refused outright."""
+    body = {"name": "Nowhere", "spec": {"value": "CVE-2024-3400", "expansions": [{"value": "T1190"}]}}
+    assert vulns.post("/api/searches", json=body).status_code == 422
