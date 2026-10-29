@@ -2,9 +2,13 @@ name: CI
 
 on:
   push:
+    # `dev` is deliberately absent: publish.yml owns that branch and calls this workflow as its test gate.
+    # Triggering here as well would make two runs share the concurrency group below and cancel each other.
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Called by publish.yml so a release is gated by exactly the same tests, rather than a second copy of them
+  workflow_call:
 
 permissions:
   contents: read

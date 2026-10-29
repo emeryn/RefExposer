@@ -1,0 +1,130 @@
+name: Publish images
+
+# Two ways in, and both run the test suite first (the CI workflow, called as a gate — not a second copy of
+# it, so the tests that guard a release can never drift from the tests that guard a pull request):
+#
+#   * a push to `dev`      -> the `dev` tag, plus `dev-<sha>` to come back to a precise build
+#   * a tag `v1.2.3`       -> `1.2.3`, `1.2`, and `latest`
+#
+# Merging into `main` publishes nothing on its own: a release is a deliberate act, and the tag is that act.
+# `edge` below is commented out for whoever disagrees.
+on:
+  push:
+    branches: [dev]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Named after this workflow so the CI run it calls cannot collide with a CI run of its own
+  group: publish-${{ github.ref }}
+  # A release in flight is never cancelled; a new push to dev supersedes the previous one
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  # Everything a pull request has to pass, passed again on exactly what is about to be published
+  tests:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Version check
+    runs-on: ubuntu-latest
+    # Only a tag claims a version; a dev build has nothing to check
+    if: github.ref_type == 'tag'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version the application reports lives in backend/app/__init__.py and nowhere else. Tagging
+      # without bumping it would publish an image called 1.2.0 whose /api/system answers 1.0.0, so the
+      # release stops here rather than shipping that.
+      - name: The tag and __version__ must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' backend/app/__init__.py)
+          echo "tag=$tag  backend/app/__init__.py=$code"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match __version__ = \"$code\"." \
+                 "Bump backend/app/__init__.py (and the CHANGELOG), then move the tag."
+            exit 1
+          fi
+
+  publish:
+    name: ${{ matrix.name }} image
+    runs-on: ubuntu-latest
+    needs: [tests, version]
+    # `version` is skipped on a dev build, and a skipped need would otherwise skip this job too.
+    # `!cancelled()` rather than `always()`: a cancelled run must not go on to publish.
+    if: ${{ !cancelled() && needs.tests.result == 'success' && needs.version.result != 'failure' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            context: ./backend
+            # The Dockerfile also holds a `test` stage: the published image is the runtime one
+            target: runtime
+          - name: frontend
+            context: ./frontend
+            target: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The username may be a variable or a secret depending on where it was put; the token is a secret
+      - name: Sign in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # The names the compose file and the Quadlet units already expect
+          images: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}/refexposer-${{ matrix.name }}
+          tags: |
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,prefix=dev-,format=short,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          # latest=auto: set by a release tag, and never by a pre-release such as v1.2.0-rc1
+          flavor: latest=auto
+
+      # workflow_dispatch from a branch other than dev computes no tag at all; say so instead of letting
+      # docker fail on an empty tag list
+      - name: There has to be something to tag
+        run: |
+          if [ -z "${{ steps.meta.outputs.tags }}" ]; then
+            echo "::error::nothing to publish from ${{ github.ref }}."                  "Push to dev for the dev tag, or push a v* tag for a release."
+            exit 1
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # The layer cache lives with the run, so a dev push rebuilds only what changed
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          # One architecture. amd64 is what the deployment documentation describes, and arm64 through QEMU
+          # roughly triples the build: add it here when something needs it.
+          platforms: linux/amd64
+
+      - name: What was published
+        run: |
+          echo "### ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
