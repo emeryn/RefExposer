@@ -164,6 +164,9 @@ Everything below is in this first published version.
   the version, its `major.minor` and `latest`, and a merge into `main` publishes nothing on its own. The
   publish workflow calls the CI workflow as its gate, so the tests guarding a release are the same ones
   guarding a pull request (see [Development](docs/development.md)).
+- Each image is published to **Docker Hub and GitHub Packages from one build**, so both registries carry the
+  same digest: `emeryn/refexposer-*` and `ghcr.io/emeryn/refexposer-*`. The second needs no secret, only the
+  `packages: write` permission of the run.
 
 ### Security
 

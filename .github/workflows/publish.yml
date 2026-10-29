@@ -9,8 +9,11 @@ name: Publish images
 # Merging into `main` publishes nothing on its own: a release is a deliberate act, and the tag is that act.
 # `edge` below is commented out for whoever disagrees.
 #
-# There is nothing to bump in the source for a release: the tag is stamped into the image as REFEX_VERSION
-# and that is what the application reports (backend/app/__init__.py).
+# There is nothing to bump in the source for a release: the tag is stamped into the image as
+# REFEX_BUILD_VERSION and that is what the application reports (backend/app/__init__.py).
+#
+# Each image goes to **two registries** from one build, so both carry the same digest: Docker Hub (what the
+# deployment documentation points at) and GitHub Packages, next to the code.
 on:
   push:
     branches: [dev]
@@ -19,6 +22,8 @@ on:
 
 permissions:
   contents: read
+  # Pushing to ghcr.io, with the token the run already has: no secret to create for it
+  packages: write
 
 concurrency:
   # Named after this workflow so the CI run it calls cannot collide with a CI run of its own
@@ -60,12 +65,23 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Sign in to GitHub Packages
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Work out the tags
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # The names the compose file and the Quadlet units already expect
-          images: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}/refexposer-${{ matrix.name }}
+          # The Docker Hub name is the one the compose file and the Quadlet units already expect. The
+          # ghcr.io one uses the repository owner as it is written: that works because `emeryn` is already
+          # lower case, and a registry refuses capitals — an owner with any would need lower-casing here.
+          images: |
+            ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}/refexposer-${{ matrix.name }}
+            ghcr.io/${{ github.repository_owner }}/refexposer-${{ matrix.name }}
           tags: |
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,prefix=dev-,format=short,enable=${{ github.ref == 'refs/heads/dev' }}
@@ -108,3 +124,23 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # The Docker Hub page of each image: the README, with its relative links made absolute, under a few lines
+  # saying which half of the pair it is. A description belongs to a repository and not to a tag, so this runs
+  # on a release only — a dev build would keep rewriting it with the same thing.
+  description:
+    name: Docker Hub descriptions
+    runs-on: ubuntu-latest
+    needs: [publish]
+    if: github.ref_type == 'tag'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push the README to both images
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          sh scripts/dockerhub-description.sh backend
+          sh scripts/dockerhub-description.sh frontend

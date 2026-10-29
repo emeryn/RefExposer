@@ -42,8 +42,15 @@ Two branches, and the images follow them:
 | merge into `main` | the whole CI | **nothing** — a release is a deliberate act |
 | push a tag `v1.2.0` | the whole CI, then the images | `1.2.0`, `1.2` and `latest` |
 
-Both image names are the ones [the deployment](deployment.md) already expects:
-`emeryn/refexposer-backend` and `emeryn/refexposer-frontend`.
+Each image goes to **two registries from one build**, so both carry the same digest:
+
+- **Docker Hub** — `emeryn/refexposer-backend`, `emeryn/refexposer-frontend`, the names
+  [the deployment](deployment.md) already expects;
+- **GitHub Packages** — `ghcr.io/emeryn/refexposer-backend`, `ghcr.io/emeryn/refexposer-frontend`, next to
+  the code. Nothing to configure: the run's own token pushes there, with `packages: write`.
+
+Either one can be pulled; they are the same images. A GitHub package is **private when Actions first creates
+it**, so each of the two has to be made public once, in its *Package settings*.
 
 `dev` moves under your feet, so a deployment that has to stay put pins `dev-<sha>`. A pre-release tag
 (`v1.2.0-rc1`) publishes `1.2.0-rc1` and deliberately leaves `latest` alone.
@@ -69,9 +76,33 @@ guarding a release can never drift from the tests guarding a pull request. `dev`
 triggers on purpose: `publish.yml` owns that branch, and triggering in both would make two runs share a
 concurrency group and cancel each other.
 
-Publishing needs `DOCKERHUB_USERNAME` (an Actions **variable**) and `DOCKERHUB_TOKEN` (an Actions **secret**,
+Docker Hub needs `DOCKERHUB_USERNAME` (an Actions **variable**) and `DOCKERHUB_TOKEN` (an Actions **secret**,
 a Docker Hub token with *Read & Write*). The username is better as a variable than a secret: as a secret it is
-masked in the logs and every image name reads `***/refexposer-backend`.
+masked in the logs and every image name reads `***/refexposer-backend`. GitHub Packages needs nothing.
+
+### The Docker Hub page of each image
+
+A release also replaces the **description** of both Docker Hub repositories with `README.md`:
+`scripts/dockerhub-description.sh <backend|frontend>` renders it with every relative link made absolute
+(documents to `/blob/`, pictures to `raw.githubusercontent.com`, or they would lead nowhere off GitHub), under
+a few lines saying which half of the pair the image is and how to pull it from either registry.
+
+`--print` renders it to standard output and changes nothing, which is how to check it without credentials:
+
+```bash
+scripts/dockerhub-description.sh frontend --print | less
+```
+
+A description belongs to a repository rather than to a tag, so it is written on a release only. GitHub
+Packages takes its page from the repository on its own, with nothing to push.
+
+### Base image advisories
+
+The two Dockerfiles apply the security updates of their base image at build time (`OS_UPDATE=1`, on by
+default), because a base image tag is rebuilt far less often than advisories are published. A scanner
+reporting a flaw in the **published** image is usually reporting an image built before the fix existed:
+rebuilding is what fixes it, and `make scan` says whether it did. `enterprise/README.md` covers the opposite
+case, a build with nothing to download.
 
 ## Licence
 
