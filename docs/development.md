@@ -31,6 +31,48 @@ a public issue.
 
 Changes worth knowing about are in [CHANGELOG.md](../CHANGELOG.md).
 
+## Branches, images and releasing
+
+Two branches, and the images follow them:
+
+| What you do | What CI does | What is published |
+|---|---|---|
+| open a pull request | the whole CI | nothing |
+| push to `dev` | the whole CI, then the images | `dev`, and `dev-<sha>` to come back to one precise build |
+| merge into `main` | the whole CI | **nothing** — a release is a deliberate act |
+| push a tag `v1.2.0` | the whole CI, then the images | `1.2.0`, `1.2` and `latest` |
+
+Both image names are the ones [the deployment](deployment.md) already expects:
+`emeryn/refexposer-backend` and `emeryn/refexposer-frontend`.
+
+`dev` moves under your feet, so a deployment that has to stay put pins `dev-<sha>`. A pre-release tag
+(`v1.2.0-rc1`) publishes `1.2.0-rc1` and deliberately leaves `latest` alone.
+
+### Releasing
+
+There is **nothing to edit in the source**. The version the application reports is stamped into the image
+from the tag (`REFEX_BUILD_VERSION`, read by `backend/app/__init__.py`), so the tag cannot disagree with what
+`/api/system` answers:
+
+```bash
+# on dev: close the CHANGELOG — [Unreleased] becomes [1.2.0] with its date
+git switch main && git merge --no-ff dev && git push     # CI only, no image
+git tag -a v1.2.0 -m "1.2.0" && git push origin v1.2.0   # this publishes
+```
+
+A build that passes no version — a source checkout, `make build`, `docker compose build` — reports
+`0.0.0+dev` rather than claiming a release it is not.
+
+The two workflows: [`ci.yml`](../.github/workflows/ci.yml) holds the checks, and
+[`publish.yml`](../.github/workflows/publish.yml) calls it as its gate before pushing anything, so the tests
+guarding a release can never drift from the tests guarding a pull request. `dev` is absent from `ci.yml`'s own
+triggers on purpose: `publish.yml` owns that branch, and triggering in both would make two runs share a
+concurrency group and cancel each other.
+
+Publishing needs `DOCKERHUB_USERNAME` (an Actions **variable**) and `DOCKERHUB_TOKEN` (an Actions **secret**,
+a Docker Hub token with *Read & Write*). The username is better as a variable than a secret: as a secret it is
+masked in the logs and every image name reads `***/refexposer-backend`.
+
 ## Licence
 
 RefExposer is released under the **[Apache License 2.0](../LICENSE)**: use it, run it, change it, redistribute

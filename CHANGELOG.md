@@ -3,7 +3,18 @@
 Notable changes to RefExposer. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-10-29
+
+First version: referentials declared from the interface or in YAML, downloaded from HTTP, Git, files, an
+upload, an import folder, a sync folder or another instance; normalized to Parquet, validated, checked against
+quality rules and published. Explorer with filters and facets, generated REST API per referential, cached
+downloads, read-only SQL over DuckDB, internal and unified referentials, deltas, Bloom filters and MaxMind
+databases, large-volume support, confidential referentials encrypted at rest, local / LDAP / OpenID Connect
+sign-in with approval, roles and per-referential rights, API tokens and service accounts, two-factor
+authentication, secret manager, notifications, audit log, syslog forwarding, system tasks and backups,
+in-application assistant and MCP servers.
+
+Everything below is in this first published version.
 
 ### Added
 
@@ -144,6 +155,15 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - The configuration export no longer carries `pii.reveal_users`: account identifiers belong to one instance.
 - A federated replica receives the masked data of its peer and says so in its description.
 - The disk report has a category of its own for the versions kept by time travel.
+- The version the application reports is **stamped into the image from the git tag** instead of living in
+  `backend/app/__init__.py`: a release is a tag and nothing else, and an image called 1.2.0 can no longer
+  answer 1.0.0. A build that passes no version (a source checkout, `docker compose build`) reports
+  `0.0.0+dev`. The build argument is `REFEX_BUILD_VERSION`, deliberately not `REFEX_VERSION`, which belongs to
+  the host where it picks the image tag to run and is read into the container environment.
+- **GitHub Actions publish the images**: a push to `dev` gives the `dev` and `dev-<sha>` tags, a `v*` tag gives
+  the version, its `major.minor` and `latest`, and a merge into `main` publishes nothing on its own. The
+  publish workflow calls the CI workflow as its gate, so the tests guarding a release are the same ones
+  guarding a pull request (see [Development](docs/development.md)).
 
 ### Security
 
@@ -175,16 +195,4 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - The scope of a watchdog travels HMAC-signed with every tool call, and `CurrentUser.level()` refuses anything
   outside it — a scheduled agent cannot drift onto another referential.
 
-## [1.0.0]
-
-First version: referentials declared from the interface or in YAML, downloaded from HTTP, Git, files, an
-upload, an import folder, a sync folder or another instance; normalized to Parquet, validated, checked against
-quality rules and published. Explorer with filters and facets, generated REST API per referential, cached
-downloads, read-only SQL over DuckDB, internal and unified referentials, deltas, Bloom filters and MaxMind
-databases, large-volume support, confidential referentials encrypted at rest, local / LDAP / OpenID Connect
-sign-in with approval, roles and per-referential rights, API tokens and service accounts, two-factor
-authentication, secret manager, notifications, audit log, syslog forwarding, system tasks and backups,
-in-application assistant and MCP servers.
-
-[Unreleased]: https://github.com/emeryn/RefExposer/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/emeryn/RefExposer/releases/tag/v1.0.0

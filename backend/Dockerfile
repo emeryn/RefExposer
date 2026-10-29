@@ -106,6 +106,11 @@ CMD ["pytest", "-q", "-p", "no:cacheprovider"]
 
 # --- runtime image (default target, keep last)
 FROM base AS runtime
+# Version the application reports, stamped from the git tag by the publish workflow (app/__init__.py reads
+# it). Nothing to edit in the source for a release: the tag is the version. A build that passes nothing says
+# 0.0.0+dev rather than claiming a release.
+ARG REFEX_BUILD_VERSION=0.0.0+dev
+ENV REFEX_BUILD_VERSION=${REFEX_BUILD_VERSION}
 # No package manager in the image that runs in production: nothing installs anything at runtime, and the
 # libraries pip vendors (urllib3, msgpack, setuptools) are reported by scanners although they are unreachable
 USER root

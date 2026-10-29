@@ -102,6 +102,10 @@ Thumbs.db
 *_old.*
 *.tmp
 
+# --- Personal notes -----------------------------------------------------------------------------------
+# Your own notes and cheat sheets: anything named *.local.md stays on your machine
+*.local.md
+
 # --- AI assistant context -----------------------------------------------------------------------------
 # Instructions and transcripts of a coding assistant: never part of the project
 .claude/

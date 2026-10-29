@@ -50,6 +50,9 @@ services:
         # Account running the backend: owner of ./data and ./import on the host (see README, "Containers")
         REFEX_UID: ${REFEX_UID:-10001}
         REFEX_GID: ${REFEX_GID:-10001}
+        # Version a locally built image reports. Deliberately its own variable: REFEX_VERSION picks which
+        # image tag to run and is read into the container environment, so it must not stamp a version too.
+        REFEX_BUILD_VERSION: ${REFEX_BUILD_VERSION:-0.0.0+dev}
     image: emeryn/refexposer-backend:${REFEX_VERSION:-latest}
     user: "0:0"
     entrypoint:

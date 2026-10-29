@@ -8,6 +8,9 @@ name: Publish images
 #
 # Merging into `main` publishes nothing on its own: a release is a deliberate act, and the tag is that act.
 # `edge` below is commented out for whoever disagrees.
+#
+# There is nothing to bump in the source for a release: the tag is stamped into the image as REFEX_VERSION
+# and that is what the application reports (backend/app/__init__.py).
 on:
   push:
     branches: [dev]
@@ -29,36 +32,10 @@ jobs:
     name: Tests
     uses: ./.github/workflows/ci.yml
 
-  version:
-    name: Version check
-    runs-on: ubuntu-latest
-    # Only a tag claims a version; a dev build has nothing to check
-    if: github.ref_type == 'tag'
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-
-      # The version the application reports lives in backend/app/__init__.py and nowhere else. Tagging
-      # without bumping it would publish an image called 1.2.0 whose /api/system answers 1.0.0, so the
-      # release stops here rather than shipping that.
-      - name: The tag and __version__ must agree
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          code=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' backend/app/__init__.py)
-          echo "tag=$tag  backend/app/__init__.py=$code"
-          if [ "$tag" != "$code" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match __version__ = \"$code\"." \
-                 "Bump backend/app/__init__.py (and the CHANGELOG), then move the tag."
-            exit 1
-          fi
-
   publish:
     name: ${{ matrix.name }} image
     runs-on: ubuntu-latest
-    needs: [tests, version]
-    # `version` is skipped on a dev build, and a skipped need would otherwise skip this job too.
-    # `!cancelled()` rather than `always()`: a cancelled run must not go on to publish.
-    if: ${{ !cancelled() && needs.tests.result == 'success' && needs.version.result != 'failure' }}
+    needs: [tests]
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -114,6 +91,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The version the application reports, stamped into the backend image from the tag that is being
+          # published (`1.2.0` for v1.2.0, `dev` on the dev branch). The frontend has no such argument.
+          build-args: ${{ matrix.name == 'backend' && format('REFEX_BUILD_VERSION={0}', steps.meta.outputs.version) || '' }}
           annotations: ${{ steps.meta.outputs.annotations }}
           # The layer cache lives with the run, so a dev push rebuilds only what changed
           cache-from: type=gha,scope=${{ matrix.name }}
