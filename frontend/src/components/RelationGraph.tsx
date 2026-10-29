@@ -377,7 +377,9 @@ export function RelationGraph({
     // and a flag left raised would swallow the next real one
     dragged.current = false;
     drag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y, moved: false };
-    e.currentTarget.setPointerCapture(e.pointerId);
+    // Deliberately *not* capturing the pointer here: capture retargets the click that ends the gesture to
+    // the element holding it, so capturing on press would send every click to this <svg> and no node or
+    // line would ever be clickable. The capture is taken once the movement proves to be a drag.
   };
   const onPointerMove = (e: Pointer<SVGSVGElement>) => {
     const start = drag.current;
@@ -385,6 +387,11 @@ export function RelationGraph({
     const dx = e.clientX - start.x;
     const dy = e.clientY - start.y;
     if (!start.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    if (!start.moved) {
+      // It is a drag: from here the gesture belongs to the picture, so it keeps following the pointer even
+      // when it leaves the frame, and the click it ends with lands here, where `dragged` swallows it
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
     start.moved = true;
     dragged.current = true;
     const s = scale();
