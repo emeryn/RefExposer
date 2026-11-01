@@ -449,6 +449,8 @@ export const api = {
   updateDefinition: (id: string, body: { config: Partial<DefinitionConfig>; upload_id?: string | null; pull: boolean }) =>
     request<Definition>(`/api/admin/referentials/${enc(id)}`, json('PUT', body)),
   deleteDefinition: (id: string, purge: boolean) => request<{ ok: boolean }>(`/api/admin/referentials/${enc(id)}?purge=${purge}`, json('DELETE')),
+  deleteDefinitions: (ids: string[], purge: boolean) =>
+    request<{ deleted: string[]; failed: { id: string; error: string }[] }>('/api/admin/referentials/delete', json('POST', { ids, purge })),
   uploadFiles: (files: File[], refId?: string) => {
     const form = new FormData();
     files.forEach((f) => form.append('files', f));

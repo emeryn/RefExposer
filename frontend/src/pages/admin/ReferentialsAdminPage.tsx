@@ -106,14 +106,22 @@ export default function ReferentialsAdminPage() {
   const setStatus = (v: StatusFilter) => setParams(v === 'all' ? {} : { status: v }, { replace: true });
   const [transfer, setTransfer] = useState<'export' | 'import' | null>(null);
   const [yamlId, setYamlId] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<Definition | null>(null);
+  const [deleting, setDeleting] = useState<Definition[] | null>(null);
   const [purge, setPurge] = useState(true);
+  const [selected, setSelected] = useState<string[]>([]);
 
   const remove = useMutation({
-    mutationFn: (d: Definition) => (d.kind === 'internal' ? api.deleteInternal(d.id) : api.deleteDefinition(d.id, purge)),
-    onSuccess: () => {
-      notifications.show({ message: 'Referential deleted', color: 'teal' });
+    mutationFn: (defs: Definition[]) => api.deleteDefinitions(defs.map((d) => d.id), purge),
+    onSuccess: (res) => {
+      if (res.deleted.length)
+        notifications.show({
+          message: res.deleted.length === 1 ? 'Referential deleted' : `${res.deleted.length} referentials deleted`,
+          color: 'teal',
+        });
+      // One referential refusing to go (update running, read by a unified referential kept) does not stop the others
+      for (const f of res.failed) notifications.show({ title: `${f.id} kept`, message: f.error, color: 'red', autoClose: false });
       setDeleting(null);
+      setSelected((ids) => ids.filter((id) => !res.deleted.includes(id)));
       qc.invalidateQueries();
     },
     onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
@@ -159,6 +167,17 @@ export default function ReferentialsAdminPage() {
         ),
     [data, filter, status],
   );
+
+  // Only the referentials editable from the interface can be deleted (not the YAML and sync folder ones)
+  const selectable = useMemo(() => rows.filter((d) => d.editable), [rows]);
+  const selectedDefs = useMemo(() => (data ?? []).filter((d) => selected.includes(d.id)), [data, selected]);
+  const toggle = (id: string, on: boolean) => setSelected((ids) => (on ? [...new Set([...ids, id])] : ids.filter((i) => i !== id)));
+  const allShownSelected = selectable.length > 0 && selectable.every((d) => selected.includes(d.id));
+  const someShownSelected = selectable.some((d) => selected.includes(d.id));
+  const toggleAllShown = () =>
+    setSelected((ids) =>
+      allShownSelected ? ids.filter((i) => !selectable.some((d) => d.id === i)) : [...new Set([...ids, ...selectable.map((d) => d.id)])],
+    );
 
   return (
     <Stack gap="lg">
@@ -217,6 +236,23 @@ export default function ReferentialsAdminPage() {
         />
         <TextInput placeholder="Filter (name, URL, error…)" leftSection={<IconSearch size={16} />} value={filter} onChange={(e) => setFilter(e.currentTarget.value)} w={300} />
       </Group>
+      {selectedDefs.length > 0 && (
+        <Alert variant="light" color="blue" p="xs">
+          <Group justify="space-between">
+            <Text size="sm">
+              <b>{selectedDefs.length}</b> referential(s) selected
+            </Text>
+            <Group gap="xs">
+              <Button size="compact-sm" variant="subtle" onClick={() => setSelected([])}>
+                Clear the selection
+              </Button>
+              <Button size="compact-sm" color="red" leftSection={<IconTrash size={14} />} onClick={() => setDeleting(selectedDefs)}>
+                Delete the selection
+              </Button>
+            </Group>
+          </Group>
+        </Alert>
+      )}
       <Card padding={0}>
         {isLoading ? (
           <Loader m="md" />
@@ -225,6 +261,15 @@ export default function ReferentialsAdminPage() {
             <Table verticalSpacing="sm" fz="sm" highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
+                  <Table.Th w={40}>
+                    <Checkbox
+                      aria-label="Select every referential shown"
+                      checked={allShownSelected}
+                      indeterminate={someShownSelected && !allShownSelected}
+                      disabled={selectable.length === 0}
+                      onChange={toggleAllShown}
+                    />
+                  </Table.Th>
                   <Table.Th>Referential</Table.Th>
                   <Table.Th>Definition</Table.Th>
                   <Table.Th>Source</Table.Th>
@@ -239,7 +284,15 @@ export default function ReferentialsAdminPage() {
                   const src = sourceLabel(d);
                   const s = d.summary;
                   return (
-                    <Table.Tr key={d.id}>
+                    <Table.Tr key={d.id} bg={selected.includes(d.id) ? 'var(--mantine-color-blue-light)' : undefined}>
+                      <Table.Td>
+                        <Checkbox
+                          aria-label={`Select ${d.config.name}`}
+                          checked={selected.includes(d.id)}
+                          disabled={!d.editable}
+                          onChange={(e) => toggle(d.id, e.currentTarget.checked)}
+                        />
+                      </Table.Td>
                       <Table.Td>
                         <Anchor component={Link} to={`/r/${d.id}`} fw={600} c="inherit" size="sm">
                           {d.config.name}
@@ -364,7 +417,7 @@ export default function ReferentialsAdminPage() {
                                 View as YAML
                               </Menu.Item>
                               <Menu.Divider />
-                              <Menu.Item leftSection={<IconTrash size={14} />} color="red" disabled={!d.editable} onClick={() => setDeleting(d)}>
+                              <Menu.Item leftSection={<IconTrash size={14} />} color="red" disabled={!d.editable} onClick={() => setDeleting([d])}>
                                 Delete
                               </Menu.Item>
                             </Menu.Dropdown>
@@ -380,14 +433,42 @@ export default function ReferentialsAdminPage() {
         )}
       </Card>
       <YamlModal id={yamlId} onClose={() => setYamlId(null)} />
-      <Modal opened={!!deleting} onClose={() => setDeleting(null)} title={<Text fw={700}>Delete “{deleting?.config.name}”?</Text>}>
+      <Modal
+        opened={!!deleting}
+        onClose={() => setDeleting(null)}
+        title={
+          <Text fw={700}>
+            {deleting && deleting.length > 1 ? `Delete ${deleting.length} referentials?` : `Delete “${deleting?.[0]?.config.name ?? ''}”?`}
+          </Text>
+        }
+      >
         <Stack>
-          <Text size="sm">The definition and its access rights will be deleted. The audit history is kept.</Text>
-          {deleting?.kind === 'internal' ? (
+          {deleting && deleting.length > 1 && (
+            <ScrollArea.Autosize mah={200}>
+              <Stack gap={2}>
+                {deleting.map((d) => (
+                  <Text key={d.id} size="sm">
+                    {d.config.name}{' '}
+                    <Text span size="xs" c="dimmed" ff="monospace">
+                      {d.id}
+                    </Text>
+                  </Text>
+                ))}
+              </Stack>
+            </ScrollArea.Autosize>
+          )}
+          <Text size="sm">
+            {deleting && deleting.length > 1 ? 'The definitions and their access rights' : 'The definition and its access rights'} will be
+            deleted. The audit history is kept.
+          </Text>
+          {deleting?.some((d) => d.kind === 'internal') && (
             <Text size="sm" c="red">
-              This is an internal referential: all its rows are deleted too.
+              {deleting.length > 1
+                ? 'The selection contains internal referentials: all their rows are deleted too.'
+                : 'This is an internal referential: all its rows are deleted too.'}
             </Text>
-          ) : (
+          )}
+          {deleting?.some((d) => d.kind !== 'internal') && (
             <Checkbox label="Also delete the downloaded data and the published versions" checked={purge} onChange={(e) => setPurge(e.currentTarget.checked)} />
           )}
           <Group justify="flex-end">

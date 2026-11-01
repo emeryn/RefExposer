@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..auth import CurrentUser, audit, require_admin
 from ..config import FORMATS, validate_definition
 from ..db import get_db
-from ..models import Grant, Group, ReferentialDefinition, ReferentialSnapshot
+from ..models import Grant, Group, InternalRecord, ReferentialDefinition, ReferentialSnapshot
 from ..preview import PreviewError, adopt_upload, preview, preview_combined, store_upload
 from ..secretstore import SecretError, check_references, mask_config, mask_source, unmask_source
 from ..service import Service
@@ -51,6 +51,11 @@ class PreviewRequest(BaseModel):
     combine: dict[str, Any] | None = None
     key: str | None = None
     confidential: bool = False
+
+
+class BulkDeleteIn(BaseModel):
+    ids: list[str] = Field(..., min_length=1, description="Identifiers of the referentials to delete")
+    purge: bool = Field(True, description="Also delete the downloaded data and the published versions")
 
 
 class DefinitionIn(BaseModel):
@@ -282,6 +287,77 @@ def update_definition(ref_id: str, body: DefinitionIn, request: Request, db: Ses
     return {**_definition_dict(service, ref_id), "run": run}
 
 
+def _remove_definition(db: Session, service: Service, ref_id: str, purge: bool, admin: CurrentUser,
+                       request: Request, together: set[str]) -> None:
+    """Delete one referential created from the interface. `together` holds the referentials deleted in the
+    same request: one of them reading this one is not a reason to refuse (it goes away too)."""
+    d = db.get(ReferentialDefinition, ref_id)
+    if not d:
+        ref = service.refs.get(ref_id)
+        if ref and ref.origin == "file":
+            raise HTTPException(409, f"referential defined in config/{ref.config_file}: remove it from the YAML file")
+        if ref and ref.origin == "sync":
+            raise HTTPException(409, f"referential synchronized from {ref.config_file}: remove it from the sync folder")
+        raise HTTPException(404, f"unknown referential: '{ref_id}'")
+    internal = (d.config or {}).get("source", {}).get("type") == "internal"
+    if internal:
+        service.discard_scheduled(ref_id)
+    if ref_id in service.active:
+        raise HTTPException(409, "a publication is running, retry in a moment" if internal
+                            else "an update is running: cancel it before deleting the referential")
+    used_by = [u for u in service.dependents(ref_id) if u not in together]
+    if used_by:
+        raise HTTPException(409, f"used by the unified referential(s) {', '.join(used_by)}: change or delete them first")
+    if internal:  # its rows live in the database, never in the data folder
+        db.execute(delete(InternalRecord).where(InternalRecord.referential_id == ref_id))
+    db.delete(d)
+    db.execute(delete(Grant).where(Grant.referential_id == ref_id))
+    # The snapshots kept for time travel go with the referential (their files go with the data, when purged)
+    db.execute(delete(ReferentialSnapshot).where(ReferentialSnapshot.referential_id == ref_id))
+    audit(db, "internal.delete" if internal else "referential.delete", user=admin, target=f"ref:{ref_id}",
+          request=request, detail={"purge": purge or internal})
+    service.reload()
+    if purge or internal:
+        shutil.rmtree(RefPaths(service.settings.data_dir, ref_id).root, ignore_errors=True)
+
+
+@router.post("/delete", summary="Delete several referentials created from the interface")
+def delete_definitions(
+    body: BulkDeleteIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    service: Service = Depends(get_service),
+    admin: CurrentUser = Depends(require_admin),
+):
+    """Deletes what can be deleted and reports the rest: one referential refusing to go (an update running,
+    an untouched unified referential reading it) does not cancel the others."""
+    ids = list(dict.fromkeys(body.ids))
+    together = set(ids)
+    deleted: list[str] = []
+    failed: list[dict[str, str]] = []
+    waiting = ids
+    while waiting:
+        # A unified referential of the selection goes before the referentials it reads
+        postponed, progress = [], False
+        for ref_id in waiting:
+            if any(u in waiting and u != ref_id for u in service.dependents(ref_id)):
+                postponed.append(ref_id)
+                continue
+            try:
+                _remove_definition(db, service, ref_id, body.purge, admin, request, together)
+            except HTTPException as e:
+                db.rollback()
+                failed.append({"id": ref_id, "error": str(e.detail)})
+            else:
+                deleted.append(ref_id)
+            progress = True
+        if not progress:  # cycle between unified referentials: configuration refuses them, be safe anyway
+            failed += [{"id": i, "error": "referentials reading each other: delete them one by one"} for i in postponed]
+            break
+        waiting = postponed
+    return {"deleted": deleted, "failed": failed}
+
+
 @router.delete("/{ref_id}", summary="Delete a referential created from the interface")
 def delete_definition(
     ref_id: str,
@@ -291,27 +367,7 @@ def delete_definition(
     service: Service = Depends(get_service),
     admin: CurrentUser = Depends(require_admin),
 ):
-    d = db.get(ReferentialDefinition, ref_id)
-    if not d:
-        ref = service.refs.get(ref_id)
-        if ref and ref.origin == "file":
-            raise HTTPException(409, f"referential defined in config/{ref.config_file}: remove it from the YAML file")
-        if ref and ref.origin == "sync":
-            raise HTTPException(409, f"referential synchronized from {ref.config_file}: remove it from the sync folder")
-        raise HTTPException(404, f"unknown referential: '{ref_id}'")
-    if ref_id in service.active:
-        raise HTTPException(409, "an update is running: cancel it before deleting the referential")
-    used_by = service.dependents(ref_id)
-    if used_by:
-        raise HTTPException(409, f"used by the unified referential(s) {', '.join(used_by)}: change or delete them first")
-    db.delete(d)
-    db.execute(delete(Grant).where(Grant.referential_id == ref_id))
-    # The snapshots kept for time travel go with the referential (their files go with the data, when purged)
-    db.execute(delete(ReferentialSnapshot).where(ReferentialSnapshot.referential_id == ref_id))
-    audit(db, "referential.delete", user=admin, target=f"ref:{ref_id}", request=request, detail={"purge": purge})
-    service.reload()
-    if purge:
-        shutil.rmtree(RefPaths(service.settings.data_dir, ref_id).root, ignore_errors=True)
+    _remove_definition(db, service, ref_id, purge, admin, request, {ref_id})
     return {"ok": True}
 
 

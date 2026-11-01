@@ -110,6 +110,49 @@ def test_create_from_url_and_conflicts(env):
     assert env.get("/api/referentials/remote-copy").status_code == 200
 
 
+
+def test_delete_several_referentials(env):
+    """Several referentials deleted in one call, unified ones before the referentials they read."""
+    from test_combine import _create, _source
+
+    rows = "code,label\nA1,Alpha\nB2,Beta\n"
+    _source(env, "stock", "Stock", rows, key="code")
+    _source(env, "stock2", "Stock 2", rows.replace("A1", "C3"), key="code")
+    _create(env, {
+        "id": "stock-all", "name": "Stock (everything)", "key": "code",
+        "source": {"type": "referential", "referentials": ["stock", "stock2"]},
+        "combine": {"mode": "union", "source_column": "_source"},
+    })
+    assert wait_idle(env, "stock-all")["status"] == "success"
+    internal = env.post("/api/internal-referentials", json={
+        "id": "contacts", "name": "Contacts", "key": "email",
+        "columns": [{"name": "email", "type": "text"}, {"name": "team", "type": "text"}],
+    })
+    assert internal.status_code == 201, internal.text
+    assert env.post("/api/referentials/contacts/records", json={"email": "a@b.c", "team": "ops"}).status_code == 201
+    wait_idle(env, "contacts")
+
+    # A source cannot go while the unified referential reading it stays
+    r = env.post("/api/admin/referentials/delete", json={"ids": ["stock"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] == [] and "stock-all" in r.json()["failed"][0]["error"]
+
+    # The whole selection at once: the unified referential is deleted first, so its sources can follow
+    r = env.post("/api/admin/referentials/delete", json={"ids": ["stock", "stock2", "stock-all", "contacts", "countries"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deleted"][0] == "stock-all"
+    assert sorted(body["deleted"]) == ["contacts", "stock", "stock-all", "stock2"], body
+    # Defined in a YAML file: kept, and it did not stop the others
+    assert [f["id"] for f in body["failed"]] == ["countries"] and "config/" in body["failed"][0]["error"]
+    for ref_id in ("stock", "stock2", "stock-all", "contacts"):
+        assert env.get(f"/api/referentials/{ref_id}").status_code == 404
+        assert not (env.data_dir / ref_id).exists()
+    assert env.get("/api/referentials/countries").status_code == 200
+    assert env.post("/api/admin/referentials/delete", json={"ids": []}).status_code == 422
+    assert env.post("/api/admin/referentials/delete", json={"ids": ["nope"]}).json()["failed"][0]["error"].startswith("unknown referential")
+
+
 def test_downloads(env):
     refresh(env, "countries")
     listing = env.get("/api/referentials/countries/downloads").json()
