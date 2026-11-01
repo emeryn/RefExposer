@@ -166,6 +166,8 @@ export const api = {
   checkQuality: (id: string) => request<QualityResult | null>(`/api/referentials/${enc(id)}/quality/check`, json('POST')),
   refresh: (id: string, force = false, replace = false) =>
     request<Run>(`/api/referentials/${enc(id)}/refresh?force=${force}${replace ? '&replace=true' : ''}`, json('POST')),
+  refreshMany: (ids: string[], force: boolean) =>
+    request<{ started: Run[]; skipped: { id: string; error: string }[] }>('/api/referentials/refresh', json('POST', { ids, force })),
   cancel: (id: string) => request<{ cancelled: boolean }>(`/api/referentials/${enc(id)}/run`, json('DELETE')),
   rows: (id: string, params: URLSearchParams) => request<RowsResponse>(`/api/referentials/${enc(id)}/rows?${params}`),
   columnStats: (id: string, column: string, reveal = false) =>

@@ -111,6 +111,44 @@ def test_create_from_url_and_conflicts(env):
 
 
 
+
+def test_update_several_referentials(env):
+    """One call starts the update of a selection, and says which ones it could not start."""
+    from test_combine import _source
+
+    rows = "code,label\nA1,Alpha\nB2,Beta\n"
+    _source(env, "prices", "Prices", rows, key="code")
+    _source(env, "sales", "Sales", rows, key="code")
+    internal = env.post("/api/internal-referentials", json={
+        "id": "teams", "name": "Teams", "key": "code", "columns": [{"name": "code", "type": "text"}]})
+    assert internal.status_code == 201, internal.text
+    wait_idle(env, "teams")
+
+    r = env.post("/api/referentials/refresh", json={"ids": ["prices", "sales", "countries", "teams", "nope"], "force": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert sorted(run["ref_id"] for run in body["started"]) == ["countries", "prices", "sales"]
+    assert all(run["trigger"] == "manual" and run["force"] for run in body["started"])
+    skipped = {k["id"]: k["error"] for k in body["skipped"]}
+    assert "internal referential" in skipped["teams"] and skipped["nope"].startswith("unknown referential")
+    for ref_id in ("prices", "sales", "countries"):
+        assert wait_idle(env, ref_id)["status"] in ("success", "unchanged")
+
+    # A frozen version is not updated by surprise
+    assert env.post("/api/referentials/prices/pin", json={"reason": "audit"}).status_code == 200
+    body = env.post("/api/referentials/refresh", json={"ids": ["prices", "sales"]}).json()
+    assert [run["ref_id"] for run in body["started"]] == ["sales"]
+    assert "frozen" in body["skipped"][0]["error"]
+    wait_idle(env, "sales")
+    assert env.post("/api/referentials/refresh", json={"ids": []}).status_code == 422
+
+    # A user without the manage right is told nothing about the referentials they cannot read
+    create_user(env, "paul")
+    paul = new_client(env, "paul", USER_PASSWORD)
+    body = paul.post("/api/referentials/refresh", json={"ids": ["sales"]}).json()
+    assert body["started"] == [] and body["skipped"][0]["error"].startswith("unknown referential")
+
+
 def test_delete_several_referentials(env):
     """Several referentials deleted in one call, unified ones before the referentials they read."""
     from test_combine import _create, _source

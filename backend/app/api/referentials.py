@@ -219,6 +219,42 @@ def check_quality(ref_id: str, request: Request, service: Service = Depends(get_
     return result
 
 
+class RefreshManyIn(BaseModel):
+    ids: list[str] = Field(..., min_length=1, description="Identifiers of the referentials to update")
+    force: bool = Field(False, description="Rebuild even if the source has not changed")
+
+
+@router.post("/referentials/refresh", summary="Start the update of several referentials")
+def refresh_many(
+    body: RefreshManyIn,
+    request: Request,
+    service: Service = Depends(get_service),
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """Starts what can be started and reports the rest: a referential already updating, frozen or without a
+    source of its own does not stop the others. The updates then run through the usual job queue."""
+    started: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for ref_id in dict.fromkeys(body.ids):
+        try:
+            ref = get_ref(service, ref_id, user, "manage")
+            if ref.source.type == "internal":
+                raise HTTPException(400, "internal referential: it is published from its rows, there is nothing to download")
+            if service.is_pinned(ref_id):
+                raise HTTPException(409, "this version is frozen: resume the automatic updates before starting one")
+            if ref_id in service.active:
+                raise HTTPException(409, "an update is already running for this referential")
+            run = service.submit(ref_id, "manual", body.force, user.username)
+        except HTTPException as e:
+            skipped.append({"id": ref_id, "error": str(e.detail)})
+            continue
+        started.append(run.to_dict())
+        audit(db, "referential.refresh", user=user, target=f"ref:{ref_id}", request=request,
+              detail={"force": body.force, "replace": run.replace, "run": run.id, "selection": len(body.ids)})
+    return {"started": started, "skipped": skipped}
+
+
 @router.post("/referentials/{ref_id}/refresh", summary="Start an update")
 def refresh(
     ref_id: str,

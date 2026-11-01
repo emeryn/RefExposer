@@ -127,6 +127,22 @@ export default function ReferentialsAdminPage() {
     onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
   });
 
+  const updateSelection = useMutation({
+    mutationFn: ({ ids, force }: { ids: string[]; force: boolean }) => api.refreshMany(ids, force),
+    onSuccess: (res) => {
+      if (res.started.length)
+        notifications.show({
+          title: res.started.length === 1 ? 'Update started' : `${res.started.length} updates started`,
+          message: res.started.map((r) => r.ref_id).join(', '),
+          color: 'blue',
+        });
+      // Already running, frozen, nothing to download: reported one by one, the others started anyway
+      for (const k of res.skipped) notifications.show({ title: `${k.id} not started`, message: k.error, color: 'orange' });
+      qc.invalidateQueries();
+    },
+    onError: (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' }),
+  });
+
   const cancel = useMutation({
     mutationFn: (id: string) => api.cancel(id),
     onSuccess: () => {
@@ -168,16 +184,16 @@ export default function ReferentialsAdminPage() {
     [data, filter, status],
   );
 
-  // Only the referentials editable from the interface can be deleted (not the YAML and sync folder ones)
-  const selectable = useMemo(() => rows.filter((d) => d.editable), [rows]);
   const selectedDefs = useMemo(() => (data ?? []).filter((d) => selected.includes(d.id)), [data, selected]);
+  // Only the referentials editable from the interface can be deleted (not the YAML and sync folder ones), and
+  // only those with a source of their own can be updated (an internal referential is published from its rows)
+  const toDelete = useMemo(() => selectedDefs.filter((d) => d.editable), [selectedDefs]);
+  const toUpdate = useMemo(() => selectedDefs.filter((d) => d.kind !== 'internal'), [selectedDefs]);
   const toggle = (id: string, on: boolean) => setSelected((ids) => (on ? [...new Set([...ids, id])] : ids.filter((i) => i !== id)));
-  const allShownSelected = selectable.length > 0 && selectable.every((d) => selected.includes(d.id));
-  const someShownSelected = selectable.some((d) => selected.includes(d.id));
+  const allShownSelected = rows.length > 0 && rows.every((d) => selected.includes(d.id));
+  const someShownSelected = rows.some((d) => selected.includes(d.id));
   const toggleAllShown = () =>
-    setSelected((ids) =>
-      allShownSelected ? ids.filter((i) => !selectable.some((d) => d.id === i)) : [...new Set([...ids, ...selectable.map((d) => d.id)])],
-    );
+    setSelected((ids) => (allShownSelected ? ids.filter((i) => !rows.some((d) => d.id === i)) : [...new Set([...ids, ...rows.map((d) => d.id)])]));
 
   return (
     <Stack gap="lg">
@@ -246,9 +262,45 @@ export default function ReferentialsAdminPage() {
               <Button size="compact-sm" variant="subtle" onClick={() => setSelected([])}>
                 Clear the selection
               </Button>
-              <Button size="compact-sm" color="red" leftSection={<IconTrash size={14} />} onClick={() => setDeleting(selectedDefs)}>
-                Delete the selection
-              </Button>
+              <Tooltip label="Internal referentials are left out: they are published from their rows" disabled={toUpdate.length === selectedDefs.length}>
+                <Button
+                  size="compact-sm"
+                  variant="light"
+                  leftSection={<IconRefresh size={14} />}
+                  disabled={toUpdate.length === 0}
+                  loading={updateSelection.isPending}
+                  onClick={() => updateSelection.mutate({ ids: toUpdate.map((d) => d.id), force: false })}
+                >
+                  Update {toUpdate.length === selectedDefs.length ? 'the selection' : `${toUpdate.length} of them`}
+                </Button>
+              </Tooltip>
+              <Menu position="bottom-end" withinPortal>
+                <Menu.Target>
+                  <ActionIcon size="md" variant="light" aria-label="Other actions on the selection">
+                    <IconDots size={16} />
+                  </ActionIcon>
+                </Menu.Target>
+                <Menu.Dropdown>
+                  <Menu.Item
+                    leftSection={<IconRefresh size={14} />}
+                    disabled={toUpdate.length === 0}
+                    onClick={() => updateSelection.mutate({ ids: toUpdate.map((d) => d.id), force: true })}
+                  >
+                    Force a rebuild of {toUpdate.length} referential(s)
+                  </Menu.Item>
+                </Menu.Dropdown>
+              </Menu>
+              <Tooltip label="The YAML and sync folder referentials are left out: they are deleted from their file" disabled={toDelete.length === selectedDefs.length}>
+                <Button
+                  size="compact-sm"
+                  color="red"
+                  leftSection={<IconTrash size={14} />}
+                  disabled={toDelete.length === 0}
+                  onClick={() => setDeleting(toDelete)}
+                >
+                  Delete {toDelete.length === selectedDefs.length ? 'the selection' : `${toDelete.length} of them`}
+                </Button>
+              </Tooltip>
             </Group>
           </Group>
         </Alert>
@@ -266,7 +318,7 @@ export default function ReferentialsAdminPage() {
                       aria-label="Select every referential shown"
                       checked={allShownSelected}
                       indeterminate={someShownSelected && !allShownSelected}
-                      disabled={selectable.length === 0}
+                      disabled={rows.length === 0}
                       onChange={toggleAllShown}
                     />
                   </Table.Th>
@@ -289,7 +341,6 @@ export default function ReferentialsAdminPage() {
                         <Checkbox
                           aria-label={`Select ${d.config.name}`}
                           checked={selected.includes(d.id)}
-                          disabled={!d.editable}
                           onChange={(e) => toggle(d.id, e.currentTarget.checked)}
                         />
                       </Table.Td>
