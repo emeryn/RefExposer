@@ -104,6 +104,15 @@ def store_upload(settings: Settings, files: list[tuple[str, Any]]) -> dict[str, 
         with target.open("wb") as f:
             shutil.copyfileobj(stream, f, 1 << 20)
         produced.extend(unpack(target, dest, None, run))
+    # A file somebody chose to upload is the one worth looking at first (experimental, see ingest.inspect_files).
+    # Refused: everything of this upload goes, so nothing of it can be adopted by a referential afterwards.
+    from .ingest import FileRefused, inspect_files
+
+    try:
+        inspect_files(settings, produced, None, manual=True, log_line=run.log)
+    except FileRefused as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise PreviewError("the uploaded file(s) were refused: " + "; ".join(e.reasons[:3])) from e
     return {"upload_id": upload_id, "files": _describe(produced, dest)}
 
 

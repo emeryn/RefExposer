@@ -679,6 +679,80 @@ def _human(n: float) -> str:
     return f"{n:.1f} TB"
 
 
+def _antivirus_check(m: TaskManager, p: dict[str, Any]) -> Result:
+    """Is the local scanner answering, and how old is its signature database? Plus the quarantine retention.
+
+    Nothing is downloaded, here or anywhere else: in an air-gapped network `freshclam` needs a local mirror,
+    and this task's job is to say out loud when that mirror stopped working — a scanner whose database is
+    months old is a comfort, not a control.
+    """
+    from . import antivirus, appsettings
+
+    with m.db() as db:
+        if not getattr(appsettings.load(db, "experimental"), "antivirus_scan", False):
+            return Result("success", "The antivirus scan is not enabled", changed=False)
+        cfg: Any = appsettings.load(db, "antivirus")
+    lines: list[str] = []
+    status: Status = "success"
+    details: dict[str, Any] = {}
+    try:
+        info = antivirus.check(m.settings, cfg)
+        details.update(info)
+        age = info.get("signatures_age_days")
+        lines.append(f"{info.get('scanner') or cfg.backend} answers"
+                     + (f", signatures of {info['signatures_date']}" if info.get("signatures_date") else ""))
+        if info.get("stale"):
+            status = "warning"
+            lines.append(f"The signature database is {age} day(s) old, more than the {cfg.max_signature_age_days} "
+                         "allowed: check that its mirror is still being updated")
+        message = f"{info.get('scanner') or cfg.backend}" + (f", signatures {age} day(s) old" if age is not None else "")
+    except antivirus.AntivirusError as e:
+        # Said loudly: every update is refusing its files right now, if that is the configured policy
+        status = "error"
+        message = f"The scanner cannot be reached: {e}"
+        lines.append(message + (" — updates are refusing their sources (on_error: block)"
+                                if cfg.on_error == "block" else ""))
+        details["error"] = str(e)
+
+    purged = _purge_quarantine(m, cfg.quarantine_keep_days, lines.append)
+    details["quarantine_purged"] = purged
+    if purged:
+        message += f" · {purged} quarantined set(s) deleted"
+    return Result(status, message, {**details, "log": lines}, changed=bool(purged) or status != "success")
+
+
+def _purge_quarantine(m: TaskManager, keep_days: int, log_line: Callable[[str], None]) -> int:
+    """Drop the quarantined files older than the retention. Their verdicts go with them."""
+    import shutil
+    import time
+
+    from . import antivirus
+
+    root = antivirus.quarantine_dir(m.settings.data_dir)
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - keep_days * 86400
+    gone = 0
+    for note in sorted(root.glob("*/*/verdicts.json")):
+        if note.stat().st_mtime >= cutoff:
+            continue
+        shutil.rmtree(note.parent, ignore_errors=True)
+        gone += 1
+    for ref_folder in sorted(p for p in root.iterdir() if p.is_dir()):
+        if not any(ref_folder.iterdir()):
+            ref_folder.rmdir()
+    if gone:
+        log_line(f"{gone} quarantined set(s) older than {keep_days} day(s) deleted")
+    return gone
+
+
+def _antivirus_enabled(m: TaskManager) -> bool:
+    from . import appsettings
+
+    with m.db() as db:
+        return bool(getattr(appsettings.load(db, "experimental"), "antivirus_scan", False))
+
+
 def _remote_storage_enabled(m: TaskManager) -> bool:
     from . import appsettings
 
@@ -768,6 +842,12 @@ def _definitions() -> list[TaskDef]:
                         Param("include_raw", "Carry the downloaded sources (raw/)", "choice", "settings",
                               choices=["settings", "yes", "no"],
                               help="They come from their source again: leaving them out keeps the archive much smaller")]),
+        TaskDef("antivirus_check", "Antivirus", "integrity",
+                "Checks that the local scanner answers and says how old its signature database is — nothing is "
+                "downloaded, so an air-gapped mirror that stopped being updated shows up here. Also applies the "
+                "retention of the quarantine. Experimental: enabled in Settings › Experimental.",
+                _antivirus_check, schedule="15 7 * * *",
+                available=_antivirus_enabled),
         TaskDef("remote_storage", "Remote storage", "backup",
                 "Referentials stored in an S3 bucket (Settings › Storage): sends what the bucket is missing, then "
                 "frees the coldest local copies so the cache stays inside its limit. Does nothing when no "

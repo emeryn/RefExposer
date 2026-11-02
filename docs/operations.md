@@ -74,6 +74,7 @@ Every run that does something is written to the audit log (`task.run`), so it is
 | Backup | **Configuration backup**: definitions, accounts, rights, settings, internal rows (see below) | daily, 14 kept |
 | | **Full backup**: the configuration **and** the data of `data/`, on the server and / or in an S3 bucket (see below) | disabled, weekly when enabled |
 | | **Remote storage**: sends to the bucket what it is missing and frees the coldest local copies over the cache limit (see [Where a referential's data lives](referentials.md#where-a-referentials-data-lives)) | hourly (when remote storage is enabled) |
+| | **Antivirus**: the local scanner answers, how old its signature database is, and the retention of the quarantine (see [Checking the files that come in](#checking-the-files-that-come-in)) | daily (when the antivirus scan is enabled) |
 | Folder scans | **Import folder** and **sync folder** scans | `REFEX_IMPORT_POLL_SECONDS` / `REFEX_SYNC_POLL_SECONDS` |
 
 ### Configuration backups
@@ -176,6 +177,95 @@ The archive says which key wrote it (a one-way fingerprint, never the key), so:
 
 Re-keying can be run again safely: whatever already reads with the new key is left alone, so a restore
 interrupted halfway is simply restored again.
+
+## Checking the files that come in
+
+Two features, **off by default**, each turned on on its own in **Settings › Experimental** and configured just
+under its switch. They are independent: either can be used without the other. Neither ever reaches the
+network — no cloud service, no file sent to a third party, nothing downloaded at scan time — so both work the
+same in an air-gapped network.
+
+> **What this protects, honestly.** RefExposer never *executes* a source file: DuckDB parses it. These checks
+> protect the people who download the exports built from that data, and they answer the obligation many
+> organisations have to scan whatever enters them. What keeps the server standing is elsewhere: the rootless
+> container, the disk guard, the resource limits and the SSRF guard.
+
+### Antivirus scan
+
+Every source lands its files in `data/<id>/raw/` before the import reads them, so one scan covers downloads,
+S3 objects, Git files, uploads and the import folder. Two backends:
+
+- **A ClamAV daemon** (`clamd`), over a TCP or Unix socket, spoken to with its own protocol. Give it the data
+  volume and it reads each file **by path**: nothing crosses the socket, which is the only workable way for a
+  file of several GB. Without the volume, the file is streamed to it (`INSTREAM`), which the daemon's own
+  `StreamMaxLength` bounds — 25 MB by default.
+- **A command** of this machine: `clamscan`, a corporate agent, a YARA binary. Called as `<command> <file>`,
+  read with ClamAV's convention — 0 clean, 1 infected, anything else an error.
+
+Beside the application, the daemon is one service of the compose file:
+
+```yaml
+  clamav:
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    volumes:
+      - refexposer-data:/data:ro        # the same volume, read-only: it only has to read
+      - clamav-signatures:/var/lib/clamav
+```
+
+Then, in **Settings › Experimental › Antivirus**: address `clamav:3310`, *the daemon shares the data volume*
+on.
+
+**A file that was skipped is never called clean.** This is the point of the feature having four verdicts
+instead of two. ClamAV stops at its own `MaxFileSize` and `MaxScanSize` (100 MB by default), so a 40 GB feed
+would otherwise come back "clean" having never been read, and an instance would believe itself protected.
+Such a file is reported *not scanned*, and what that means for the update is yours to set: **refuse it**
+(the default) or **report it and carry on**. The same choice exists for a scanner that cannot be reached,
+which is a different question and deserves its own answer.
+
+**Signature freshness is reported, never fetched.** In an air-gapped network `freshclam` needs a local mirror,
+and a scanner whose database is six months old is a comfort, not a control. The **Antivirus** task (Tasks
+page) says how old the database is, warns past the threshold you set, and applies the retention of the
+quarantine. **Test the scanner** sends the standard EICAR test file — the one file every scanner agrees to
+report, and which is not malware — so the whole path is proven end to end rather than assumed.
+
+A refused file is moved to `data/.quarantine/<referential>/<run>/` with a note saying what matched, and the
+update is **rejected**: in this application that means the version already published stays published, so a
+poisoned feed never replaces good data. The quarantine is listed under its own heading in Experimental, it is
+**never carried into a backup**, and the task deletes what is older than the retention.
+
+### Structural checks, and safe spreadsheet exports
+
+No daemon and no signature database: these answer what a data file is allowed to **be**, which is a narrow
+enough question to answer properly — and they keep working the day a scanner stops being updated.
+
+On the way in, three questions about each file, each with its own policy (*refuse the update* or *report it*):
+
+- **Is it an executable?** A feed that answers with a Windows, Linux or macOS binary is not a feed, whatever
+  its extension says. Read from the first bytes, through gzip when the source is left compressed.
+- **Does it carry macros?** An `.xlsm`, or an Office file holding `vbaProject.bin`. Nothing in a referential
+  needs a macro.
+- **Is it what it claims to be?** A file declared CSV whose first bytes are those of a PDF, of an old Office
+  document or of a database. (An HTML error page answered with an HTTP 200 is already refused by the import
+  itself, which says so in its own words: there is no second check for it.)
+
+On the way out, one question about the exports:
+
+- **Will a spreadsheet treat a value as a formula?** A cell beginning with `=`, `+`, `-`, `@`, a tab or a
+  carriage return is executed by Excel and LibreOffice when the file is opened. Partner data is
+  attacker-controlled text, and it is handed to analysts as CSV and XLSX: that is a path from *hostile data in*
+  to *code running on a colleague's machine*, and no antivirus sees it, because the file is a valid CSV.
+  Such a value is prefixed with a single quote, which spreadsheets read as "this is text".
+
+  This **changes the exported value** of such a cell, which is why it is a choice and not a default. A plain
+  number is left alone (`-5`, `+12.5`): a negative figure is not an attack, and quoting it would corrupt the
+  data to no purpose. The Parquet, JSON and JSON Lines exports are untouched — nothing executes them. A
+  generated download already on disk is rebuilt when the setting changes, so a file is never served under the
+  other rule.
+
+Already covered elsewhere, and not repeated here: a path escaping its archive (zip-slip), an archive member
+that is not a regular file, a decompression bomb (the disk guard), an empty or whitespace-only source, a Git
+LFS pointer, and an HTML error page.
 
 ## Logging
 

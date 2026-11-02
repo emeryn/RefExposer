@@ -423,7 +423,13 @@ def export(
         max_rows = min(max_rows, 1_048_575)
     limit = min(limit or max_rows, max_rows)
     tq = _table_query(service, ref, request, q, sort, columns, _reveal(db, request, ref, user, reveal))
-    path = _run_query(lambda: service.engine.export(tq.select_sql(limit, 0), format))
+    # Experimental: in a CSV or an Excel file, neutralise the values a spreadsheet would execute (filechecks.py)
+    from .. import appsettings
+    from ..filechecks import wanted as escape_wanted
+
+    escape = escape_wanted(format, lambda: (bool(appsettings.load(db, "experimental").file_checks),
+                                            appsettings.load(db, "checks")))
+    path = _run_query(lambda: service.engine.export(tq.select_sql(limit, 0), format, escape))
     filename = f"{ref.id}-{date.today().isoformat()}.{path.suffix.lstrip('.')}"
     audit(db, "referential.export", user=user, target=f"ref:{ref.id}", request=request,
           detail={"format": format, "query": str(request.query_params)[:1000]})

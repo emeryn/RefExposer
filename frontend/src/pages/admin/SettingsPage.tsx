@@ -1,4 +1,5 @@
 import {
+  ActionIcon,
   Alert,
   Badge,
   Button,
@@ -19,6 +20,7 @@ import {
   SimpleGrid,
   Stack,
   Switch,
+  Table,
   Tabs,
   Text,
   Textarea,
@@ -31,9 +33,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
-import { fmtBytes } from '../../lib/format';
+import { fmtBytes, fmtDate } from '../../lib/format';
 import { useBranding } from '../../api/hooks';
-import type { BackupSettings, BrandingSettings, RemoteStorageSettings, ExperimentalSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
+import type { AntivirusSettings, BackupSettings, BrandingSettings, FileChecksSettings, RemoteStorageSettings, ExperimentalSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
 import { BrandHeader } from '../../components/Brand';
 import { CodeSnippet, CopyIcon } from '../../components/Common';
 import { SavedSecret } from '../../components/SavedSecret';
@@ -47,6 +49,28 @@ const SecretsPage = lazy(() => import('./SecretsPage'));
 const MONO = { input: { fontFamily: 'var(--mantine-font-family-monospace)' } };
 
 // Defaults of appsettings.BackupSettings, for an instance that has never saved the section
+const EMPTY_ANTIVIRUS: AntivirusSettings = {
+  backend: 'clamd',
+  address: 'clamav:3310',
+  command: '',
+  timeout: 300,
+  shared_volume: true,
+  max_file_mb: 2048,
+  on_unscanned: 'block',
+  on_error: 'block',
+  max_signature_age_days: 7,
+  scan_sources: true,
+  scan_uploads: true,
+  quarantine_keep_days: 30,
+};
+
+const EMPTY_CHECKS: FileChecksSettings = {
+  on_executable: 'block',
+  on_macro: 'block',
+  on_type_mismatch: 'warn',
+  escape_exports: true,
+};
+
 const EMPTY_STORAGE: RemoteStorageSettings = {
   enabled: false,
   endpoint: '',
@@ -112,7 +136,22 @@ function Steps({ steps }: { steps: TestStep[] }) {
 }
 
 
-function ExperimentalTab({ initial }: { initial: ExperimentalSettings }) {
+/**
+ * Features that are complete but young, each turned on where it is wanted.
+ *
+ * Two of them are about file safety and are independent of one another: the antivirus scan of what comes in,
+ * and the structural checks on those files plus the neutralising of the formulas in the spreadsheet exports.
+ * Each shows its own settings once it is on, because settings for something switched off are noise.
+ */
+function ExperimentalTab({
+  initial,
+  antivirus,
+  checks,
+}: {
+  initial: ExperimentalSettings;
+  antivirus: AntivirusSettings;
+  checks: FileChecksSettings;
+}) {
   const [cfg, setCfg] = useState(initial);
   useEffect(() => setCfg(initial), [initial]);
   const save = useSave('experimental');
@@ -142,6 +181,23 @@ function ExperimentalTab({ initial }: { initial: ExperimentalSettings }) {
                 to. Searches can be kept and shared with accounts or groups. A deep walk reads a great many
                 referentials, so try it on your own catalogue before opening it to everyone."
             />
+            <Switch
+              checked={cfg.antivirus_scan}
+              onChange={(e) => setCfg((c) => ({ ...c, antivirus_scan: e.currentTarget.checked }))}
+              label="Antivirus scan of the files that come in"
+              description="Every source — a download, an S3 object, a Git file, an upload, the import folder —
+                is scanned by a local ClamAV daemon or by a scanner already installed, before anything reads
+                it. Nothing leaves this machine. A full read of every file costs real time on a large feed."
+            />
+            <Switch
+              checked={cfg.file_checks}
+              onChange={(e) => setCfg((c) => ({ ...c, file_checks: e.currentTarget.checked }))}
+              label="Structural checks, and safe spreadsheet exports"
+              description="No daemon and no signature database: refuse an executable or an Office file carrying
+                a macro, report a file that is not what it claims to be, and neutralise in the CSV and Excel
+                exports the values a spreadsheet would execute. The last one changes the exported value of such
+                a cell, which is why it is a choice and not a default."
+            />
           </Section>
           <Group>
             <Button onClick={() => save.mutate(cfg)} loading={save.isPending} disabled={!dirty}>
@@ -153,9 +209,293 @@ function ExperimentalTab({ initial }: { initial: ExperimentalSettings }) {
               </Text>
             )}
           </Group>
+          {initial.antivirus_scan && <AntivirusSection initial={antivirus} />}
+          {initial.file_checks && <FileChecksSection initial={checks} />}
+          {(initial.antivirus_scan || initial.file_checks) && <Quarantine />}
         </Stack>
       </Grid.Col>
     </Grid>
+  );
+}
+
+/** Where the scanner is and what its verdicts mean for an update. */
+function AntivirusSection({ initial }: { initial: AntivirusSettings }) {
+  const [cfg, setCfg] = useState(initial);
+  useEffect(() => setCfg(initial), [initial]);
+  const save = useSave('antivirus');
+  const set = <K extends keyof AntivirusSettings>(k: K, v: AntivirusSettings[K]) => setCfg((c) => ({ ...c, [k]: v }));
+  const dirty = JSON.stringify(cfg) !== JSON.stringify(initial);
+  const test = useMutation({
+    mutationFn: () => api.testAntivirus(true),
+    onSuccess: (r) =>
+      notifications.show({
+        title: r.scanner,
+        message: `${r.detects_eicar ? 'The test file is detected' : 'The test file was NOT detected'}${
+          r.signatures_date ? ` · signatures of ${r.signatures_date}` : ''
+        }${r.stale ? ' (older than allowed)' : ''}`,
+        color: r.detects_eicar && !r.stale ? 'teal' : 'orange',
+        autoClose: 12000,
+      }),
+    onError: (e: Error) =>
+      notifications.show({ title: 'The scanner could not be reached', message: e.message, color: 'red', autoClose: 15000 }),
+  });
+  return (
+    <Section title="Antivirus" icon={<IconShieldLock size={18} />}>
+      <Text size="sm" c="dimmed">
+        A local scanner: a <b>ClamAV daemon</b> beside the application, or any binary already installed. Nothing
+        is ever sent to a third party, and no signature is ever downloaded from here — in an air-gapped network
+        that is <Code>freshclam</Code> against your own mirror, and the <b>Antivirus</b> task tells you when that
+        mirror has stopped being updated.
+      </Text>
+      <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <Select
+          label="Scanner"
+          data={[
+            { value: 'clamd', label: 'ClamAV daemon (socket)' },
+            { value: 'command', label: 'A command of this machine' },
+          ]}
+          value={cfg.backend}
+          onChange={(v) => set('backend', (v ?? 'clamd') as AntivirusSettings['backend'])}
+          allowDeselect={false}
+        />
+        {cfg.backend === 'clamd' ? (
+          <TextInput
+            label="Address of the daemon"
+            description="host:port, or the path of its Unix socket"
+            placeholder="clamav:3310"
+            value={cfg.address}
+            onChange={(e) => set('address', e.currentTarget.value)}
+          />
+        ) : (
+          <TextInput
+            label="Command"
+            description="Called as <command> <file>: 0 clean, 1 infected, anything else an error"
+            placeholder="clamscan --no-summary"
+            value={cfg.command}
+            onChange={(e) => set('command', e.currentTarget.value)}
+          />
+        )}
+      </SimpleGrid>
+      {cfg.backend === 'clamd' && (
+        <Switch
+          label="The daemon shares the data volume"
+          description="On: it reads the file by path and nothing crosses the socket — the only workable way for a large file. Off: the file is streamed to it, which its own StreamMaxLength bounds (25 MB by default)."
+          checked={cfg.shared_volume}
+          onChange={(e) => set('shared_volume', e.currentTarget.checked)}
+        />
+      )}
+      <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <Switch
+          label="Scan the sources"
+          description="Downloads, S3 objects, Git files"
+          checked={cfg.scan_sources}
+          onChange={(e) => set('scan_sources', e.currentTarget.checked)}
+        />
+        <Switch
+          label="Scan the uploads and the import folder"
+          description="Files somebody chose to put there"
+          checked={cfg.scan_uploads}
+          onChange={(e) => set('scan_uploads', e.currentTarget.checked)}
+        />
+      </SimpleGrid>
+      <Alert color="yellow" variant="light" p="xs" icon={<IconAlertTriangle size={16} />}>
+        <Text size="xs">
+          A file the scanner <b>skipped</b> is reported as <i>not scanned</i>, never as clean. ClamAV stops at
+          its own <Code>MaxFileSize</Code> and <Code>MaxScanSize</Code> (100 MB by default), so without this
+          distinction a 40 GB feed would come back “clean” having never been read.
+        </Text>
+      </Alert>
+      <SimpleGrid cols={{ base: 1, sm: 3 }}>
+        <NumberInput
+          label="Scan files up to (MB)"
+          description="0: no ceiling of ours"
+          min={0}
+          value={cfg.max_file_mb}
+          onChange={(v) => set('max_file_mb', Number(v) || 0)}
+        />
+        <Select
+          label="A file that was not scanned"
+          data={[
+            { value: 'block', label: 'Refuses the update' },
+            { value: 'warn', label: 'Is reported, the update goes on' },
+          ]}
+          value={cfg.on_unscanned}
+          onChange={(v) => set('on_unscanned', (v ?? 'block') as AntivirusSettings['on_unscanned'])}
+          allowDeselect={false}
+        />
+        <Select
+          label="A scanner that cannot be reached"
+          data={[
+            { value: 'block', label: 'Refuses the update' },
+            { value: 'warn', label: 'Is reported, the update goes on' },
+          ]}
+          value={cfg.on_error}
+          onChange={(v) => set('on_error', (v ?? 'block') as AntivirusSettings['on_error'])}
+          allowDeselect={false}
+        />
+      </SimpleGrid>
+      <SimpleGrid cols={{ base: 1, sm: 3 }}>
+        <NumberInput
+          label="One file may take (seconds)"
+          min={5}
+          max={7200}
+          value={cfg.timeout}
+          onChange={(v) => set('timeout', Number(v) || 300)}
+        />
+        <NumberInput
+          label="Warn past signatures of (days)"
+          description="Reported, never fetched"
+          min={0}
+          value={cfg.max_signature_age_days}
+          onChange={(v) => set('max_signature_age_days', Number(v) || 0)}
+        />
+        <NumberInput
+          label="Keep quarantined files (days)"
+          min={1}
+          value={cfg.quarantine_keep_days}
+          onChange={(v) => set('quarantine_keep_days', Number(v) || 30)}
+        />
+      </SimpleGrid>
+      <Group>
+        <Button onClick={() => save.mutate(cfg)} loading={save.isPending} disabled={!dirty}>
+          Save
+        </Button>
+        <Button variant="default" onClick={() => test.mutate()} loading={test.isPending} disabled={dirty}>
+          Test the scanner
+        </Button>
+        {dirty && (
+          <Text size="xs" c="dimmed">
+            Unsaved changes — save before testing: the test uses the stored settings
+          </Text>
+        )}
+      </Group>
+      {test.data && (
+        <Text size="xs" c="dimmed">
+          {test.data.scanner}
+          {test.data.signatures_date ? ` · signatures of ${test.data.signatures_date}` : ''}
+          {test.data.signatures_age_days !== null ? ` (${test.data.signatures_age_days} day(s) old)` : ''}
+          {test.data.detects_eicar ? ' · the standard test file is detected' : ''}
+        </Text>
+      )}
+    </Section>
+  );
+}
+
+/** What the structural checks refuse, and whether the exports are neutralised. */
+function FileChecksSection({ initial }: { initial: FileChecksSettings }) {
+  const [cfg, setCfg] = useState(initial);
+  useEffect(() => setCfg(initial), [initial]);
+  const save = useSave('checks');
+  const set = <K extends keyof FileChecksSettings>(k: K, v: FileChecksSettings[K]) => setCfg((c) => ({ ...c, [k]: v }));
+  const dirty = JSON.stringify(cfg) !== JSON.stringify(initial);
+  const POLICY = [
+    { value: 'block', label: 'Refuses the update' },
+    { value: 'warn', label: 'Is reported, the update goes on' },
+  ];
+  return (
+    <Section title="File checks and safe exports" icon={<IconFileText size={18} />}>
+      <Text size="sm" c="dimmed">
+        These work the same in an air-gapped network and the day after a scanner stops being updated: they
+        answer what a data file is allowed to <b>be</b>, not whether somebody has already catalogued it.
+      </Text>
+      <SimpleGrid cols={{ base: 1, sm: 3 }}>
+        <Select
+          label="An executable served as data"
+          data={POLICY}
+          value={cfg.on_executable}
+          onChange={(v) => set('on_executable', (v ?? 'block') as FileChecksSettings['on_executable'])}
+          allowDeselect={false}
+        />
+        <Select
+          label="An Office file with a macro"
+          data={POLICY}
+          value={cfg.on_macro}
+          onChange={(v) => set('on_macro', (v ?? 'block') as FileChecksSettings['on_macro'])}
+          allowDeselect={false}
+        />
+        <Select
+          label="A file that is not what it claims"
+          data={POLICY}
+          value={cfg.on_type_mismatch}
+          onChange={(v) => set('on_type_mismatch', (v ?? 'warn') as FileChecksSettings['on_type_mismatch'])}
+          allowDeselect={false}
+        />
+      </SimpleGrid>
+      <Switch
+        label="Neutralise the formulas in the CSV and Excel exports"
+        description="A cell beginning with =, +, -, @, a tab or a carriage return is executed by Excel and LibreOffice when the file is opened. Such a value is prefixed with a quote, which spreadsheets read as text — so the exported value does change. A plain number (-5, +12.5) is left alone. Parquet, JSON and JSON Lines are untouched: nothing executes them."
+        checked={cfg.escape_exports}
+        onChange={(e) => set('escape_exports', e.currentTarget.checked)}
+      />
+      <Group>
+        <Button onClick={() => save.mutate(cfg)} loading={save.isPending} disabled={!dirty}>
+          Save
+        </Button>
+        {dirty && (
+          <Text size="xs" c="dimmed">
+            Unsaved changes
+          </Text>
+        )}
+      </Group>
+    </Section>
+  );
+}
+
+/** The files the checks refused: kept so they can be looked at, not for ever. */
+function Quarantine() {
+  const qc = useQueryClient();
+  const { data } = useQuery({ queryKey: ['quarantine'], queryFn: api.quarantine, refetchInterval: 30000 });
+  const after = (message: string) => () => {
+    qc.invalidateQueries({ queryKey: ['quarantine'] });
+    notifications.show({ message, color: 'teal' });
+  };
+  const fail = (e: Error) => notifications.show({ title: 'Failed', message: e.message, color: 'red' });
+  const remove = useMutation({ mutationFn: api.deleteQuarantined, onSuccess: after('Deleted'), onError: fail });
+  const empty = useMutation({ mutationFn: api.emptyQuarantine, onSuccess: after('Quarantine emptied'), onError: fail });
+  const entries = data?.entries ?? [];
+  return (
+    <Section title={`Quarantine${entries.length ? ` (${entries.length})` : ''}`} icon={<IconTrash size={18} />}>
+      <Text size="sm" c="dimmed">
+        What was refused is moved aside rather than deleted: a false positive on a partner feed is the usual
+        reason to want to look. It never goes into a backup, and the <b>Antivirus</b> task applies its retention.
+      </Text>
+      {!entries.length ? (
+        <Text size="sm" c="dimmed">
+          Nothing in quarantine.
+        </Text>
+      ) : (
+        <>
+          <Table fz="sm" verticalSpacing="xs">
+            <Table.Tbody>
+              {entries.map((e) => (
+                <Table.Tr key={e.folder}>
+                  <Table.Td>
+                    <Code fz={11}>{e.referential}</Code>
+                  </Table.Td>
+                  <Table.Td>{fmtDate(e.at)}</Table.Td>
+                  <Table.Td>
+                    <Text size="xs" c="dimmed" lineClamp={2}>
+                      {e.files.map((f) => `${f.file}${f.signature ? ` — ${f.signature}` : ''}`).join(' · ')}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td>{fmtBytes(e.bytes)}</Table.Td>
+                  <Table.Td w={40}>
+                    <ActionIcon variant="subtle" color="red" onClick={() => remove.mutate(e.folder)} aria-label="Delete">
+                      <IconTrash size={16} />
+                    </ActionIcon>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+          <Group>
+            <Button variant="default" color="red" onClick={() => empty.mutate()} loading={empty.isPending}>
+              Empty the quarantine
+            </Button>
+          </Group>
+        </>
+      )}
+    </Section>
   );
 }
 
@@ -306,8 +646,6 @@ function BackupTab({ initial }: { initial: BackupSettings }) {
             <Text size="xs" c="dimmed">
               Permissions needed on the prefix: <Code>s3:ListBucket</Code>, <Code>s3:PutObject</Code> and{' '}
               <Code>s3:DeleteObject</Code> (to apply the retention), plus <Code>s3:GetObject</Code> to restore from the bucket.
-              A certificate signed by an internal authority is trusted once its root certificate is in{' '}
-              <b>Settings › Network &amp; proxy › TLS certificates</b>.
             </Text>
           </Section>
           <Group>
@@ -436,11 +774,6 @@ function StorageTab({ initial }: { initial: RemoteStorageSettings }) {
               Permissions needed on the prefix: <Code>s3:ListBucket</Code>, <Code>s3:PutObject</Code>,{' '}
               <Code>s3:GetObject</Code> and <Code>s3:DeleteObject</Code>. A confidential referential goes up as it is stored,
               that is to say encrypted: the bucket never sees its rows.
-            </Text>
-            <Text size="xs" c="dimmed">
-              Certificate signed by an internal authority? Paste that root certificate in{' '}
-              <b>Settings › Network &amp; proxy › TLS certificates</b>: it is trusted for every S3 store, here and for the
-              sources.
             </Text>
           </Section>
           <Section title="Local cache" icon={<IconDatabaseExport size={18} />}>
@@ -1570,7 +1903,11 @@ export default function SettingsPage() {
           <NotificationsPage />
         </Tabs.Panel>
         <Tabs.Panel value="experimental">
-          <ExperimentalTab initial={data.experimental ?? { relational_search: false }} />
+          <ExperimentalTab
+            initial={data.experimental ?? { relational_search: false, antivirus_scan: false, file_checks: false }}
+            antivirus={data.antivirus ?? EMPTY_ANTIVIRUS}
+            checks={data.checks ?? EMPTY_CHECKS}
+          />
         </Tabs.Panel>
         <Tabs.Panel value="secrets">
           <SecretsPage />

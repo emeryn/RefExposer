@@ -9,6 +9,9 @@ import type {
   FullBackupList,
   FullBackupManifest,
   FullBackupRestored,
+  AntivirusTest,
+  FileSafetyState,
+  QuarantineEntry,
   StorageUsage,
   RemoteFullBackup,
   S3TestResult,
@@ -397,6 +400,16 @@ export const api = {
     request<{ name: string; size: number }>(`/api/admin/full-backups/remote/${enc(name)}/fetch`, json('POST')),
   deleteRemoteFullBackup: (name: string) =>
     request<{ ok: boolean }>(`/api/admin/full-backups/remote/${enc(name)}`, json('DELETE')),
+  fileSafety: () => request<FileSafetyState>('/api/admin/file-safety'),
+  /** `eicar`: also send the standard test file, which proves the whole path end to end. */
+  testAntivirus: (eicar = true) =>
+    request<AntivirusTest>('/api/admin/file-safety/antivirus/test', json('POST', { eicar })),
+  quarantine: () =>
+    request<{ entries: QuarantineEntry[]; folder: string }>('/api/admin/file-safety/quarantine'),
+  deleteQuarantined: (folder: string) =>
+    request<{ ok: boolean }>(`/api/admin/file-safety/quarantine/${folder.split('/').map(enc).join('/')}`, json('DELETE')),
+  emptyQuarantine: () =>
+    request<{ deleted: number }>('/api/admin/file-safety/quarantine', json('DELETE')),
   storageUsage: () => request<StorageUsage>('/api/admin/referentials/storage/usage'),
   testStorageBucket: (write = true) =>
     request<{ ok: boolean; bucket: string; anonymous: boolean; objects: string[]; writable: boolean | null }>(

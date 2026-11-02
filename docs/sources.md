@@ -92,6 +92,10 @@ A referential can come from **files of a Git repository**. It works with GitHub,
   schedule: "0 * * * *"               # hourly check: nothing fetched while the commit does not change
 ```
 
+> Whatever a source brings in can be **checked before it is read** — a local antivirus, and structural
+> checks that refuse an executable or an Office file carrying a macro. Both are off by default: see
+> [Checking the files that come in](operations.md#checking-the-files-that-come-in).
+
 ## S3 buckets (Amazon S3, MinIO, Ceph, Scaleway, OVH…)
 
 A referential can read **objects of an S3 bucket**, with or without credentials. It works with Amazon S3 and with

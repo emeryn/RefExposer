@@ -157,7 +157,8 @@ class Downloads:
             # Confidential: the published files are encrypted with a key that is never handed out. Masked
             # personal data columns: the file is produced from the view, which masks them — a generated
             # download is shared between users, so it is never the unmasked one.
-            return self._temporary(ref, f"SELECT * FROM {qi(ref.table)}", filename, ext, copy_opts or "FORMAT parquet, COMPRESSION zstd", media)
+            return self._temporary(ref, f"SELECT * FROM {qi(ref.table)}", filename, ext,
+                                   copy_opts or "FORMAT parquet, COMPRESSION zstd", media, fmt)
 
         with self._lock(ref.id, fmt):
             index = self._index(ref.id)
@@ -171,32 +172,49 @@ class Downloads:
                 return DownloadFile(paths.current, filename, media, entry["size"], entry["sha256"])
 
             target = self._dir(ref.id) / f"v{version}.{ext}"
-            if entry.get("version") != version or not target.is_file():
+            escape = self._escape(fmt)
+            # A kept file carries whether it was neutralised: turning the setting on or off regenerates it
+            # instead of handing out a file produced under the other rule
+            if entry.get("version") != version or bool(entry.get("escaped")) != escape or not target.is_file():
                 self._dir(ref.id).mkdir(parents=True, exist_ok=True)
                 tmp = target.with_name(target.name + ".tmp")
                 tmp.unlink(missing_ok=True)
                 cur = self.engine.cursor()
                 try:
-                    cur.execute(f"COPY (SELECT * FROM read_parquet({lit(str(paths.current.resolve()))})) TO {lit(str(tmp))} ({copy_opts})")
+                    from .filechecks import export_sql
+
+                    source = f"SELECT * FROM read_parquet({lit(str(paths.current.resolve()))})"
+                    cur.execute(f"COPY ({export_sql(cur, source, fmt, escape)}) TO {lit(str(tmp))} ({copy_opts})")
                 finally:
                     cur.close()
                 os.replace(tmp, target)
                 entry = {"version": version, "file": target.name, "size": target.stat().st_size,
-                         "sha256": sha256_file(target), "generated_at": iso(utcnow())}
+                         "sha256": sha256_file(target), "generated_at": iso(utcnow()), "escaped": escape}
                 index[fmt] = entry
                 self._save_index(ref.id, index)
                 self._purge_old(ref.id, index)
                 log.info("[%s] download %s generated (%s bytes)", ref.id, fmt, entry["size"])
             return DownloadFile(target, filename, media, entry["size"], entry["sha256"])
 
-    def _temporary(self, ref: ReferentialConfig, sql: str, filename: str, ext: str, copy_opts: str, media: str) -> DownloadFile:
+    @staticmethod
+    def _escape(fmt: str) -> bool:
+        """Whether this format's download has its spreadsheet formulas neutralised (filechecks.py)."""
+        from .filechecks import read_settings, wanted
+
+        return wanted(fmt, read_settings)
+
+    def _temporary(self, ref: ReferentialConfig, sql: str, filename: str, ext: str, copy_opts: str, media: str,
+                   fmt: str = "") -> DownloadFile:
         """Clear copy for one request, in the temporary folder, deleted after sending (confidential referential:
         the published files are encrypted with a key that is never handed out)."""
         target = self.settings.tmp_dir / "exports" / f"{uuid.uuid4().hex}.{ext}"
         target.parent.mkdir(parents=True, exist_ok=True)
         cur = self.engine.cursor()
         try:
-            cur.execute(f"COPY ({sql}) TO {lit(str(target))} ({copy_opts})")
+            from .filechecks import export_sql
+
+            written = export_sql(cur, sql, fmt or ext, self._escape(fmt or ext))
+            cur.execute(f"COPY ({written}) TO {lit(str(target))} ({copy_opts})")
         finally:
             cur.close()
         return DownloadFile(target, filename, media, target.stat().st_size, sha256_file(target), temporary=True)

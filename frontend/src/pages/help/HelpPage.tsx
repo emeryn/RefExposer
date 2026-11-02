@@ -859,6 +859,17 @@ const ADMIN: Section[] = [
           the confidential referentials — is re-encrypted with the key of the instance doing the restore. The key is used for
           that restore only; a wrong one is refused before anything is touched.
         </P>
+        <H>Checking the files that come in</H>
+        <P>
+          Two features that an administrator turns on in Settings › Experimental, independently of one another, and
+          neither of which uses the network. An <b>antivirus scan</b> passes every file a source brings in to a local
+          ClamAV daemon, or to a scanner already installed, before anything reads it: an infected file is quarantined
+          and the update is refused, which leaves the version already published in place. A file the scanner skipped is
+          reported as <i>not scanned</i>, never as clean. Separately, <b>structural checks</b> refuse an executable
+          served as data or an Office file carrying a macro, and neutralise in the CSV and Excel exports the values a
+          spreadsheet would execute — the one way hostile third-party data can reach a colleague's machine, and one no
+          antivirus catches.
+        </P>
         <H>Where the data of a referential lives</H>
         <P>
           By default the published data sits on this server. A referential can be given an <b>S3 bucket</b> as its home

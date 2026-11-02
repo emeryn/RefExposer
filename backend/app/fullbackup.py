@@ -69,7 +69,9 @@ LENGTH = 4  # bytes of the length prefix of a sealed chunk
 # Tables never carried over: a restored instance signs everybody in again rather than reviving old sessions
 SKIP_TABLES = ("sessions",)
 # Folders and files of data/ that a backup does not carry (see the module docstring)
-SKIP_DIRS = (".tmp", ".backups", ".work", "exports")
+# .quarantine holds the files the checks refused (antivirus.py): an archive carrying them would be an
+# archive carrying malware, and restoring it would put it back
+SKIP_DIRS = (".tmp", ".backups", ".work", "exports", ".quarantine")
 # Working folders of a restore going on: never carried, and never walked into
 RESTORE_PREFIX = ".restore-"
 SKIP_FILES = (".secret_key", "running.json")

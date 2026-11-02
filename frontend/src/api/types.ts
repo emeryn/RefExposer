@@ -796,6 +796,64 @@ export interface SavedSearch {
 export interface ExperimentalSettings {
   /** Relational search: the Investigate page, its endpoints and its assistant tools */
   relational_search: boolean;
+  /** Scan of the files a source brings in, by a local antivirus (app/antivirus.py) */
+  antivirus_scan: boolean;
+  /** Structural checks on those files, and neutralising of the formulas in the CSV and Excel exports */
+  file_checks: boolean;
+}
+
+/** Settings of the antivirus scan (shown under its switch in Experimental). */
+export interface AntivirusSettings {
+  backend: 'clamd' | 'command';
+  address: string;
+  command: string;
+  timeout: number;
+  shared_volume: boolean;
+  max_file_mb: number;
+  on_unscanned: 'block' | 'warn';
+  on_error: 'block' | 'warn';
+  max_signature_age_days: number;
+  scan_sources: boolean;
+  scan_uploads: boolean;
+  quarantine_keep_days: number;
+}
+
+/** Settings of the structural checks. */
+export interface FileChecksSettings {
+  on_executable: 'block' | 'warn';
+  on_macro: 'block' | 'warn';
+  on_type_mismatch: 'block' | 'warn';
+  escape_exports: boolean;
+}
+
+export interface FileSafetyState {
+  antivirus_scan: boolean;
+  file_checks: boolean;
+  backend: string;
+  scanner: string | null;
+  quarantine: number;
+}
+
+/** What the scanner answered: its version, and how old its signature database is. */
+export interface AntivirusTest {
+  ok: boolean;
+  backend: string;
+  scanner: string;
+  signatures_date: string;
+  signatures_age_days: number | null;
+  stale: boolean;
+  detects_eicar?: boolean;
+  probe?: { file: string; status: string; signature: string; detail: string };
+}
+
+export interface QuarantineEntry {
+  referential: string;
+  run: string;
+  at: string;
+  folder: string;
+  kept: number;
+  bytes: number;
+  files: { file: string; status: string; signature: string; detail: string }[];
 }
 
 /** What counts as an alert here (Settings › Notifications & alerts). */
@@ -1573,6 +1631,8 @@ export interface AllSettings {
   alerts: AlertsSettings;
   alert_kinds: AlertKind[];
   experimental: ExperimentalSettings;
+  antivirus: AntivirusSettings;
+  checks: FileChecksSettings;
   backup: BackupSettings;
   storage: RemoteStorageSettings;
   local_login: boolean;

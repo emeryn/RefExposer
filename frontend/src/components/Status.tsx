@@ -77,6 +77,7 @@ export function RunStatusBadge({ status }: { status: RunStatus }) {
 const PHASES: Record<string, string> = {
   queued: 'Queued',
   download: 'Downloading',
+  inspect: 'Checking the files',
   transform: 'Transforming',
   validate: 'Validating',
   profile: 'Profiling',

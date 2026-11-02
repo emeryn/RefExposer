@@ -332,8 +332,12 @@ class Engine:
             "elapsed_ms": round((dt.datetime.now() - start).total_seconds() * 1000, 1),
         }
 
-    def export(self, sql: str, fmt: str) -> Path:
-        """Write the result of `sql` to a temporary file and return its path."""
+    def export(self, sql: str, fmt: str, escape: bool = False) -> Path:
+        """Write the result of `sql` to a temporary file and return its path.
+
+        `escape`: neutralise the values a spreadsheet would execute (filechecks.py). Only the caller knows
+        whether the administrator asked for that, so it is passed in rather than read here.
+        """
         exports = self.tmp_dir / "exports"
         exports.mkdir(parents=True, exist_ok=True)
         ext = {"csv": "csv", "json": "json", "jsonl": "jsonl", "parquet": "parquet", "xlsx": "xlsx"}[fmt]
@@ -349,7 +353,9 @@ class Engine:
             raise SqlError("Excel export unavailable (DuckDB 'excel' extension not loaded)")
         cur = self.cursor()
         try:
-            cur.execute(f"COPY ({sql}) TO {lit(str(target))} ({options})")
+            from .filechecks import export_sql
+
+            cur.execute(f"COPY ({export_sql(cur, sql, fmt, escape)}) TO {lit(str(target))} ({options})")
         finally:
             cur.close()
         return target

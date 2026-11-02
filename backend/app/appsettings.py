@@ -390,6 +390,71 @@ class RemoteStorageSettings(BaseModel):
                         path_style=self.path_style, verify_tls=self.verify_tls)
 
 
+class AntivirusSettings(BaseModel):
+    """Scan of the files a source brings in (antivirus.py). Experimental: the switch is in Experimental.
+
+    Everything here is local: a ClamAV daemon beside the application, or a scanner already installed. Nothing
+    is ever sent to a third party, which would mean handing somebody else's data to somebody else again.
+    """
+
+    backend: Literal["clamd", "command"] = "clamd"
+    # clamd: host:port, or a Unix socket path (/var/run/clamav/clamd.ctl)
+    address: str = "clamav:3310"
+    # command: any local scanner, called as `<command> <file>` (0 clean, 1 infected, anything else an error)
+    command: str = ""
+    timeout: int = Field(300, ge=5, le=7200, description="Seconds allowed for one file")
+    # The daemon reads the file by path (the data volume is shared with it): nothing crosses the socket. Off:
+    # the file is streamed, which the daemon's own StreamMaxLength bounds (25 MB by default).
+    shared_volume: bool = True
+    # Files larger than this are reported *not scanned*, never clean. 0: no ceiling of our own, and whatever
+    # the scanner itself skips still comes back as not scanned.
+    max_file_mb: int = Field(2048, ge=0, le=1_048_576)
+    # What a file nobody could read means for the update. Blocking is the honest default: publishing data that
+    # was never looked at, under a setting called "antivirus", is worse than refusing it.
+    on_unscanned: Literal["block", "warn"] = "block"
+    on_error: Literal["block", "warn"] = "block"
+    # Reported, never fetched: in an air-gapped network freshclam needs a local mirror
+    max_signature_age_days: int = Field(7, ge=0, le=3650)
+    # What is scanned. Human-provided files are the higher risk; a 40 GB feed is the higher cost.
+    scan_sources: bool = Field(True, description="Downloads, S3 objects and Git files")
+    scan_uploads: bool = Field(True, description="Uploads and the files of the import folder")
+    # Refused files are kept so an administrator can look at them (a false positive on a partner feed is the
+    # usual reason to want to), but not for ever: malware does not belong on a disk indefinitely.
+    quarantine_keep_days: int = Field(30, ge=1, le=3650)
+
+    @field_validator("address", "command")
+    @classmethod
+    def _trim(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def _check(self) -> "AntivirusSettings":
+        if self.backend == "clamd" and not self.address:
+            raise ValueError("give the address of the ClamAV daemon (host:port, or the path of its Unix socket)")
+        if self.backend == "command" and not self.command:
+            raise ValueError("give the scanner command (e.g. clamscan --no-summary)")
+        return self
+
+
+class FileChecksSettings(BaseModel):
+    """Structural checks on the files that come in, and the spreadsheets that go out (filechecks.py).
+
+    No daemon and no signature database: these answer what a data file is allowed to *be*, which is why they
+    work the same in an air-gapped network and the day after a scanner stops being updated.
+    """
+
+    # A feed that answers with a binary is not a feed, whatever its extension says
+    on_executable: Literal["block", "warn"] = "block"
+    # Nothing in a referential needs a macro
+    on_macro: Literal["block", "warn"] = "block"
+    # Reported rather than refused by default: an unexpected signature is very often a compressed variant the
+    # import handles by itself, and refusing it would break working sources
+    on_type_mismatch: Literal["block", "warn"] = "warn"
+    # Neutralise the values a spreadsheet would execute, in the CSV and Excel exports only. This **changes the
+    # exported value** of such a cell (it is prefixed with a quote), which is why it is said out loud here.
+    escape_exports: bool = True
+
+
 class McpSettings(BaseModel):
     """Administration MCP server (/api/mcp): an AI agent drives RefExposer with the API token of a service account."""
 
@@ -742,6 +807,15 @@ class ExperimentalSettings(BaseModel):
     # depends on the catalogue it runs against.
     relational_search: bool = False
 
+    # Scan of the files a source brings in, by a local antivirus (antivirus.py). Off by default because it
+    # needs a scanner to be deployed and reachable, and because a full read of every file costs real time on
+    # a large feed. Configured just below, in Antivirus.
+    antivirus_scan: bool = False
+    # Structural checks on the files that come in, and neutralising the values a spreadsheet would execute in
+    # the CSV and Excel exports (filechecks.py). Off by default because the neutralising changes the exported
+    # value of such a cell, which nobody should discover by surprise.
+    file_checks: bool = False
+
 
 SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSettings, "oidc": OidcSettings, "branding": BrandingSettings,
                                          "syslog": SyslogSettings, "tasks": TasksSettings,
@@ -749,13 +823,14 @@ SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSett
                                          "notifications": NotificationsSettings, "federation": FederationSettings,
                                          "assistant": AssistantSettings, "alerts": AlertsSettings,
                                          "experimental": ExperimentalSettings, "backup": BackupSettings,
-                                         "storage": RemoteStorageSettings}
+                                         "storage": RemoteStorageSettings, "antivirus": AntivirusSettings,
+                                         "checks": FileChecksSettings}
 # *Names* of the fields kept encrypted in each section — never their values, so these are safe to log
 SECRET_FIELDS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
                                              "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
                                              "notifications": (), "federation": (), "assistant": ("api_key",),
                                              "alerts": (), "experimental": (), "backup": ("secret_access_key",),
-                                             "storage": ("secret_access_key",)}
+                                             "storage": ("secret_access_key",), "antivirus": (), "checks": ()}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()

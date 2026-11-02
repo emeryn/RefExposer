@@ -62,6 +62,29 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   (sources, full backups, remote storage) once its root certificate is in *Settings › Network & proxy › TLS
   certificates*, or `REFEX_HTTP_VERIFY` points at a bundle — there is no need to turn verification off.
 
+- **Checking the files a source brings in** — two experimental features, off by default, each enabled on its
+  own in *Settings › Experimental* and configured under its switch. Neither ever reaches the network, so both
+  work the same in an air-gapped install.
+  **Antivirus scan**: a local ClamAV daemon (its protocol written against the standard library, so no new
+  dependency; given the data volume it reads each file by path and nothing crosses the socket) or any scanner
+  already installed, called as `<command> <file>`. Every source goes through it — download, S3, Git, upload,
+  import folder — before anything reads the file. A file the scanner **skipped** is reported *not scanned*,
+  never clean: ClamAV stops at 100 MB by default, and without that distinction a 40 GB feed would come back
+  “clean” having never been read. What a not-scanned file, or an unreachable scanner, means for the update is
+  configurable and defaults to refusing it. A refused file is moved to `data/.quarantine/` with its verdict and
+  the update is *rejected*, so the version already published stays published; the quarantine is listed in the
+  interface, never carried into a backup, and has its own retention. Signature freshness is **reported, never
+  fetched** — the new **Antivirus** task says how old the database is and warns past a threshold, which is what
+  an air-gapped mirror that stopped being updated looks like. *Test the scanner* sends the standard EICAR file,
+  so the path is proven rather than assumed.
+  **Structural checks and safe spreadsheet exports**: no daemon and no signature database. An executable served
+  as data, an Office file carrying a macro, or a file whose first bytes are those of a PDF or a database when it
+  is declared CSV — each with its own policy. And, on the way out, the values a spreadsheet would execute
+  (`=`, `+`, `-`, `@`, tab, carriage return at the start of a cell) are neutralised in the **CSV and Excel**
+  exports, which is the one path from hostile third-party data to code running on an analyst's machine — and
+  one no antivirus sees, the file being a perfectly valid CSV. A plain number is left alone; Parquet, JSON and
+  JSON Lines are untouched; a generated download is rebuilt when the setting changes.
+
 ## [1.0.0] - 2026-10-29
 
 First version: referentials declared from the interface or in YAML, downloaded from HTTP, Git, files, an

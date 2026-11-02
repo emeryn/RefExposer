@@ -61,6 +61,102 @@ _MAGIC = {"parquet": (b"PAR1",), "xlsx": (b"PK\x03\x04",), "bloom": None, "mmdb"
 SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 
 
+# --------------------------------------------------------------------------- file safety (experimental)
+
+class FileRefused(Exception):
+    """Files the safety features refused. `reasons` is what to tell whoever sent them."""
+
+    def __init__(self, refused: list[Path], reasons: list[str]):
+        super().__init__("; ".join(reasons[:3]))
+        self.refused = refused
+        self.reasons = reasons
+
+
+def inspect_files(settings: Settings, files: list[Path], declared: str | None, manual: bool,
+                  log_line: Callable[[str], None] = lambda m: None) -> None:
+    """Look at files before anything reads them. Raises FileRefused when one of them must not be read.
+
+    Two features, each turned on by an administrator in Settings > Experimental, each doing its own thing and
+    each working with no network at all:
+
+    - **Structural checks** (filechecks.py): an executable, an Office file carrying a macro, or a file that is
+      plainly not what it claims to be. No daemon, no signature database.
+    - **Antivirus scan** (antivirus.py): a local ClamAV daemon, or any scanner already installed.
+
+    Neither is on by default, so this returns immediately on an instance that did not ask for them.
+    """
+    from . import appsettings
+    from .db import session_factory
+
+    if not files:
+        return
+    try:
+        with session_factory()() as db:
+            experimental = appsettings.load(db, "experimental")
+            checks_cfg = appsettings.load(db, "checks") if getattr(experimental, "file_checks", False) else None
+            antivirus_cfg = (appsettings.load(db, "antivirus")
+                             if getattr(experimental, "antivirus_scan", False) else None)
+    except RuntimeError:  # pragma: no cover - no database (unit usage)
+        return
+    if checks_cfg is None and antivirus_cfg is None:
+        return
+
+    refused: list[Path] = []
+    reasons: list[str] = []
+
+    if checks_cfg is not None:
+        from . import filechecks
+
+        found = filechecks.inspect(files, declared, checks_cfg, log_line)
+        for finding in found.refused:
+            refused.append(finding.path)
+            reasons.append(finding.line())
+
+    if antivirus_cfg is not None and (antivirus_cfg.scan_uploads if manual else antivirus_cfg.scan_sources):
+        from . import antivirus
+
+        try:
+            report = antivirus.scan(settings, antivirus_cfg, files, log_line)
+        except antivirus.AntivirusError as e:
+            # "The scanner is down" is a different question from "this file is infected", and the
+            # administrator already said which way to answer it
+            if antivirus_cfg.on_error == "block":
+                raise FileRefused([], [f"the antivirus could not be reached ({e})"]) from e
+            log_line(f"The antivirus could not be reached ({e}): the files were not scanned")
+        else:
+            for verdict in report.refused:
+                if verdict.path not in refused:
+                    refused.append(verdict.path)
+                reasons.append(verdict.line())
+
+    if refused or reasons:
+        raise FileRefused(refused, reasons)
+
+
+def inspect_sources(settings: Settings, ref: ReferentialConfig, run: Run, paths: RefPaths, files: list[Path],
+                    manual: bool) -> None:
+    """The import's side of `inspect_files`: a refused file is quarantined and the update is rejected.
+
+    *Rejected* means, here as everywhere else, that the version already published stays published: a poisoned
+    feed does not replace good data.
+    """
+    run.phase = "inspect"
+    try:
+        inspect_files(settings, files, ref.format, manual, run.log)
+    except FileRefused as e:
+        from . import antivirus
+
+        kept = antivirus.quarantine(settings, ref.id, run.id,
+                                    [antivirus.Verdict(p, "infected") for p in e.refused], run.log)
+        run.log(f"{len(e.reasons)} refusal(s): " + " · ".join(e.reasons[:5]), "error")
+        raise RunRejected(
+            "source file(s) refused before being read (" + "; ".join(e.reasons[:3])
+            + (f"; and {len(e.reasons) - 3} more" if len(e.reasons) > 3 else "")
+            + (f"). {len(kept)} file(s) moved to quarantine, " if kept else "). ")
+            + "the published version is kept."
+        ) from e
+
+
 def check_source_file(path: Path, fmt: str, label: str | None = None) -> None:
     """Refuse files that cannot be a valid source: empty, error page, wrong signature."""
     label = label or path.name
@@ -1354,6 +1450,9 @@ def execute_run(
         all_files = [f for g in groups for f in g]
         if not all_files:
             raise SourceCorrupted("corrupted source: no SQLite database in the source files")
+    # Every source lands here, whatever its kind: one place to look at the files before they are read
+    if not ref.is_combined and not ref.is_internal:
+        inspect_sources(settings, ref, run, paths, all_files, manual is not None)
     run.stats["downloaded_bytes"] = run.bytes_done
     if ref.is_combined:
         # The sources are published versions: nothing to read again to know whether they changed
