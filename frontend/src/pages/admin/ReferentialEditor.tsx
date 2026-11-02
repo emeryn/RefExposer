@@ -56,7 +56,7 @@ import { QualityRulesEditor } from '../../components/Quality';
 import { SecretInput } from '../../components/SecretInput';
 import { describeCron, fmtBytes, fmtNumber } from '../../lib/format';
 
-type Mode = 'http' | 'upload' | 'local' | 'git' | 'combine';
+type Mode = 'http' | 'upload' | 'local' | 'git' | 's3' | 'combine';
 
 const EMPTY: DefinitionConfig = {
   id: '',
@@ -181,6 +181,22 @@ function cleanCombine(c: DefinitionConfig): CombineConfig {
   return { mode: 'union', columns: kept, source_column: combine.source_column || null };
 }
 
+/** The s3 part of a source, as the preview and the test route expect it. */
+function s3Source(c: DefinitionConfig) {
+  return {
+    type: 's3',
+    endpoint: (c.source.endpoint ?? '').trim(),
+    bucket: (c.source.bucket ?? '').trim(),
+    prefix: c.source.prefix?.trim() || null,
+    path: c.source.path?.trim() || null,
+    region: c.source.region?.trim() || null,
+    access_key_id: c.source.access_key_id?.trim() || null,
+    secret_access_key: c.source.secret_access_key || null,
+    session_token: c.source.session_token || null,
+    path_style: !!c.source.path_style,
+  };
+}
+
 /** Remove empty values before sending the definition. */
 function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig> {
   const source =
@@ -213,7 +229,23 @@ function cleanConfig(c: DefinitionConfig, mode: Mode): Partial<DefinitionConfig>
             token: c.source.token || null,
             username: c.source.username?.trim() || null,
           }
-        : { type: 'local' as const, urls: [], headers: {}, extract: null, path: c.source.path || 'raw/**/*' };
+        : mode === 's3'
+          ? {
+              type: 's3' as const,
+              urls: [],
+              headers: {},
+              extract: c.source.extract || null,
+              endpoint: (c.source.endpoint ?? '').trim(),
+              bucket: (c.source.bucket ?? '').trim(),
+              prefix: c.source.prefix?.trim() || null,
+              path: c.source.path?.trim() || null,
+              region: c.source.region?.trim() || null,
+              access_key_id: c.source.access_key_id?.trim() || null,
+              secret_access_key: c.source.secret_access_key || null,
+              session_token: c.source.session_token || null,
+              path_style: !!c.source.path_style,
+            }
+          : { type: 'local' as const, urls: [], headers: {}, extract: null, path: c.source.path || 'raw/**/*' };
   const combined = mode === 'combine';
   return {
     ...c,
@@ -263,6 +295,121 @@ function OptionField({ label, description, children }: { label: string; descript
   );
 }
 
+/** Source read from an S3 bucket: where it is, what to read, and the keys (none for a public bucket). */
+function S3Fields({
+  draft,
+  set,
+  referentialId,
+}: {
+  draft: DefinitionConfig;
+  set: <K extends keyof DefinitionConfig>(k: K, v: DefinitionConfig[K]) => void;
+  referentialId?: string;
+}) {
+  const source = draft.source;
+  const setSource = (patch: Partial<DefinitionConfig['source']>) => set('source', { ...source, ...patch });
+  const test = useMutation({
+    mutationFn: () => api.testS3Source(s3Source(draft), referentialId),
+    onError: (e: Error) => notifications.show({ title: 'The bucket could not be read', message: e.message, color: 'red', autoClose: 12000 }),
+  });
+  const ready = /^https?:\/\/.+/.test((source.endpoint ?? '').trim()) && !!source.bucket?.trim();
+  return (
+    <Stack gap="xs">
+      <Text size="sm" c="dimmed">
+        Objects of an Amazon S3 bucket, or of any compatible store (MinIO, Ceph, Scaleway, OVH, Wasabi, Garage). The objects are
+        listed at each update and downloaded again only when their <Code>ETag</Code> changed. Leave the keys empty for a bucket
+        that can be read without credentials.
+      </Text>
+      <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <TextInput
+          label="Endpoint"
+          description="Amazon: https://s3.<region>.amazonaws.com · self-hosted: its own address"
+          placeholder="https://s3.eu-west-3.amazonaws.com"
+          value={source.endpoint ?? ''}
+          onChange={(e) => setSource({ endpoint: e.currentTarget.value })}
+          required
+        />
+        <TextInput
+          label="Bucket"
+          placeholder="my-referentials"
+          value={source.bucket ?? ''}
+          onChange={(e) => setSource({ bucket: e.currentTarget.value })}
+          required
+        />
+      </SimpleGrid>
+      <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <TextInput
+          label="Prefix (folder in the bucket)"
+          description="Only this part of the bucket is listed. Empty: the whole bucket."
+          placeholder="feeds/countries/"
+          value={source.prefix ?? ''}
+          onChange={(e) => setSource({ prefix: e.currentTarget.value })}
+        />
+        <TextInput
+          label="Objects to read"
+          description="Glob relative to the prefix: *.csv stays in the folder, **/*.csv goes down into it. Empty: everything."
+          placeholder="*.csv"
+          value={source.path ?? ''}
+          onChange={(e) => setSource({ path: e.currentTarget.value })}
+        />
+      </SimpleGrid>
+      <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <TextInput
+          label="Access key id"
+          description="Empty with the secret key: the bucket is read anonymously"
+          placeholder="AKIA…"
+          value={source.access_key_id ?? ''}
+          onChange={(e) => setSource({ access_key_id: e.currentTarget.value })}
+        />
+        <SecretInput
+          label="Secret access key"
+          description="Pick it in the secret manager (key button): only its reference is stored."
+          placeholder={'${secret:s3-key}'}
+          value={source.secret_access_key ?? ''}
+          onChange={(v) => setSource({ secret_access_key: v })}
+        />
+      </SimpleGrid>
+      <SimpleGrid cols={{ base: 1, sm: 2 }}>
+        <TextInput
+          label="Region"
+          description="Used to sign the request; us-east-1 when empty (accepted by most compatible stores)"
+          placeholder="eu-west-3"
+          value={source.region ?? ''}
+          onChange={(e) => setSource({ region: e.currentTarget.value })}
+        />
+        <Checkbox
+          mt="xl"
+          label="Address the bucket as <endpoint>/<bucket>"
+          description="Needed by MinIO, Ceph and most self-hosted stores; Amazon uses <bucket>.<endpoint>"
+          checked={!!source.path_style}
+          onChange={(e) => setSource({ path_style: e.currentTarget.checked })}
+        />
+      </SimpleGrid>
+      <Group>
+        <Button variant="default" size="xs" onClick={() => test.mutate()} loading={test.isPending} disabled={!ready}>
+          Test the bucket
+        </Button>
+        {test.data && (
+          <Text size="xs" c="dimmed">
+            {test.data.matching} object(s) match{test.data.anonymous ? ', read without credentials' : ''}
+            {test.data.objects.length ? `: ${test.data.objects.map((o) => o.key).slice(0, 3).join(', ')}` : ''}
+            {test.data.matching > 3 ? '…' : ''}
+          </Text>
+        )}
+      </Group>
+      {test.data && test.data.matching === 0 && (
+        <Alert color="orange" icon={<IconAlertTriangle size={16} />}>
+          The bucket answers, but nothing matches: check the prefix and the pattern. <Code>*.csv</Code> only matches objects
+          directly under the prefix — use <Code>**/*.csv</Code> to go down into it.
+        </Alert>
+      )}
+      <Text size="xs" c="dimmed">
+        Permissions needed: <Code>s3:ListBucket</Code> on the bucket and <Code>s3:GetObject</Code> on the objects. Read access is
+        enough — RefExposer never writes to a source bucket.
+      </Text>
+    </Stack>
+  );
+}
+
 export default function ReferentialEditor() {
   const { id } = useParams();
   const editing = !!id;
@@ -301,7 +448,15 @@ export default function ReferentialEditor() {
     if (!c.source.urls.length) c.source.urls = [''];
     setDraft(c);
     setMode(
-      c.source.type === 'local' ? 'local' : c.source.type === 'git' ? 'git' : c.source.type === 'referential' ? 'combine' : 'http',
+      c.source.type === 'local'
+        ? 'local'
+        : c.source.type === 'git'
+          ? 'git'
+          : c.source.type === 's3'
+            ? 's3'
+            : c.source.type === 'referential'
+              ? 'combine'
+              : 'http',
     );
     setOptionsText(JSON.stringify(c.options ?? {}, null, 2));
     setHeaders(Object.entries(c.source.headers ?? {}).map(([k, v]) => ({ k, v: String(v) })));
@@ -325,6 +480,7 @@ export default function ReferentialEditor() {
     if (mode === 'combine') return { type: 'referential', referentials: (draft.source.referentials ?? []).filter(Boolean) };
     if (mode === 'upload') return { type: 'upload', upload_id: upload?.upload_id };
     if (mode === 'local') return { type: 'local', path: draft.source.path };
+    if (mode === 's3') return s3Source(draft);
     if (mode === 'git')
       return {
         type: 'git',
@@ -427,6 +583,8 @@ export default function ReferentialEditor() {
       ? draft.source.urls.some((u) => /^https?:\/\/.+/.test(u.trim()))
       : mode === 'git'
         ? /^https?:\/\/.+/.test((draft.source.repository ?? '').trim()) && !!draft.source.path?.trim()
+        : mode === 's3'
+          ? /^https?:\/\/.+/.test((draft.source.endpoint ?? '').trim()) && !!draft.source.bucket?.trim()
         : mode === 'upload'
           ? !!upload
           : mode === 'combine'
@@ -494,6 +652,7 @@ export default function ReferentialEditor() {
                 data={[
                   { value: 'http', label: 'From a URL' },
                   { value: 'git', label: 'Git repository' },
+                  { value: 's3', label: 'S3 bucket' },
                   { value: 'upload', label: editing ? 'Replace with a file' : 'Upload a file' },
                   { value: 'combine', label: 'Other referentials' },
                   ...(editing && existing?.config.source.type === 'local' ? [{ value: 'local', label: 'Current files' }] : []),
@@ -681,6 +840,7 @@ export default function ReferentialEditor() {
                   </Text>
                 </Stack>
               )}
+              {mode === 's3' && <S3Fields draft={draft} set={set} referentialId={editing ? draft.id : undefined} />}
               {mode === 'local' && (
                 <Text size="sm" c="dimmed">
                   Files currently stored for this referential (pattern <Code>{draft.source.path}</Code>).
@@ -695,7 +855,7 @@ export default function ReferentialEditor() {
                 <Button leftSection={<IconCloudDownload size={16} />} onClick={() => runPreview({ next: true, format: editing ? draft.format : null })} loading={previewing} disabled={!sourceReady}>
                   Analyse the source
                 </Button>
-                {previewing && (mode === 'http' || mode === 'git') && (
+                {previewing && (mode === 'http' || mode === 'git' || mode === 's3') && (
                   <Text size="sm" c="dimmed">
                     Downloading… (may take a while for a large file)
                   </Text>

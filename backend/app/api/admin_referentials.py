@@ -26,11 +26,20 @@ router = APIRouter(prefix="/admin/referentials", tags=["referential administrati
 
 
 class PreviewSource(BaseModel):
-    type: Literal["http", "upload", "local", "git", "referential"] = "http"
+    type: Literal["http", "upload", "local", "git", "s3", "referential"] = "http"
     repository: str | None = None
     ref: str | None = None
     token: str | None = None
     username: str | None = None
+    # s3: where the bucket is and how it is reached (empty keys: read anonymously)
+    endpoint: str | None = None
+    bucket: str | None = None
+    prefix: str | None = None
+    region: str | None = None
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+    session_token: str | None = None
+    path_style: bool = False
     urls: list[str] = Field(default_factory=list)
     headers: dict[str, str] = Field(default_factory=dict)
     basic_auth: str | None = None
@@ -143,6 +152,33 @@ def upload(files: list[UploadFile] = File(...), service: Service = Depends(get_s
         return store_upload(service.settings, [(f.filename or "file", f.file) for f in files])
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"upload failed: {e}") from e
+
+
+@router.post("/s3-test", summary="Test an S3 source: credentials, bucket, and the objects the prefix holds")
+def test_s3(body: PreviewSource, service: Service = Depends(get_service), db: Session = Depends(get_db),
+            referential_id: str | None = Query(None, description="Referential being edited: its stored credentials")):
+    """Lists what the source would read, without downloading anything: the quickest way to tell a wrong key from
+    a wrong prefix. A masked secret key sent back unchanged keeps the stored one."""
+    from ..config import SourceConfig
+    from ..s3 import S3Client, S3Error, source_config
+
+    source = {**body.model_dump(), "type": "s3"}
+    stored = service.refs.get(referential_id) if referential_id else None
+    try:
+        source = unmask_source(source, stored.source.model_dump() if stored else None) or source
+        check_references(db, {"source": source})
+        src = SourceConfig.model_validate({k: v for k, v in source.items() if k in SourceConfig.model_fields})
+    except (SecretError, ValueError) as e:
+        raise HTTPException(422, str(e).splitlines()[-1]) from e
+    prefix = (src.prefix or "").lstrip("/")
+    try:
+        with S3Client(source_config(src, service.settings), service.settings, timeout=30) as client:
+            matching = client.matching(prefix, (src.path or "").strip() or None, limit=1000)
+            return {"ok": True, "bucket": src.bucket, "endpoint": src.endpoint, "anonymous": not src.access_key_id,
+                    "matching": len(matching),
+                    "objects": [{"key": o.key, "size": o.size, "last_modified": o.last_modified} for o in matching[:20]]}
+    except S3Error as e:
+        raise HTTPException(502, str(e)) from e
 
 
 @router.post("/preview", summary="Analyse a source: download, format detection, preview")

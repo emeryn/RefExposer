@@ -271,6 +271,75 @@ def fetch_git(settings: Settings, source: dict[str, Any], refresh: bool) -> tupl
     return files, logs, dest
 
 
+PREVIEW_OBJECTS = 20
+
+
+def fetch_s3(settings: Settings, source: dict[str, Any], refresh: bool) -> tuple[list[Path], list[str], Path]:
+    """Objects of an S3 bucket for the preview (cached like the downloads).
+
+    A preview is meant to answer in seconds, so it reads the first objects only, and never more than
+    FULL_MAX_BYTES in all: a bucket holding tens of GB is analysed on a sample, and the import reads the rest.
+    """
+    from .config import SourceConfig
+    from .s3 import S3Client, S3Error, key_base, source_config
+
+    try:
+        src = SourceConfig.model_validate({
+            "type": "s3", "endpoint": (source.get("endpoint") or "").strip(), "bucket": (source.get("bucket") or "").strip(),
+            "prefix": source.get("prefix") or None, "path": source.get("path") or None, "region": source.get("region") or None,
+            "access_key_id": source.get("access_key_id") or None, "secret_access_key": source.get("secret_access_key") or None,
+            "session_token": source.get("session_token") or None, "path_style": bool(source.get("path_style")),
+        })
+    except ValueError as e:
+        raise PreviewError(str(e).splitlines()[-1]) from e
+    key = hashlib.sha256(json.dumps([src.endpoint, src.bucket, src.prefix, src.path, src.access_key_id],
+                                    sort_keys=True).encode()).hexdigest()[:24]
+    dest = settings.tmp_dir / "preview" / f"s3-{key}"
+    logs: list[str] = []
+    if dest.is_dir() and not refresh and any(dest.rglob("*")):
+        logs.append("Objects already fetched: reusing the copy (Analyse again to fetch them again)")
+        files = sorted(p for p in dest.rglob("*") if p.is_file())
+    else:
+        shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True, exist_ok=True)
+        prefix = (src.prefix or "").lstrip("/")
+        try:
+            with S3Client(source_config(src, settings), settings) as client:
+                objects = client.matching(prefix, (src.path or "").strip() or None)
+                if not objects:
+                    raise PreviewError(f"no object of s3://{src.bucket} matches '{src.path or '*'}' under '{prefix}'")
+                base = key_base(prefix)
+                logs.append(f"S3: {len(objects)} object(s) found ({sum(o.size for o in objects):,} bytes)")
+                kept, budget = [], FULL_MAX_BYTES
+                for obj in objects[:PREVIEW_OBJECTS]:
+                    if kept and obj.size > budget:
+                        break
+                    kept.append(obj)
+                    budget -= obj.size
+                if len(objects) > len(kept):
+                    logs.append(f"Preview on the first {len(kept)} of {len(objects)} object(s)"
+                                f"{' (size limit of the preview)' if len(kept) < PREVIEW_OBJECTS else ''}; "
+                                "the import reads them all.")
+                if kept[0].size > FULL_MAX_BYTES:
+                    raise PreviewError(f"{kept[0].key} is {_human(kept[0].size)}: too large to analyse here. "
+                                       "Save the referential with the format and the options you expect; the import reads it.")
+                files = []
+                for obj in kept:
+                    relative = obj.key[len(base):] if base and obj.key.startswith(base) else obj.key
+                    target = dest / relative.replace("\\", "/")
+                    if not target.resolve().is_relative_to(dest.resolve()):
+                        raise PreviewError(f"the object key leaves the destination folder: {obj.key}")
+                    client.download(obj.key, target)
+                    files.append(target)
+        except S3Error as e:
+            raise PreviewError(str(e)) from e
+    if not files:
+        raise PreviewError("no usable object in the bucket")
+    for f in files:
+        check_source_file(f, "csv", f.name)
+    return sorted(files), logs, dest
+
+
 def acquire(settings: Settings, source: dict[str, Any], ref_root: Path | None, refresh: bool = False) -> tuple[list[list[Path]], list[str], list[dict[str, Any]]]:
     """Return (file groups, logs, file descriptions) for a source description."""
     stype = source.get("type", "http")
@@ -295,6 +364,11 @@ def acquire(settings: Settings, source: dict[str, Any], ref_root: Path | None, r
         described.extend(_describe(files, base))
     elif stype == "git":
         files, log, base = fetch_git(settings, source, refresh)
+        logs.extend(log)
+        groups.append(files)
+        described.extend(_describe(files, base))
+    elif stype == "s3":
+        files, log, base = fetch_s3(settings, source, refresh)
         logs.extend(log)
         groups.append(files)
         described.extend(_describe(files, base))

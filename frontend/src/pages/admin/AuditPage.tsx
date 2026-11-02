@@ -50,6 +50,17 @@ const ACTIONS: Record<string, string> = {
   'settings.proxy': 'Proxy settings',
   'settings.ldap': 'LDAP settings',
   'settings.oidc': 'OpenID Connect settings',
+  'settings.backup': 'Backup settings',
+  'task.update': 'Task configured',
+  'task.run': 'Task run',
+  'backup.download': 'Configuration backup downloaded',
+  'backup.delete': 'Configuration backup deleted',
+  'backup.restore': 'Configuration restored',
+  'fullbackup.download': 'Full backup downloaded',
+  'fullbackup.delete': 'Full backup deleted',
+  'fullbackup.delete_remote': 'Full backup deleted from the bucket',
+  'fullbackup.fetch': 'Full backup brought back from the bucket',
+  'fullbackup.restore': 'Everything restored from a full backup',
   'system.reload': 'Configuration reloaded',
 };
 

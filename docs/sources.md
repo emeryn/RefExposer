@@ -92,6 +92,58 @@ A referential can come from **files of a Git repository**. It works with GitHub,
   schedule: "0 * * * *"               # hourly check: nothing fetched while the commit does not change
 ```
 
+## S3 buckets (Amazon S3, MinIO, Ceph, Scaleway, OVH…)
+
+A referential can read **objects of an S3 bucket**, with or without credentials. It works with Amazon S3 and with
+every S3-compatible store (MinIO, Ceph RADOS Gateway, Scaleway Object Storage, OVH, Wasabi, Garage…). In the
+editor, choose **S3 bucket** as the source, then give:
+
+- the **endpoint** of the store (`https://s3.eu-west-3.amazonaws.com`, `https://minio.example.com:9000`…);
+- the **bucket**;
+- optionally a **prefix** (the folder inside the bucket that is listed) and a **pattern** for the objects to read;
+- optionally an **access key id** and a **secret access key** — leave both empty for a bucket that can be read
+  without credentials.
+
+**Test the bucket** lists what the source would read without downloading anything: the quickest way to tell a
+wrong key from a wrong prefix.
+
+- **Authentication**: requests are signed with AWS Signature Version 4, the same signature every S3-compatible
+  store expects. With no keys, nothing is signed and the bucket is read anonymously. Temporary credentials (STS,
+  an IAM role) also work through `session_token`.
+- **Permissions needed**: `s3:ListBucket` on the bucket and `s3:GetObject` on the objects. RefExposer never
+  writes to a source bucket.
+- **No useless download**: the prefix is listed first (one request). While every object still has the size and
+  `ETag` of the published version, nothing is downloaded and the run ends as *unchanged*.
+- **Which objects**: the pattern is a glob relative to the prefix, matched segment by segment as `Path.glob`
+  does — `*.csv` stays directly under the prefix, `**/*.csv` goes down into it. Leave it empty to take
+  everything. Archives (`.zip`, `.tar.gz`, `.gz`) are unpacked like a download.
+- **Addressing**: Amazon uses `<bucket>.<endpoint>`; MinIO, Ceph and most self-hosted stores need
+  `<endpoint>/<bucket>` — tick **Address the bucket as `<endpoint>/<bucket>`** for those.
+- **Credentials**: the secret key is never shown on a page, in a run log or in an error. Keep it out of the
+  definition with a secret of the [secret manager](operations.md#secret-manager)
+  (`secret_access_key: "${secret:s3-key}"`) or a `${REFEX_SOURCE_…}` variable of `.env`.
+- **Network**: the proxy, the company certificate authorities and `REFEX_HTTP_VERIFY` of the network settings
+  apply, as for downloads. The endpoint is checked before any call: an address pointing at a cloud metadata
+  service, which would answer with the credentials of the instance, is refused.
+
+```yaml
+- id: partner-exports
+  name: Partner exports
+  source:
+    type: s3
+    endpoint: https://s3.eu-west-3.amazonaws.com
+    bucket: partner-data
+    prefix: exports/daily/          # only this folder is listed
+    path: "*.csv"                   # "**/*.csv" to go down into sub-folders
+    region: eu-west-3               # used to sign; us-east-1 when omitted
+    access_key_id: AKIA…            # both keys omitted: the bucket is read anonymously
+    secret_access_key: "${secret:partner-s3-key}"
+    # path_style: true              # MinIO, Ceph and most self-hosted stores
+  format: csv
+  key: reference
+  schedule: "0 * * * *"             # hourly check: nothing downloaded while the ETags do not change
+```
+
 ## MaxMind DB / GeoIP (GeoLite2, GeoIP2, DB-IP, IPinfo…)
 
 The `mmdb` format handles databases in the **MaxMind DB** format (`.mmdb`): GeoLite2 / GeoIP2 City, Country and ASN, and the `.mmdb` editions of DB-IP or IPinfo. They are published **as is**, so tools can download the raw file and use it directly. RefExposer also answers IP lookups.

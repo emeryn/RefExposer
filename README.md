@@ -10,7 +10,7 @@
 
 One tool to **expose, monitor and query heterogeneous referentials** (CSV, TSV, JSON, JSON Lines, TXT, XML, Parquet, Excel, SQLite, Bloom filters, MaxMind DB / GeoIP), whether they are downloaded from the Internet, dropped as files, or maintained directly in the application.
 
-Declare a referential once — a URL, a Git repository, an uploaded file, or rows you type in — and RefExposer downloads it, normalizes it to Parquet, checks the new version and publishes it. From then on it is a web explorer, a documented REST API, a set of downloads and an SQL table, all at once, with the same rights everywhere.
+Declare a referential once — a URL, a Git repository, an S3 bucket, an uploaded file, or rows you type in — and RefExposer downloads it, normalizes it to Parquet, checks the new version and publishes it. From then on it is a web explorer, a documented REST API, a set of downloads and an SQL table, all at once, with the same rights everywhere.
 
 ## Screenshots
 
@@ -64,7 +64,7 @@ Open **http://localhost:8080** and sign in with the initial administrator — a 
 | http://localhost:8080/api/catalog/docs | Generated documentation of the referentials (Swagger, `?ref=<id>` for one) |
 | http://localhost:8080/api/docs | Full technical API documentation |
 
-Then add a first referential, whichever way suits you: **Administration › Referentials › New referential** (URL, Git repository or uploaded file, with a live preview), a CSV file dropped into `sync/`, or `config/cybref.yml.sample` copied to `config/cybref.yml` for a set of ready-made cybersecurity referentials.
+Then add a first referential, whichever way suits you: **Administration › Referentials › New referential** (URL, Git repository, S3 bucket or uploaded file, with a live preview), a CSV file dropped into `sync/`, or `config/cybref.yml.sample` copied to `config/cybref.yml` for a set of ready-made cybersecurity referentials.
 
 RefExposer starts empty, and an **HTTP/HTTPS proxy**, company certificate authorities and the **branding** are configured from the interface. The full procedure, with the folders, the permissions and how to update and back up, is in [Getting started](docs/install.md).
 

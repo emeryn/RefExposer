@@ -3,6 +3,44 @@
 Notable changes to RefExposer. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **S3 buckets as a referential source** (*S3 bucket* in the editor, `source.type: s3`): Amazon S3 and every
+  compatible store — MinIO, Ceph, Scaleway, OVH, Wasabi, Garage — **with or without credentials**, so a bucket
+  open on the internal network needs no key at all. Requests are signed with AWS Signature Version 4, written
+  against the standard library and the HTTP client already in use: no new dependency, and the proxy, the
+  company certificate authorities and `REFEX_HTTP_VERIFY` apply here as they do to a download. A prefix says
+  what is listed and a glob says what is read — matched segment by segment as `Path.glob` does, so `*.csv`
+  stays directly under the prefix and `**/*.csv` goes down into it. The prefix is listed first at each update:
+  while every object still has the size and `ETag` of the published version, nothing is downloaded and the run
+  ends as *unchanged*. The secret key is a `${secret:…}` reference or a `${REFEX_SOURCE_…}` variable, masked
+  everywhere a literal one would show; the endpoint is checked before any call, so an address pointing at a
+  cloud metadata service is refused. **Test the bucket** in the editor lists what the source would read without
+  downloading anything.
+- **Full backups** (*Tasks › Full backups*, task **Full backup**): the whole instance in one archive —
+  every table of the database, the YAML definitions and the published data of `data/` — restorable as it was,
+  data included. The configuration backup that existed before carries the configuration alone; this one is for
+  putting an instance back. The temporary folders, the generated downloads and the previous backups are left
+  out, and the downloaded sources (`raw/`) only on request: they come from their origin again. **How often** it
+  runs is the schedule of the task, which is off until an administrator enables it and picks a cadence that
+  suits the size of the instance.
+  The archive is a streamed `tar.gz`, so an instance of several hundred GB is never held in memory, and it is
+  encrypted chunk by chunk (AES-256-GCM, each chunk authenticated with its own index): a truncated, reordered
+  or altered archive is refused rather than half-restored. **It never carries the encryption key** — an archive
+  holding its own key would protect nothing — so `REFEX_SECRET_KEY`, or `data/.secret_key`, must be kept
+  elsewhere.
+  Restoring replaces the database, the definitions and the published data, then picks the new configuration up
+  without a restart; each referential folder is swapped in place once it is complete, so a restore interrupted
+  halfway leaves readable data behind. A referential created since the backup keeps its data unless asked
+  otherwise, and an archive made on an older schema version is refused with what to do about it.
+- **Copy of the full backups to an S3 bucket** (*Settings › Backup*): a backup kept on the same disk as the
+  data it protects is only half a backup. Each archive is sent after it is written, with its own retention in
+  the bucket, and can be brought back onto the server and restored from there. A bucket that cannot be reached
+  ends the run as a *warning*, never a failure: the archive is on the server, only the off-site copy failed.
+  **Delete the local file once the bucket has it** leaves nothing on the server.
+
 ## [1.0.0] - 2026-10-29
 
 First version: referentials declared from the interface or in YAML, downloaded from HTTP, Git, files, an

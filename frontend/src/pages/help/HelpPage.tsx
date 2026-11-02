@@ -839,8 +839,18 @@ const ADMIN: Section[] = [
           <Anchor component={Link} to="/system/tasks">System › Tasks</Anchor> lists the scheduled background tasks:
           maintenance (sessions, audit retention, disk cleanup), integrity and monitoring (published data, stale referentials,
           sources, TLS certificate), security policy (inactive accounts, expired tokens, pending requests, LDAP resynchronisation)
-          and configuration backups. Enable them, change their schedule and parameters, run them now and read their history. Backups
-          are restored from the same page.
+          and backups. Enable them, change their schedule and parameters, run them now and read their history. Backups are
+          restored from the same page.
+        </P>
+        <H>Backups</H>
+        <P>
+          Two kinds, both on <Anchor component={Link} to="/system/tasks">System › Tasks</Anchor>. A{' '}
+          <b>configuration backup</b> carries the definitions, accounts, rights, settings and internal rows: small, dated, and
+          enough to set an instance up again, which then downloads its sources. A <b>full backup</b> carries that{' '}
+          <i>and</i> the published data of <code>data/</code>, so a restore puts the instance back exactly as it was. Its
+          schedule sets how often it runs, and Settings › Backup says where it goes — on the server, and optionally to an S3
+          bucket, so a copy lives off the disk it protects. Neither archive carries the encryption key: keep{' '}
+          <code>REFEX_SECRET_KEY</code> elsewhere, or an encrypted backup cannot be restored.
         </P>
         <H>Two-factor authentication</H>
         <P>

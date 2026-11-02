@@ -8,7 +8,7 @@
 
 **Administration › Referentials › New referential** opens a 4-step wizard:
 
-1. **Source**: one or more URLs (with optional authentication or HTTP headers, e.g. an API token), a Git repository, or a file uploaded by drag and drop (CSV, TSV, TXT, JSON, JSONL, XML, Parquet, Excel, Bloom filter, MaxMind DB, possibly `.gz` or `.zip`, 2 GB maximum).
+1. **Source**: one or more URLs (with optional authentication or HTTP headers, e.g. an API token), a Git repository, an S3 bucket, or a file uploaded by drag and drop (CSV, TSV, TXT, JSON, JSONL, XML, Parquet, Excel, Bloom filter, MaxMind DB, possibly `.gz` or `.zip`, 2 GB maximum).
 2. **Reading**: the source is downloaded and analysed.
    - The format is detected automatically, as well as the delimiter and the header of CSV files. For a nested JSON document, the lists of records are found and suggested.
    - Reading options and an optional SQL transformation are set here, with a preview of the first rows, the types and the row count.

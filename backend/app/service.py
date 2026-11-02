@@ -1036,7 +1036,9 @@ class Service:
         config = ref.model_dump(mode="json", exclude={"config_file"})
         # Source headers may carry credentials (API keys...): never expose their values
         config["source"]["headers"] = {k: "***" for k in config["source"].get("headers", {})}
-        for secret in ("basic_auth", "token"):
+        from .secretstore import SECRET_FIELDS
+
+        for secret in SECRET_FIELDS:  # basic_auth, git token, S3 keys
             if config["source"].get(secret):
                 config["source"][secret] = "***"
         return {

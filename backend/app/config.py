@@ -76,11 +76,13 @@ class SourceConfig(BaseModel):
 
     # http: downloaded · local: files in data/<id>/ · internal: rows managed in RefExposer (editor / API)
     # sync: file or folder of the sync folder (generated, see sync.py) · git: files of a Git repository
+    # s3: objects of an S3 bucket (Amazon or compatible, with or without credentials — see s3.py)
     # referential: published data of other referentials, combined (see CombineConfig)
-    type: Literal["http", "local", "internal", "sync", "git", "referential"] = "http"
+    type: Literal["http", "local", "internal", "sync", "git", "s3", "referential"] = "http"
     # http: one or several URLs. Each one becomes {source0}, {source1}... in transforms.
     urls: list[str] = Field(default_factory=list)
     # local: glob relative to data/<id>/ (e.g. "raw/*.csv") · git: glob relative to the repository root
+    # s3: glob relative to the prefix (e.g. "*.csv", "exports/**/*.parquet"); all the objects when empty
     path: str | None = None
     # referential: identifiers of the referentials to combine; for an enrichment, the first one gives the rows
     referentials: list[str] = Field(default_factory=list)
@@ -90,6 +92,18 @@ class SourceConfig(BaseModel):
     ref: str | None = None
     token: str | None = None
     username: str | None = None
+    # s3: endpoint of the store (https://s3.eu-west-3.amazonaws.com, https://minio.example.com:9000...), bucket,
+    # prefix inside it, signing region, and the credentials — left empty for a bucket readable anonymously. The
+    # secret key and the session token take a ${secret:...} reference or a ${REFEX_SOURCE_*} variable.
+    # path_style: <endpoint>/<bucket> instead of <bucket>.<endpoint> (MinIO and most self-hosted stores).
+    endpoint: str | None = None
+    bucket: str | None = None
+    prefix: str | None = None
+    region: str | None = None
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+    session_token: str | None = None
+    path_style: bool = False
     headers: dict[str, str] = Field(default_factory=dict)
     # HTTP Basic authentication "user:password" (e.g. MaxMind "account_id:license_key")
     basic_auth: str | None = None
@@ -110,8 +124,10 @@ class SourceConfig(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "SourceConfig":
         # URLs and paths are shown in logs and pages: a secret only goes where it is never displayed
-        if secret_names([self.urls, self.path, self.repository, self.ref, self.username, self.extract, list(self.headers)]):
-            raise ValueError("a ${secret:...} reference is only allowed in header values, 'basic_auth' and 'token'")
+        if secret_names([self.urls, self.path, self.repository, self.ref, self.username, self.extract, list(self.headers),
+                         self.endpoint, self.bucket, self.prefix, self.region, self.access_key_id]):
+            raise ValueError("a ${secret:...} reference is only allowed in header values, 'basic_auth', 'token', "
+                             "'secret_access_key' and 'session_token'")
         if self.type == "http" and not self.urls:
             raise ValueError("an http source must define at least one url")
         if self.type in ("local", "sync", "git") and not self.path:
@@ -137,6 +153,23 @@ class SourceConfig(BaseModel):
                 raise ValueError("the path must stay inside the repository")
         elif self.repository or self.token:
             raise ValueError("'repository' and 'token' only apply to git sources")
+        if self.type == "s3":
+            from .s3 import BUCKET_RE
+
+            if not self.endpoint or not re.match(r"^https?://\S+$", self.endpoint):
+                raise ValueError("an s3 source needs the endpoint of the store ('endpoint'), "
+                                 "e.g. https://s3.eu-west-3.amazonaws.com")
+            if re.match(r"^https?://[^/]*@", self.endpoint):
+                raise ValueError("no credentials in the endpoint: use 'access_key_id' and 'secret_access_key'")
+            if not BUCKET_RE.match(self.bucket or ""):
+                raise ValueError("an s3 source needs a bucket ('bucket'): lowercase letters, digits, '-' and '.'")
+            if bool(self.access_key_id) != bool(self.secret_access_key):
+                raise ValueError("give both 'access_key_id' and 'secret_access_key', or neither "
+                                 "(a bucket readable without credentials)")
+            if ".." in (self.prefix or "").split("/"):
+                raise ValueError("the prefix must stay inside the bucket")
+        elif self.endpoint or self.bucket or self.prefix or self.access_key_id or self.secret_access_key or self.session_token:
+            raise ValueError("'endpoint', 'bucket', 'prefix' and the access keys only apply to s3 sources")
         return self
 
 
@@ -567,9 +600,12 @@ class ReferentialConfig(BaseModel):
             "columns": [c.model_dump() for c in self.columns],
         }
         # Fields added later only count when set: the hash of existing definitions stays the same (no rebuild)
-        for f in ("basic_auth", "repository", "ref", "token", "username", "retries"):
+        for f in ("basic_auth", "repository", "ref", "token", "username", "retries",
+                  "endpoint", "bucket", "prefix", "region", "access_key_id", "secret_access_key", "session_token"):
             if payload["source"].get(f) is None:
                 payload["source"].pop(f, None)
+        if not payload["source"].get("path_style"):  # false by default: not part of an existing hash
+            payload["source"].pop("path_style", None)
         if not payload["source"].get("referentials"):
             payload["source"].pop("referentials", None)
         if self.confidential:  # encrypted output

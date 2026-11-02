@@ -1178,7 +1178,7 @@ export interface CatalogEntry extends ReferentialSummary {
 }
 
 export interface SourceConfigDraft {
-  type: 'http' | 'local' | 'git' | 'referential';
+  type: 'http' | 'local' | 'git' | 's3' | 'referential';
   /** unified referential: identifiers of the referentials to combine (the first one gives the rows of an enrichment) */
   referentials?: string[];
   urls: string[];
@@ -1194,6 +1194,85 @@ export interface SourceConfigDraft {
   ref?: string | null;
   token?: string | null;
   username?: string | null;
+  /** s3: endpoint of the store, bucket, prefix inside it, signing region */
+  endpoint?: string | null;
+  bucket?: string | null;
+  prefix?: string | null;
+  region?: string | null;
+  /** s3: left empty for a bucket readable without credentials */
+  access_key_id?: string | null;
+  secret_access_key?: string | null;
+  session_token?: string | null;
+  /** s3: <endpoint>/<bucket> instead of <bucket>.<endpoint> (MinIO, Ceph...) */
+  path_style?: boolean;
+}
+
+/** What POST /admin/referentials/s3-test answers. */
+export interface S3TestResult {
+  ok: boolean;
+  bucket: string;
+  endpoint: string;
+  anonymous: boolean;
+  matching: number;
+  objects: { key: string; size: number; last_modified: string }[];
+}
+
+/** A full backup held on the server. */
+export interface FullBackup {
+  name: string;
+  size: number;
+  encrypted: boolean;
+  created_at: string;
+}
+
+/** A full backup held in the S3 bucket. */
+export interface RemoteFullBackup {
+  name: string;
+  key: string;
+  size: number;
+  encrypted: boolean;
+  last_modified: string;
+}
+
+export interface FullBackupList {
+  backups: FullBackup[];
+  s3_enabled: boolean;
+  bucket: string | null;
+  confirm_word: string;
+}
+
+/** What a full backup carries (manifest.json of the archive). */
+export interface FullBackupManifest {
+  format: string;
+  app_version: string;
+  created_at: string;
+  encrypted: boolean;
+  include_raw: boolean;
+  rows: number;
+  counts: Record<string, number>;
+  config_files: string[];
+  data_files: number;
+  data_bytes: number;
+  referentials: string[];
+}
+
+/** Settings › Backup: where full backups go. */
+export interface BackupSettings {
+  keep_local: number;
+  encrypt: boolean;
+  include_raw: boolean;
+  s3_enabled: boolean;
+  endpoint: string;
+  bucket: string;
+  prefix: string;
+  region: string;
+  access_key_id: string;
+  secret_access_key: string;
+  secret_access_key_set?: boolean;
+  path_style: boolean;
+  verify_tls: boolean;
+  keep_s3: number;
+  delete_local_after_upload: boolean;
 }
 
 /** Referential definition as edited in the administration UI. */
@@ -1424,6 +1503,7 @@ export interface AllSettings {
   alerts: AlertsSettings;
   alert_kinds: AlertKind[];
   experimental: ExperimentalSettings;
+  backup: BackupSettings;
   local_login: boolean;
   log_level: LogLevel;
   public_url: string | null;

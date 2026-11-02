@@ -119,11 +119,14 @@ I = {"type": "integer"}
 B = {"type": "boolean"}
 O = {"type": "object"}
 REF_ID = {"type": "string", "description": "Referential id"}
-SOURCE = {"type": "object", "description": "Source: {type: http|git|local|referential, urls: [...], headers: {...}, basic_auth, "
-                                           "repository, ref, path, token, username, extract, referentials: [...]}. "
-                                           "type 'referential' combines the published data of the listed referentials (see "
-                                           "'combine'). Credentials: ${secret:<name>} references (see list_secrets), never "
-                                           "literal values"}
+SOURCE = {"type": "object", "description": "Source: {type: http|git|s3|local|referential, urls: [...], headers: {...}, "
+                                           "basic_auth, repository, ref, path, token, username, extract, "
+                                           "referentials: [...]}. type 's3' reads the objects of a bucket: {endpoint, bucket, "
+                                           "prefix, path (glob relative to the prefix), region, access_key_id, "
+                                           "secret_access_key, path_style}; both keys omitted means the bucket is read "
+                                           "without credentials. type 'referential' combines the published data of the listed "
+                                           "referentials (see 'combine'). Credentials: ${secret:<name>} references (see "
+                                           "list_secrets), never literal values"}
 CONFIG = {"type": "object", "description": "Referential definition, as in the YAML files: name, description, category, tags, "
                                            "source, format, options, transform (DuckDB SQL over {source}), key, "
                                            "search_columns, schedule (cron), validation, storage, quality, merge, combine, "

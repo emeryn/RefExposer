@@ -71,7 +71,8 @@ Every run that does something is written to the audit log (`task.run`), so it is
 | | **Expired API tokens**: deleted N days after their expiry (30) | daily |
 | | **Pending access requests**: reminder in the audit log and syslog | weekdays |
 | | **LDAP resynchronisation**: groups, name and e-mail of the LDAP accounts updated from the directory; accounts that left it are reported, or disabled | daily (when LDAP is enabled) |
-| Backup | **Configuration backup** (see below) | daily, 14 kept |
+| Backup | **Configuration backup**: definitions, accounts, rights, settings, internal rows (see below) | daily, 14 kept |
+| | **Full backup**: the configuration **and** the data of `data/`, on the server and / or in an S3 bucket (see below) | disabled, weekly when enabled |
 | Folder scans | **Import folder** and **sync folder** scans | `REFEX_IMPORT_POLL_SECONDS` / `REFEX_SYNC_POLL_SECONDS` |
 
 ### Configuration backups
@@ -85,7 +86,61 @@ The **Configuration backup** task writes a dated file to `data/.backups/`. It co
 
 The file is **encrypted** with a key derived from `REFEX_SECRET_KEY`, so it can only be restored with the same key. From the **Tasks** page, a backup can be downloaded, deleted or **restored** (typing `RESTORE` confirms it); a downloaded backup can be restored too. A restore replaces the configuration in one transaction and signs everybody out. The published data, the history and the audit log are kept.
 
-It does not replace the backup of the PostgreSQL volume and of `data/`.
+It does not replace the backup of the PostgreSQL volume and of `data/` — for that, see the **full backups** below.
+
+### Full backups (configuration **and** data)
+
+The **Full backup** task writes **everything** into one archive, in `data/.backups/full/`:
+
+- every table of the database: accounts, groups, rights, API tokens, settings, referential definitions, the rows
+  of internal referentials, saved searches, watchdogs and the audit log;
+- the YAML definitions of `config/`;
+- `data/`: the published versions (Parquet, Bloom filters, MaxMind DBs), their indexes, the metadata, the run
+  history and the SQLite bases kept for deltas.
+
+Left out on purpose: the temporary folders, the downloads generated from a published version (`exports/`,
+rebuilt on demand), the previous backups, and the downloaded source files (`raw/`) unless you ask for them —
+they come from their source again, and are routinely the largest thing on the disk.
+
+> **The archive never carries the encryption key** (`data/.secret_key`, or `REFEX_SECRET_KEY`). An archive
+> carrying its own key would protect nothing. Keep that key somewhere else: without it an encrypted archive
+> cannot be read, and a restored instance cannot decrypt its secrets or its confidential referentials.
+
+**How often** it runs is the schedule of the task, on the **Tasks** page — weekly by default, and the task is
+**off until you enable it**, so you choose a cadence that suits the size of your instance. **Where** it goes and
+how many copies are kept is **Settings › Backup**.
+
+The archive is a streamed `tar.gz`, so an instance of several hundred GB is never held in memory, and it is
+encrypted (AES-256-GCM) **chunk by chunk**: a truncated, reordered or altered archive is refused rather than
+half-restored. The free space is watched while it is written.
+
+#### Copy to an S3 bucket
+
+A backup kept on the same disk as the data it protects is only half a backup. In **Settings › Backup**, turn on
+the copy to an **S3 bucket** (Amazon S3 or any compatible store — see
+[S3 buckets](sources.md#s3-buckets-amazon-s3-minio-ceph-scaleway-ovh)) and give the endpoint, the bucket, a
+prefix and, unless the bucket accepts anonymous writes, an access key. Permissions needed on the prefix:
+`s3:ListBucket`, `s3:PutObject` and `s3:DeleteObject` (to apply the retention), plus `s3:GetObject` to restore
+from the bucket.
+
+Each backup is sent after it is written, and the oldest ones over the retention are deleted from the bucket. If
+the bucket cannot be reached, the run ends as a **warning**: the archive is still on the server, only its
+off-site copy failed. **Delete the local file once the bucket has it** leaves nothing on the server.
+
+#### Restoring
+
+On the **Tasks** page, the **Full backups** card lists the archives on the server and, when the copy is enabled,
+those in the bucket (which can be brought back onto the server and restored from there). A file downloaded
+earlier can be uploaded and restored too. Typing `RESTORE EVERYTHING` confirms it.
+
+A restore replaces the database, the definitions and the published data, then picks the new configuration up
+without a restart; everybody is signed out. By default a referential created *since* the backup keeps its data
+on disk; tick **Also delete the data of referentials the backup does not carry** to make the instance match the
+archive exactly. Each referential folder is swapped in place once it is complete, so a restore interrupted
+halfway leaves readable data behind.
+
+A backup made on an **older schema version** is refused with an explanation: restore it on an instance running
+the version it was made with, which brings the schema up to date by itself.
 
 ## Logging
 

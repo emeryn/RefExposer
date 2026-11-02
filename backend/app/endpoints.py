@@ -67,13 +67,19 @@ def _auth(source: dict[str, Any]) -> tuple[list[str], list[str]]:
         kinds.append("basic")
     if source.get("token"):
         kinds.append("git token")
-    return kinds, sorted(secret_names([source.get("headers"), source.get("basic_auth"), source.get("token")]))
+    if source.get("access_key_id"):
+        kinds.append("s3 access key")
+    elif source.get("type") == "s3":
+        kinds.append("anonymous")
+    return kinds, sorted(secret_names([source.get("headers"), source.get("basic_auth"), source.get("token"),
+                                       source.get("secret_access_key"), source.get("session_token")]))
 
 
 def referential_endpoints(ref: Any, meta: dict[str, Any]) -> list[dict[str, Any]]:
     src = ref.source.model_dump()
     kinds, secrets = _auth(src)
-    seen = {s.get("url"): s for s in meta.get("sources") or [] if s.get("url")}
+    # Entries of the last run, by the address they were reached at ("endpoint" for an S3 source, which has no URL)
+    seen = {s.get("url") or s.get("endpoint"): s for s in meta.get("sources") or [] if s.get("url") or s.get("endpoint")}
     per_day = calls_per_day(ref.schedule) if ref.enabled else 0.0
     base = {"referential": ref.id, "name": ref.name, "category": ref.category, "enabled": ref.enabled, "schedule": ref.schedule,
             "health_status": meta.get("status"), "last_error": meta.get("last_error"), "auth": kinds, "secrets": secrets}
@@ -83,6 +89,8 @@ def referential_endpoints(ref: Any, meta: dict[str, Any]) -> list[dict[str, Any]
         targets += [(u, "source") for u in ref.source.urls]
     elif ref.source.type == "git" and ref.source.repository:
         targets.append((ref.source.repository, "git"))
+    elif ref.source.type == "s3" and ref.source.endpoint:
+        targets.append((ref.source.endpoint, "s3"))
     if ref.incremental:
         targets += [(u, "delta") for u in ref.incremental.urls]
     enrich = ref.options.get("enrich_bulk_url") if isinstance(ref.options, dict) else None

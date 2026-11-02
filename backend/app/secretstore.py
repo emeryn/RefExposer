@@ -2,7 +2,8 @@
 
 - Values are encrypted at rest (AES-256-GCM, key derived from REFEX_SECRET_KEY, bound to the secret name) and never
   returned by the API: definitions only hold the reference, resolved at the moment a request is sent.
-- References are only allowed where nothing is displayed: header values, `basic_auth` and the Git `token`.
+- References are only allowed where nothing is displayed: header values, `basic_auth`, the Git `token` and the
+  `secret_access_key` / `session_token` of an S3 source.
 - A secret may be restricted to some hosts (`hosts`, fnmatch patterns): it is never sent anywhere else, even by an
   administrator (or an agent) pointing a source at another server.
 - Literal credentials still written in definitions are masked in the administration API; a masked value sent back
@@ -27,7 +28,7 @@ from .models import SourceSecret
 NAME_RE = re.compile(r"^" + SECRET_NAME + r"$")
 HOST_RE = re.compile(r"^[A-Za-z0-9*?.\-\[\]:]+$")
 MASK = "********"
-_SECRET_FIELDS = ("basic_auth", "token")
+SECRET_FIELDS = ("basic_auth", "token", "secret_access_key", "session_token")
 
 
 class SecretError(ValueError):
@@ -115,13 +116,13 @@ def _sensitive(value: Any) -> bool:
 
 
 def mask_source(source: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Copy of a source where literal header values, Basic authentication and token are masked."""
+    """Copy of a source where literal header values, Basic authentication, token and S3 keys are masked."""
     if not source:
         return source
     out = dict(source)
     if out.get("headers"):
         out["headers"] = {k: (MASK if _sensitive(v) else v) for k, v in out["headers"].items()}
-    for f in _SECRET_FIELDS:
+    for f in SECRET_FIELDS:
         if _sensitive(out.get(f)):
             out[f] = MASK
     return out
@@ -146,7 +147,7 @@ def unmask_source(incoming: dict[str, Any] | None, stored: dict[str, Any] | None
                 v = stored["headers"][k]
             headers[k] = v
         out["headers"] = headers
-    for f in _SECRET_FIELDS:
+    for f in SECRET_FIELDS:
         if out.get(f) == MASK:
             if not stored.get(f):
                 raise SecretError(f"'{f}': enter its value (or select a secret)")

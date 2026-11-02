@@ -1251,6 +1251,61 @@ def execute_run(
             "files": [str(f.relative_to(paths.root)).replace("\\", "/") for f in files],
             "checked_at": iso(utcnow()),
         })
+    elif ref.source.type == "s3":
+        from .s3 import S3Error, fetch as s3_fetch, source_config as s3_config
+        from .resources import DiskFull, DiskGuard
+
+        previous = (meta.get("sources") or [{}])[0]
+        same_config = meta.get("config_hash") == ref.config_hash
+        staging = paths.raw / "s3"
+        guard = DiskGuard(settings, paths.raw, f"download of s3://{ref.source.bucket}")
+        try:
+            if not run.force and same_config and previous.get("objects_fingerprint") and paths.published.exists():
+                # Listing a prefix is one request: when every object still has the size and ETag of the
+                # published version, nothing is downloaded again
+                from .s3 import Fetched, S3Client, S3Object
+
+                with S3Client(s3_config(ref.source, settings), settings) as client:
+                    listed = client.matching((ref.source.prefix or "").lstrip("/"), (ref.source.path or "").strip() or None)
+                current = Fetched(objects=listed).fingerprint
+                if current == previous["objects_fingerprint"]:
+                    run.log(f"Bucket unchanged ({len(listed)} object(s), same ETags): the published version is kept")
+                    run.status = "unchanged"
+                    run.stats.update({"rows": meta.get("row_count")})
+                    meta["last_checked_at"] = iso(utcnow())
+                    meta["sources"] = [{**previous, "checked_at": iso(utcnow())}]
+                    return meta
+            if cancelled():
+                raise RunCancelled()
+            got = s3_fetch(settings, ref.source, staging, run.log, cancelled, guard)
+        except S3Error as e:
+            raise SourceCorrupted(f"s3 source unavailable: {e}") from e
+        except DiskFull as e:
+            raise RunRejected(str(e)) from e
+        if not got.files:
+            raise SourceCorrupted(f"corrupted source: no object of s3://{ref.source.bucket} matches "
+                                  f"'{ref.source.path or '*'}' under '{ref.source.prefix or ''}'")
+        # Archives (.zip, .tar.gz, .gz) are unpacked where they landed, as for an HTTP download
+        files = []
+        for f in got.files:
+            if keeps_gzip(f, ref.format):
+                files.append(f)
+            else:
+                files.extend(unpack(f, f.parent, ref.source.extract, run, ref.format))
+        for f in files:
+            check_source_file(f, ref.format, f.name)
+        groups.append(sorted(files))
+        sources.append({
+            "url": None,
+            "bucket": f"s3://{ref.source.bucket}/{(ref.source.prefix or '').lstrip('/')}",
+            "endpoint": ref.source.endpoint,
+            "objects": [{"key": o.key, "size": o.size, "etag": o.etag, "last_modified": o.last_modified} for o in got.objects],
+            "objects_fingerprint": got.fingerprint,
+            "downloaded_bytes": got.bytes_downloaded,
+            "files": [str(f.relative_to(paths.root)).replace("\\", "/") for f in sorted(files)],
+            "fetched_at": iso(utcnow()),
+            "checked_at": iso(utcnow()),
+        })
     elif ref.source.type == "sync":
         # Files pushed into the sync folder: read in place; archives are first copied and unpacked under raw/
         from .sync import resolve
@@ -1395,7 +1450,7 @@ def execute_run(
         if source is not None:
             # A single Parquet file, nothing to change: published as is (hard link, else copy), not rewritten row by row
             # Files of RefExposer (downloads, imports) are linked; files of the user are copied, as they may be rewritten in place
-            how = _link_or_copy(source, tmp, link=manual is not None or ref.source.type in ("http", "git"))
+            how = _link_or_copy(source, tmp, link=manual is not None or ref.source.type in ("http", "git", "s3"))
             run.log(f"Parquet source published as is ({how}" + (f", already sorted on '{st.sort_by[0]}'" if st.sort_by else "") + ")")
         else:
             run.log("Transforming and writing parquet" + (f" (sorted on {', '.join(st.sort_by)})" if st.sort_by else ""))
@@ -1551,13 +1606,13 @@ def execute_run(
     from .resources import fmt_gb, keep_raw_max
 
     too_big = (not published_as_is and keep_raw_max(settings) and meta["raw_size"] > keep_raw_max(settings)
-               and ref.source.type in ("http", "git"))
-    if (not st.keep_raw or ref.confidential or too_big) and ref.source.type in ("http", "internal", "git"):
+               and ref.source.type in ("http", "git", "s3"))
+    if (not st.keep_raw or ref.confidential or too_big) and ref.source.type in ("http", "internal", "git", "s3"):
         shutil.rmtree(paths.raw, ignore_errors=True)
         paths.raw.mkdir(parents=True, exist_ok=True)
         for s in sources:
             s["discarded"] = True
-        if ref.source.type == "http":
+        if ref.source.type in ("http", "s3"):
             why = ("confidential" if ref.confidential else "storage.keep_raw: false" if not st.keep_raw
                    else f"{fmt_gb(meta['raw_size'])}, more than REFEX_KEEP_RAW_MAX")
             run.log(f"Source files deleted after import ({why})")
@@ -1632,7 +1687,7 @@ def _publish_bloom(ref: ReferentialConfig, run: Run, paths: RefPaths, meta: dict
     run.phase = "publish"
     if paths.bloom.exists() and ref.storage.keep_previous:
         os.replace(paths.bloom, paths.previous_bloom)
-    if ref.source.type == "http" or sources[0].get("manual"):
+    if ref.source.type in ("http", "s3") or sources[0].get("manual"):
         os.replace(files[0], paths.bloom)  # no copy of a large file: the ETag still allows 304 revalidation
         for s in sources:
             s["discarded"] = True

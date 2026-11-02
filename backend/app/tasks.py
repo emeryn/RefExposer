@@ -578,6 +578,48 @@ def _backup(m: TaskManager, p: dict[str, Any]) -> Result:
                   details={"file": path.name, "size": path.stat().st_size})
 
 
+def _full_backup(m: TaskManager, p: dict[str, Any]) -> Result:
+    """Full backup (configuration **and** data), on the server and / or in an S3 bucket.
+
+    The settings of Settings › Backup say where it goes and how many copies are kept; this task says when, and
+    its parameters can override the encryption and whether the downloaded sources are carried.
+    """
+    from . import appsettings, fullbackup
+    from .s3 import S3Error
+
+    lines: list[str] = []
+    with m.db() as db:
+        cfg = appsettings.load(db, "backup")
+        encrypt = cfg.encrypt if p["encrypt"] == "settings" else p["encrypt"] == "yes"
+        include_raw = cfg.include_raw if p["include_raw"] == "settings" else p["include_raw"] == "yes"
+        written = fullbackup.write(db, m.settings, encrypt=encrypt, include_raw=include_raw,
+                                   keep=cfg.keep_local, log_line=lines.append)
+    details: dict[str, Any] = {"file": written.path.name, "size": written.size, "encrypted": written.encrypted,
+                               "rows": written.manifest.get("rows"), "data_files": written.manifest.get("data_files"),
+                               "include_raw": include_raw}
+    status: Status = "success"
+    want_s3 = cfg.s3_enabled and p["destination"] in ("settings", "s3")
+    if p["destination"] == "s3" and not cfg.s3_enabled:
+        lines.append("The copy to a bucket is not enabled in Settings › Backup: only the local file was written")
+        status = "warning"
+    if want_s3:
+        try:
+            details["s3_key"] = fullbackup.upload(cfg.s3, m.settings, written, cfg.prefix, cfg.keep_s3, lines.append)
+            if cfg.delete_local_after_upload:
+                written.path.unlink(missing_ok=True)
+                lines.append("Local file deleted: the bucket holds the backup")
+        except S3Error as e:
+            # The archive is on the server: the backup is not lost, only its off-site copy failed
+            lines.append(f"Copy to the bucket failed: {e}")
+            details["s3_error"] = str(e)
+            status = "warning"
+    message = f"{written.path.name} ({_human(written.size)}, {'encrypted' if written.encrypted else 'NOT encrypted'}"
+    message += f", {written.manifest.get('data_files', 0)} file(s) of data/, {written.manifest.get('rows', 0):,} rows)"
+    if details.get("s3_key"):
+        message += f" · copied to s3://{cfg.bucket}/{details['s3_key']}"
+    return Result(status, message, {**details, "log": lines})
+
+
 def _human(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024:
@@ -656,4 +698,16 @@ def _definitions() -> list[TaskDef]:
                 "(data/.backups), restorable from this page.", _backup, schedule="0 2 * * *",
                 params=[Param("keep", "Backups kept", "int", 14, min=1, max=365),
                         Param("encrypt", "Encrypted (REFEX_SECRET_KEY)", "bool", True)]),
+        TaskDef("full_backup", "Full backup", "backup",
+                "Everything in one archive: every table of the database, the definitions and data/ — the published "
+                "versions, their indexes and the history. Restorable as it was, on the server and / or in an S3 bucket "
+                "(Settings › Backup). Off by default: set the schedule that suits the size of your instance.",
+                _full_backup, schedule="0 3 * * 0", enabled=False,
+                params=[Param("destination", "Destination", "choice", "settings",
+                              choices=["settings", "local", "s3"],
+                              help="settings: the server, plus the bucket when it is enabled"),
+                        Param("encrypt", "Encryption", "choice", "settings", choices=["settings", "yes", "no"]),
+                        Param("include_raw", "Carry the downloaded sources (raw/)", "choice", "settings",
+                              choices=["settings", "yes", "no"],
+                              help="They come from their source again: leaving them out keeps the archive much smaller")]),
     ]

@@ -6,6 +6,10 @@ import type {
   AuditEntry,
   BackupFile,
   BatchLookup,
+  FullBackupList,
+  FullBackupManifest,
+  RemoteFullBackup,
+  S3TestResult,
   Branding,
   BulkResult,
   AlertDetail,
@@ -362,6 +366,45 @@ export const api = {
     form.append('confirm', confirm);
     return request<{ restored: Record<string, number> }>('/api/admin/backups/restore-upload', { method: 'POST', body: form, headers: {} });
   },
+
+  // Full backups: configuration and data in one archive, on the server and / or in an S3 bucket
+  fullBackups: () => request<FullBackupList>('/api/admin/full-backups'),
+  runFullBackup: () => request<SystemTask>('/api/admin/full-backups/run', json('POST')),
+  fullBackupManifest: (name: string) => request<FullBackupManifest>(`/api/admin/full-backups/${enc(name)}/manifest`),
+  deleteFullBackup: (name: string) => request<{ ok: boolean }>(`/api/admin/full-backups/${enc(name)}`, json('DELETE')),
+  restoreFullBackup: (name: string, confirm: string, removeExtra: boolean) =>
+    request<{ restored: Record<string, number>; referentials: string[]; removed: string[] }>(
+      `/api/admin/full-backups/${enc(name)}/restore`,
+      json('POST', { confirm, remove_extra: removeExtra }),
+    ),
+  restoreFullBackupUpload: (file: File, confirm: string, removeExtra: boolean) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('confirm', confirm);
+    form.append('remove_extra', String(removeExtra));
+    return request<{ restored: Record<string, number> }>('/api/admin/full-backups/restore-upload', {
+      method: 'POST',
+      body: form,
+      headers: {},
+    });
+  },
+  remoteFullBackups: () => request<RemoteFullBackup[]>('/api/admin/full-backups/remote/list'),
+  fetchRemoteFullBackup: (name: string) =>
+    request<{ name: string; size: number }>(`/api/admin/full-backups/remote/${enc(name)}/fetch`, json('POST')),
+  deleteRemoteFullBackup: (name: string) =>
+    request<{ ok: boolean }>(`/api/admin/full-backups/remote/${enc(name)}`, json('DELETE')),
+  testBackupBucket: (write = true) =>
+    request<{ ok: boolean; bucket: string; anonymous: boolean; objects: string[]; writable: boolean | null }>(
+      '/api/admin/full-backups/remote/test',
+      json('POST', { write }),
+    ),
+
+  // S3 referential sources: what the prefix and the pattern would actually read
+  testS3Source: (source: Record<string, unknown>, referentialId?: string) =>
+    request<S3TestResult>(
+      `/api/admin/referentials/s3-test${referentialId ? `?referential_id=${enc(referentialId)}` : ''}`,
+      json('POST', source),
+    ),
   createServiceAccount: (body: { username: string; display_name: string | null; email: string | null; group_ids: number[]; role?: 'user' | 'advanced' }) =>
     request<AdminUser>('/api/admin/service-accounts', json('POST', body)),
   userTokens: (id: number) => request<ApiTokenInfo[]>(`/api/admin/users/${id}/tokens`),

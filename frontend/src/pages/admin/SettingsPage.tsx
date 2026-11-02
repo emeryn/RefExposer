@@ -26,13 +26,13 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconBell, IconBrush, IconCheck, IconFileText, IconFlask, IconKey, IconLock, IconMail, IconRobot, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconWorldUpload, IconX } from '@tabler/icons-react';
+import { IconAlertTriangle, IconBell, IconBrush, IconCheck, IconCloudUpload, IconDatabaseExport, IconFileText, IconFlask, IconKey, IconLock, IconMail, IconRobot, IconShieldLock, IconNetwork, IconPhotoUp, IconPlugConnected, IconSitemap, IconTrash, IconWorldUpload, IconX } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useBranding } from '../../api/hooks';
-import type { BrandingSettings, ExperimentalSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
+import type { BackupSettings, BrandingSettings, ExperimentalSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
 import { BrandHeader } from '../../components/Brand';
 import { CodeSnippet, CopyIcon } from '../../components/Common';
 import { SavedSecret } from '../../components/SavedSecret';
@@ -44,6 +44,24 @@ const NotificationsPage = lazy(() => import('./NotificationsPage'));
 const SecretsPage = lazy(() => import('./SecretsPage'));
 
 const MONO = { input: { fontFamily: 'var(--mantine-font-family-monospace)' } };
+
+// Defaults of appsettings.BackupSettings, for an instance that has never saved the section
+const EMPTY_BACKUP: BackupSettings = {
+  keep_local: 4,
+  encrypt: true,
+  include_raw: false,
+  s3_enabled: false,
+  endpoint: '',
+  bucket: '',
+  prefix: 'refexposer/',
+  region: 'us-east-1',
+  access_key_id: '',
+  secret_access_key: '',
+  path_style: false,
+  verify_tls: true,
+  keep_s3: 8,
+  delete_local_after_upload: false,
+};
 
 function useSave(section: string) {
   const qc = useQueryClient();
@@ -116,6 +134,179 @@ function ExperimentalTab({ initial }: { initial: ExperimentalSettings }) {
             {dirty && (
               <Text size="xs" c="dimmed">
                 Unsaved changes
+              </Text>
+            )}
+          </Group>
+        </Stack>
+      </Grid.Col>
+    </Grid>
+  );
+}
+
+// ------------------------------------------------------------------ backups
+
+/**
+ * Where full backups go (fullbackup.py): the file on the server, and the copy to an S3 bucket.
+ *
+ * *When* they run is the schedule of the "Full backup" task, on the Tasks page — this tab is about the
+ * destination and how many copies are kept.
+ */
+function BackupTab({ initial }: { initial: BackupSettings }) {
+  const [cfg, setCfg] = useState(initial);
+  useEffect(() => setCfg(initial), [initial]);
+  const save = useSave('backup');
+  const set = <K extends keyof BackupSettings>(k: K, v: BackupSettings[K]) => setCfg((c) => ({ ...c, [k]: v }));
+  const dirty = JSON.stringify(cfg) !== JSON.stringify(initial);
+  const test = useMutation({
+    mutationFn: () => api.testBackupBucket(true),
+    onSuccess: (r) =>
+      notifications.show({
+        message: `${r.bucket} answers${r.anonymous ? ' (no credentials)' : ''}: ${r.writable ? 'writable' : 'read only'}`,
+        color: r.writable ? 'teal' : 'orange',
+      }),
+    onError: (e: Error) =>
+      notifications.show({ title: 'The bucket could not be reached', message: e.message, color: 'red', autoClose: 15000 }),
+  });
+  return (
+    <Grid gutter="md">
+      <Grid.Col span={{ base: 12, lg: 8 }}>
+        <Stack>
+          <Section title="Full backups" icon={<IconDatabaseExport size={18} />}>
+            <Text size="sm" c="dimmed">
+              A full backup carries every table of the database, the referential definitions and the published data of{' '}
+              <Code>data/</Code>: a restore puts the instance back as it was. Set <b>how often</b> it runs with the schedule of
+              the “Full backup” task, on the Tasks page, where the archives are also listed and restored.
+            </Text>
+            <Alert color="yellow" variant="light" p="xs" icon={<IconAlertTriangle size={16} />}>
+              <Text size="xs">
+                The archive never carries the encryption key (<Code>data/.secret_key</Code> or <Code>REFEX_SECRET_KEY</Code>) —
+                it would protect nothing. Keep that key somewhere else: without it an encrypted archive cannot be read.
+              </Text>
+            </Alert>
+            <Switch
+              label="Encrypt the archive (recommended)"
+              description="AES-256-GCM, chunk by chunk, with a key derived from REFEX_SECRET_KEY: a truncated or altered archive is refused rather than half-restored."
+              checked={cfg.encrypt}
+              onChange={(e) => set('encrypt', e.currentTarget.checked)}
+            />
+            <Switch
+              label="Also carry the downloaded source files (raw/)"
+              description="Off: the archive stays much smaller, and the sources come from their origin again at the next update."
+              checked={cfg.include_raw}
+              onChange={(e) => set('include_raw', e.currentTarget.checked)}
+            />
+            <NumberInput
+              label="Full backups kept on the server"
+              description="The oldest are deleted once this many are present."
+              min={1}
+              max={100}
+              value={cfg.keep_local}
+              onChange={(v) => set('keep_local', Number(v) || 1)}
+              w={260}
+            />
+          </Section>
+          <Section title="Copy to an S3 bucket" icon={<IconCloudUpload size={18} />}>
+            <Text size="sm" c="dimmed">
+              A backup kept on the same disk as the data it protects is only half a backup. Amazon S3 or any compatible store
+              (MinIO, Ceph, Scaleway, OVH, Wasabi, Garage). Leave the keys empty for a bucket that accepts writes without
+              credentials.
+            </Text>
+            <Switch
+              label="Send each full backup to the bucket"
+              checked={cfg.s3_enabled}
+              onChange={(e) => set('s3_enabled', e.currentTarget.checked)}
+            />
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput
+                label="Endpoint"
+                placeholder="https://s3.eu-west-3.amazonaws.com"
+                value={cfg.endpoint}
+                onChange={(e) => set('endpoint', e.currentTarget.value)}
+              />
+              <TextInput
+                label="Bucket"
+                placeholder="company-backups"
+                value={cfg.bucket}
+                onChange={(e) => set('bucket', e.currentTarget.value)}
+              />
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput
+                label="Prefix (folder in the bucket)"
+                placeholder="refexposer/"
+                value={cfg.prefix}
+                onChange={(e) => set('prefix', e.currentTarget.value)}
+              />
+              <TextInput
+                label="Region"
+                description="Used to sign the request; us-east-1 when empty"
+                placeholder="eu-west-3"
+                value={cfg.region}
+                onChange={(e) => set('region', e.currentTarget.value)}
+              />
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput
+                label="Access key id"
+                placeholder="AKIA…"
+                value={cfg.access_key_id}
+                onChange={(e) => set('access_key_id', e.currentTarget.value)}
+                autoComplete="off"
+              />
+              <SavedSecret
+                label="Secret access key"
+                value={cfg.secret_access_key}
+                isSet={cfg.secret_access_key_set}
+                onChange={(v) => set('secret_access_key', v)}
+              />
+            </SimpleGrid>
+            <Switch
+              label="Address the bucket as <endpoint>/<bucket>"
+              description="Needed by MinIO, Ceph and most self-hosted stores; Amazon uses <bucket>.<endpoint>."
+              checked={cfg.path_style}
+              onChange={(e) => set('path_style', e.currentTarget.checked)}
+            />
+            <Switch
+              label="Verify the TLS certificate of the store (recommended)"
+              checked={cfg.verify_tls}
+              onChange={(e) => set('verify_tls', e.currentTarget.checked)}
+            />
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <NumberInput
+                label="Full backups kept in the bucket"
+                min={1}
+                max={1000}
+                value={cfg.keep_s3}
+                onChange={(v) => set('keep_s3', Number(v) || 1)}
+              />
+              <Switch
+                mt="xl"
+                label="Delete the local file once the bucket has it"
+                description="The server keeps nothing: the off-site copy is the backup."
+                checked={cfg.delete_local_after_upload}
+                onChange={(e) => set('delete_local_after_upload', e.currentTarget.checked)}
+              />
+            </SimpleGrid>
+            <Text size="xs" c="dimmed">
+              Permissions needed on the prefix: <Code>s3:ListBucket</Code>, <Code>s3:PutObject</Code> and{' '}
+              <Code>s3:DeleteObject</Code> (to apply the retention), plus <Code>s3:GetObject</Code> to restore from the bucket.
+            </Text>
+          </Section>
+          <Group>
+            <Button onClick={() => save.mutate(cfg)} loading={save.isPending} disabled={!dirty}>
+              Save
+            </Button>
+            <Button
+              variant="default"
+              onClick={() => test.mutate()}
+              loading={test.isPending}
+              disabled={dirty || !initial.endpoint || !initial.bucket}
+            >
+              Test the bucket
+            </Button>
+            {dirty && (
+              <Text size="xs" c="dimmed">
+                Unsaved changes — save before testing: the test uses the stored settings
               </Text>
             )}
           </Group>
@@ -1118,6 +1309,13 @@ export default function SettingsPage() {
             Secrets
           </Tabs.Tab>
           <Tabs.Tab
+            value="backup"
+            leftSection={<IconDatabaseExport size={16} />}
+            rightSection={data.backup?.s3_enabled ? <Badge size="xs" color="teal">S3</Badge> : null}
+          >
+            Backup
+          </Tabs.Tab>
+          <Tabs.Tab
             value="assistant"
             leftSection={<IconRobot size={16} />}
             rightSection={data.assistant.enabled ? <Badge size="xs" color="teal">on</Badge> : null}
@@ -1173,6 +1371,9 @@ export default function SettingsPage() {
         </Tabs.Panel>
         <Tabs.Panel value="secrets">
           <SecretsPage />
+        </Tabs.Panel>
+        <Tabs.Panel value="backup">
+          <BackupTab initial={data.backup ?? EMPTY_BACKUP} />
         </Tabs.Panel>
         <Tabs.Panel value="assistant">
           <AssistantTab

@@ -36,12 +36,17 @@ import { useState } from 'react';
 import { api } from '../../api/client';
 import type { SystemTask, TaskParamDef, TaskRun } from '../../api/types';
 import { fmtBytes, fmtDate, fmtDuration, fmtRelative } from '../../lib/format';
+import FullBackups from './FullBackups';
 
 const CATEGORIES: { id: SystemTask['category']; title: string; description: string }[] = [
   { id: 'maintenance', title: 'Maintenance', description: 'Sessions, audit log retention, disk space.' },
   { id: 'integrity', title: 'Integrity and monitoring', description: 'Published data, stale referentials, sources, certificate.' },
   { id: 'security', title: 'Security policy', description: 'Inactive accounts, API tokens, access requests, directory.' },
-  { id: 'backup', title: 'Backup', description: 'Configuration backups, restorable below.' },
+  {
+    id: 'backup',
+    title: 'Backup',
+    description: 'Configuration backups and full backups, restorable below. The schedule of each one sets how often it runs.',
+  },
   { id: 'system', title: 'Folder scans', description: 'Import and sync folders (interval set by environment variables).' },
 ];
 
@@ -52,6 +57,9 @@ const PRESETS = [
   { value: '0 9 * * 1-5', label: 'Weekdays at 9:00' },
   { value: '0 6 * * 1', label: 'Every Monday at 6:00' },
   { value: '0 6 1 * *', label: 'On the 1st of the month at 6:00' },
+  { value: '0 3 * * 0', label: 'Every Sunday at 3:00' },
+  { value: '0 3 1,15 * *', label: 'On the 1st and the 15th at 3:00' },
+  { value: '0 3 1 * *', label: 'On the 1st of the month at 3:00' },
 ];
 
 const STATUS_COLOR: Record<TaskRun['status'], string> = { success: 'teal', warning: 'orange', error: 'red' };
@@ -432,6 +440,7 @@ export default function TasksPage() {
         );
       })}
       <Backups />
+      <FullBackups />
     </Stack>
   );
 }

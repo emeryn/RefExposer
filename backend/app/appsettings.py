@@ -11,7 +11,7 @@ import re
 import threading
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from .crypto import decrypt, encrypt
@@ -233,6 +233,80 @@ class TasksSettings(BaseModel):
     """Schedule, state and parameters of the system tasks changed by administrators ({task id: {...}})."""
 
     tasks: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class BackupSettings(BaseModel):
+    """Where full backups go, and how many are kept (see fullbackup.py).
+
+    The file written on the server is the default destination. An S3 bucket is the off-site copy: a backup kept
+    on the same disk as the data it protects is only half a backup.
+    """
+
+    # Full backup of the server (data/.backups/full): the file the "Full backup" task writes
+    keep_local: int = Field(4, ge=1, le=100, description="Full backups kept on the server")
+    encrypt: bool = Field(True, description="AES-256-GCM, key derived from REFEX_SECRET_KEY")
+    include_raw: bool = Field(False, description="Also carry the downloaded source files (raw/), often the largest part")
+
+    # Copy to an S3 bucket (Amazon or compatible). Empty keys: a bucket that accepts anonymous writes.
+    s3_enabled: bool = False
+    endpoint: str = ""
+    bucket: str = ""
+    prefix: str = Field("refexposer/", description="Folder inside the bucket")
+    region: str = "us-east-1"
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    path_style: bool = Field(False, description="<endpoint>/<bucket> instead of <bucket>.<endpoint> (MinIO, Ceph...)")
+    verify_tls: bool = True
+    keep_s3: int = Field(8, ge=1, le=1000, description="Full backups kept in the bucket")
+    # The local file is deleted once the bucket has it: the server keeps nothing, the off-site copy is the backup
+    delete_local_after_upload: bool = False
+
+    @field_validator("endpoint")
+    @classmethod
+    def _endpoint(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if v and not re.match(r"^https?://[^\s]+$", v):
+            raise ValueError("endpoint URL expected (https://s3.eu-west-3.amazonaws.com, https://minio.example.com:9000)")
+        if re.match(r"^https?://[^/]*@", v):
+            raise ValueError("no credentials in the endpoint: use the access key fields")
+        return v
+
+    @field_validator("bucket")
+    @classmethod
+    def _bucket(cls, v: str) -> str:
+        from .s3 import BUCKET_RE
+
+        v = v.strip()
+        if v and not BUCKET_RE.match(v):
+            raise ValueError("invalid bucket name (lowercase letters, digits, '-' and '.', 3 to 63 characters)")
+        return v
+
+    @field_validator("prefix")
+    @classmethod
+    def _prefix(cls, v: str) -> str:
+        v = v.strip().lstrip("/")
+        if ".." in v.split("/"):
+            raise ValueError("the prefix must stay inside the bucket")
+        return v
+
+    @model_validator(mode="after")
+    def _check(self) -> "BackupSettings":
+        if self.s3_enabled and not (self.endpoint and self.bucket):
+            raise ValueError("the copy to a bucket needs an endpoint and a bucket name")
+        if bool(self.access_key_id) != bool(self.secret_access_key):
+            raise ValueError("give both an access key id and a secret access key, or neither (anonymous bucket)")
+        if self.delete_local_after_upload and not self.s3_enabled:
+            raise ValueError("deleting the local file only makes sense with the copy to a bucket enabled")
+        return self
+
+    @property
+    def s3(self) -> Any:
+        """S3Config of the destination bucket (s3.py)."""
+        from .s3 import S3Config
+
+        return S3Config(endpoint=self.endpoint, bucket=self.bucket, region=self.region or "us-east-1",
+                        access_key_id=self.access_key_id, secret_access_key=self.secret_access_key,
+                        path_style=self.path_style, verify_tls=self.verify_tls)
 
 
 class McpSettings(BaseModel):
@@ -593,12 +667,12 @@ SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSett
                                          "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
                                          "notifications": NotificationsSettings, "federation": FederationSettings,
                                          "assistant": AssistantSettings, "alerts": AlertsSettings,
-                                         "experimental": ExperimentalSettings}
+                                         "experimental": ExperimentalSettings, "backup": BackupSettings}
 # *Names* of the fields kept encrypted in each section — never their values, so these are safe to log
 SECRET_FIELDS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
                                              "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
                                              "notifications": (), "federation": (), "assistant": ("api_key",),
-                                             "alerts": (), "experimental": ()}
+                                             "alerts": (), "experimental": (), "backup": ("secret_access_key",)}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()
