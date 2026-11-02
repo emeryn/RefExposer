@@ -426,6 +426,10 @@ class InternalIn(BaseModel):
     columns: list[dict[str, Any]]
     search_columns: list[str] = Field(default_factory=list)
     confidential: bool = Field(False, description="Rows encrypted in the database, published files encrypted at rest")
+    # Where its published file lives: this disk, or the bucket of Settings > Storage (remotestore.py). None on
+    # an update keeps what is stored, so editing the columns does not move the data back.
+    storage_location: Literal["local", "remote"] | None = Field(
+        None, description="local (default) or remote: the published file lives in the S3 bucket of the storage settings")
     renames: dict[str, str] = Field(default_factory=dict, description="Schema update: {old column name: new name}")
 
 
@@ -434,11 +438,17 @@ def _require_creator(user: CurrentUser) -> None:
         raise HTTPException(403, "reserved to administrators and advanced users")
 
 
-def _definition(body: InternalIn) -> dict[str, Any]:
+def _definition(body: InternalIn, stored: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The definition this endpoint writes. `stored`: the configuration being replaced — its storage settings
+    are kept, since this form does not carry them (sort columns, indexes, time travel...)."""
+    storage = dict((stored or {}).get("storage") or {})
+    if body.storage_location is not None:
+        storage["location"] = body.storage_location
     return {
         "name": body.name, "description": body.description, "category": body.category or "Internal", "tags": body.tags,
         "owner": body.owner, "key": body.key, "columns": body.columns, "search_columns": body.search_columns,
         "source": {"type": "internal"}, "format": "jsonl", "confidential": body.confidential,
+        **({"storage": storage} if storage else {}),
     }
 
 
@@ -469,7 +479,7 @@ def update_internal(ref_id: str, body: InternalIn, request: Request, service: Se
     _require_creator(user)
     old = _internal(service, ref_id, user, "manage")
     try:
-        ref = validate_definition({**_definition(body), "id": ref_id})
+        ref = validate_definition({**_definition(body, old.model_dump(mode="json")), "id": ref_id})
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     # Migrate the stored rows to the new schema (renames, removed columns, type changes)

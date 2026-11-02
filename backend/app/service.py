@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -64,6 +65,10 @@ class Service:
         self._sync_state: tuple | None = None  # digest of the last discovery (entries and errors)
         self._sync_seen: dict[str, tuple] = {}  # last file signature observed per sync referential
         self._sync_done: dict[str, tuple] = self._load_sync_state()  # signature already imported
+        # Referentials stored in the bucket (storage.location: remote): when each was last read, and one lock
+        # per referential so two requests arriving together download it once (remotestore.py)
+        self._last_read: dict[str, float] = {}
+        self._cache_locks: dict[str, threading.Lock] = {}
         self.executor = ThreadPoolExecutor(max_workers=max(1, settings.max_concurrent_jobs), thread_name_prefix="ingest")
         from .notify import Notifier
 
@@ -301,6 +306,10 @@ class Service:
                         self._register(ref, meta)
                     except Exception as e:  # noqa: BLE001
                         log.error("Cannot expose %s: %s", ref.id, e)
+                elif self.is_freed(ref.id):
+                    # Stored in the bucket and freed from the disk: exposed again on the first request for its
+                    # data, which downloads it back (remotestore.py)
+                    log.info("[%s] data in the bucket, not on the disk: brought back when first asked for", ref.id)
         self._schedule_all()
         self._prepare_import_dir()
         self._recheck_quality()
@@ -513,6 +522,12 @@ class Service:
     def _combine_parts(self, ref: ReferentialConfig) -> list[Any]:
         from .combine import parts
 
+        # A source stored in a bucket and freed from the disk has no file to read: brought back first, so a
+        # unified referential is built from what its sources hold wherever that is (remotestore.py)
+        for ref_id in ref.source.referentials:
+            if self.is_freed(ref_id):
+                log.info("[%s] source '%s' is in the bucket: brought back to build it", ref.id, ref_id)
+                self.bring_back(ref_id)
         return parts(self.settings, self.refs, self.metas, ref)
 
     def dependents(self, ref_id: str) -> list[str]:
@@ -611,6 +626,135 @@ class Service:
         key = parquet_key(ref.id) if meta.get("encrypted") else None
         columns = [c["name"] for c in meta.get("columns") or []] or None
         self.engine.register(ref.table, paths.current, self.index_files(ref), key, projection(ref, columns))
+
+    # ------------------------------------------------------------------ remote storage (remotestore.py)
+    def is_freed(self, ref_id: str) -> bool:
+        """The data of this referential is in the bucket and not on the disk (remotestore.py).
+
+        Read from the meta kept in memory: this is on the path of every request for data, and re-reading
+        meta.json each time would make a local referential pay for a remote one.
+        """
+        ref = self.refs.get(ref_id)
+        if ref is None or ref.storage.location != "remote":
+            return False
+        meta = self.metas.get(ref_id)
+        if meta is None:
+            meta = read_meta(RefPaths(self.settings.data_dir, ref_id))
+        return bool((meta.get("remote") or {}).get("freed"))
+
+    @property
+    def last_read(self) -> dict[str, float]:
+        """When the data of each remotely stored referential was last read: what picks the coldest cache."""
+        return self._last_read
+
+    def touch(self, ref_id: str) -> None:
+        """Note that the data of a referential was read: what decides which cache is the coldest."""
+        if ref_id in self.refs and self.refs[ref_id].storage.location == "remote":
+            self._last_read[ref_id] = time.time()
+
+    def _cache_lock(self, ref_id: str) -> threading.Lock:
+        with self._lock:
+            return self._cache_locks.setdefault(ref_id, threading.Lock())
+
+    def bring_back(self, ref_id: str, user: str | None = None) -> dict[str, Any]:
+        """Download a freed referential from the bucket and expose it again.
+
+        Two requests arriving together download it once: the second waits on the lock and finds it ready.
+        """
+        from . import remotestore
+
+        ref = self.refs.get(ref_id)
+        if ref is None:
+            raise remotestore.RemoteStorageError(f"unknown referential: '{ref_id}'")
+        if not remotestore.is_remote(ref):
+            raise remotestore.RemoteStorageError(f"'{ref_id}' is not stored remotely")
+        with self._cache_lock(ref_id):
+            paths = RefPaths(self.settings.data_dir, ref_id)
+            meta = read_meta(paths)
+            if not remotestore.freed(meta) and paths.published.exists():
+                self.touch(ref_id)
+                return {"already": True, "downloaded": 0, "files": 0}
+            with self.tasks.db() as db:
+                tgt = remotestore.target(db)
+            done = remotestore.bring_back(self.settings, tgt, ref, meta)
+            meta = remotestore.update_meta(self.settings, ref_id, done["remote"])
+            with self._lock:
+                self.metas[ref_id] = self._in_memory(ref_id, meta)
+                self._blooms.pop(ref_id, None)
+                self._mmdbs.pop(ref_id, None)
+                if paths.current.exists():
+                    self._register(ref, meta)
+            self.touch(ref_id)
+            log.info("[%s] brought back from the bucket: %s file(s), %s bytes", ref_id, done["files"], done["downloaded"])
+            return {"already": False, "downloaded": done["downloaded"], "files": done["files"]}
+
+    def ensure_data(self, ref_id: str) -> None:
+        """Make sure the data of a referential is on the disk, downloading it from the bucket if it is not.
+
+        Called before a request is served (api/deps.py): a referential stored remotely is then no different
+        from a local one, except that the first request after it was freed waits for the download.
+        """
+        self.touch(ref_id)
+        if self.is_freed(ref_id):
+            self.bring_back(ref_id)
+
+    def free_local(self, ref_id: str) -> int:
+        """Drop the local copies of a referential the bucket holds, and stop exposing its table.
+
+        Returns the bytes freed. Refused while the referential is being updated.
+        """
+        from . import remotestore
+
+        ref = self.refs.get(ref_id)
+        if ref is None:
+            raise remotestore.RemoteStorageError(f"unknown referential: '{ref_id}'")
+        if not remotestore.is_remote(ref):
+            raise remotestore.RemoteStorageError(f"'{ref_id}' is not stored remotely: its data is only on this disk")
+        if ref_id in self.active:
+            raise remotestore.RemoteStorageError(f"'{ref_id}' is being updated: its data stays on the disk until the update ends")
+        with self._cache_lock(ref_id):
+            paths = RefPaths(self.settings.data_dir, ref_id)
+            meta = read_meta(paths)
+            if remotestore.freed(meta):
+                return 0
+            # Asked first, so a refusal leaves the referential exposed; then the table stops being served
+            # *before* its files go, because a query reading a file being deleted is the one thing to avoid.
+            remotestore.check_freeable(self.settings, ref, meta)
+            with self._lock:
+                self.engine.unregister(ref.table)
+                self._blooms.pop(ref_id, None)
+                self._mmdbs.pop(ref_id, None)
+            try:
+                done = remotestore.free(self.settings, ref, meta)
+            except BaseException:
+                with self._lock:  # put it back: the data is still there, it is only not exposed any more
+                    if paths.current.exists():
+                        self._register(ref, meta)
+                raise
+            meta = remotestore.update_meta(self.settings, ref_id, done["remote"])
+            with self._lock:
+                self.metas[ref_id] = self._in_memory(ref_id, meta)
+            return int(done["released"])
+
+    def send_to_bucket(self, ref_id: str) -> dict[str, Any]:
+        """Send the published data of a referential to the bucket (what the update does by itself)."""
+        from . import remotestore
+
+        ref = self.refs.get(ref_id)
+        if ref is None:
+            raise remotestore.RemoteStorageError(f"unknown referential: '{ref_id}'")
+        if not remotestore.is_remote(ref):
+            raise remotestore.RemoteStorageError(f"'{ref_id}' is not stored remotely (Storage > Where the data lives)")
+        paths = RefPaths(self.settings.data_dir, ref_id)
+        meta = read_meta(paths)
+        with self.tasks.db() as db:
+            tgt = remotestore.target(db)
+        remote = remotestore.push(self.settings, tgt, ref, meta)
+        meta = remotestore.update_meta(self.settings, ref_id, remote)
+        with self._lock:
+            self.metas[ref_id] = self._in_memory(ref_id, meta)
+        return {"objects": len(remote["objects"]), "bytes": remote["bytes"], "bucket": remote["bucket"],
+                "sent": remote.get("last_sent", 0)}
 
     def is_pinned(self, ref_id: str) -> bool:
         return bool(self.metas.get(ref_id, {}).get("pinned"))
@@ -839,6 +983,18 @@ class Service:
             except Exception:  # noqa: BLE001
                 log.exception("[%s] snapshot not kept", ref.id)
                 run.log("The snapshot of this version could not be kept", "warn")
+        if run.status == "success" and ref.storage.location == "remote":
+            # Stored remotely: the version just published goes to the bucket. A failure here never fails an
+            # update that did publish — the data is on the disk, and the task sends it later.
+            from . import remotestore
+
+            try:
+                with self.tasks.db() as db:
+                    tgt = remotestore.target(db)
+                meta["remote"] = remotestore.push(self.settings, tgt, ref, meta, run.log)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[%s] published version not sent to the bucket: %s", ref.id, e)
+                run.log(f"The published version could not be sent to the bucket: {e}", "warn")
         meta.pop("crashed", None)  # the update went to its end: automatic updates resume
         meta["last_run"] = run.to_dict(with_logs=False)
         meta["last_attempt_at"] = iso(run.finished_at)
@@ -990,6 +1146,11 @@ class Service:
             "next_run_at": iso(nxt) if nxt else None,
             "health": self.health(ref, meta),
             "has_data": self.has_data(ref.id),
+            # Where the data lives: "local", or "remote" for a referential whose home is the S3 bucket of
+            # Settings > Storage. Freed: in the bucket only, brought back on the first request (remotestore.py)
+            "storage_location": ref.storage.location,
+            "storage_freed": self.is_freed(ref.id),
+            "remote_storage": (meta.get("remote") or None) if ref.storage.location == "remote" else None,
             "status": meta.get("status"),
             "last_error": meta.get("last_error"),
             "version": meta.get("version"),

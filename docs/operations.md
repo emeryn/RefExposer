@@ -73,6 +73,7 @@ Every run that does something is written to the audit log (`task.run`), so it is
 | | **LDAP resynchronisation**: groups, name and e-mail of the LDAP accounts updated from the directory; accounts that left it are reported, or disabled | daily (when LDAP is enabled) |
 | Backup | **Configuration backup**: definitions, accounts, rights, settings, internal rows (see below) | daily, 14 kept |
 | | **Full backup**: the configuration **and** the data of `data/`, on the server and / or in an S3 bucket (see below) | disabled, weekly when enabled |
+| | **Remote storage**: sends to the bucket what it is missing and frees the coldest local copies over the cache limit (see [Where a referential's data lives](referentials.md#where-a-referentials-data-lives)) | hourly (when remote storage is enabled) |
 | Folder scans | **Import folder** and **sync folder** scans | `REFEX_IMPORT_POLL_SECONDS` / `REFEX_SYNC_POLL_SECONDS` |
 
 ### Configuration backups
@@ -121,7 +122,8 @@ the copy to an **S3 bucket** (Amazon S3 or any compatible store — see
 [S3 buckets](sources.md#s3-buckets-amazon-s3-minio-ceph-scaleway-ovh)) and give the endpoint, the bucket, a
 prefix and, unless the bucket accepts anonymous writes, an access key. Permissions needed on the prefix:
 `s3:ListBucket`, `s3:PutObject` and `s3:DeleteObject` (to apply the retention), plus `s3:GetObject` to restore
-from the bucket.
+from the bucket. A store with a certificate from an internal authority is trusted once its root certificate is
+in *Settings › Network & proxy › TLS certificates*.
 
 Each backup is sent after it is written, and the oldest ones over the retention are deleted from the bucket. If
 the bucket cannot be reached, the run ends as a **warning**: the archive is still on the server, only its
@@ -141,6 +143,39 @@ halfway leaves readable data behind.
 
 A backup made on an **older schema version** is refused with an explanation: restore it on an instance running
 the version it was made with, which brings the schema up to date by itself.
+
+#### Restoring onto a second instance (another encryption key)
+
+A backup restored onto an instance whose `REFEX_SECRET_KEY` is not the one it was made with would land secrets
+nobody can read: the database comes back, and everything inside it that was encrypted stays encrypted with the
+other key. So that case is handled on purpose.
+
+Tick **This backup comes from another instance** in the restore window and give that instance's key — its
+`REFEX_SECRET_KEY`, or the content of its `data/.secret_key` file, copied as it is. The archive is opened with
+it, and once everything is in place it is all **re-encrypted with the local key**:
+
+- the secret fields of the settings (LDAP bind password, OIDC client secret, SMTP and proxy passwords, syslog
+  client key, assistant API key, the S3 keys);
+- the TOTP secrets of the accounts;
+- the secrets of the secret manager and of the LLM connectors;
+- the rows of the confidential internal referentials, **including the keyed fingerprint of their key**, so
+  lookups by key keep working;
+- the Parquet files of the confidential referentials, rewritten with the new key, and their column profiles.
+
+The key is used for that restore only: it is never stored, never logged and never written to the audit trail,
+which records how many values were re-encrypted and nothing else. What is *not* re-encrypted: the archives
+already on the server, which keep the key they were written with, so hold on to the old key as long as you may
+want to restore them. Pseudonyms of masked columns change with the key, since they are derived from it — they
+are computed when data is served, so nothing is rewritten, but a pseudonym noted before no longer matches.
+
+The archive says which key wrote it (a one-way fingerprint, never the key), so:
+
+- the list of backups marks the ones made elsewhere **another key**, before you try anything;
+- a key that is not the one the archive was made with is refused **before anything is touched**;
+- an unencrypted archive from another instance is refused too, rather than restored into unreadable secrets.
+
+Re-keying can be run again safely: whatever already reads with the new key is left alone, so a restore
+interrupted halfway is simply restored again.
 
 ## Logging
 

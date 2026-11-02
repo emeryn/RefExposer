@@ -173,6 +173,62 @@ curl -X POST -H "$H" -F files=@full.csv -F mode=replace "http://localhost:8080/a
 
 Bloom filters and SQLite databases have their own deltas (`incremental`, see above). Internal referentials are edited row by row.
 
+## Where a referential's data lives
+
+By default the published data of every referential sits on the server's disk, under `data/<id>/`. A referential
+can instead be given an **S3 bucket** as its home, with the local disk kept as a cache of it — useful for the
+large ones that are consulted now and then, and for keeping a disk from filling up.
+
+Everything that serves a referential reads a **local file**: the query engine over its Parquet file and its
+sorted copies, the Bloom filter and the MaxMind DB through their own readers, and the SQL console runs in a
+sandbox with network access switched off. So remote storage is not "query the bucket": it is
+
+1. after each update, the published files are **sent to the bucket**;
+2. a referential nobody has read for a while is **freed**: its files leave the disk and its table stops being
+   exposed, while the instance keeps knowing what the bucket holds;
+3. the first request for its data **brings it back** and exposes it again.
+
+A whole referential is freed or brought back, never half of one. An **internal** referential can live there
+too: its rows stay in the database and answer from there whatever happens, and what goes to the bucket is the
+published file the queries, the exports and the SQL console read.
+
+### Setting it up
+
+In **Settings › Storage**, turn remote storage on and give the endpoint, the bucket, a prefix and, unless the
+bucket accepts anonymous access, an access key (Amazon S3 or any compatible store — see
+[S3 buckets](sources.md#s3-buckets-amazon-s3-minio-ceph-scaleway-ovh)). Permissions needed on the prefix:
+`s3:ListBucket`, `s3:PutObject`, `s3:GetObject` and `s3:DeleteObject`. A store with a certificate from an
+internal authority is trusted once its root certificate is in *Settings › Network & proxy › TLS certificates*.
+
+Then, on each referential, **Storage › Where the data lives**: *On this server* (the default) or *In the S3
+bucket*. Nothing is rebuilt when you switch — it changes where the files are kept, not what they hold — and the
+next update sends them up. The **Storage** card of the referential says where it is and how much it weighs.
+
+In the bucket, under `<prefix>/<referential id>/`: `current.parquet`, `previous.parquet`, the sorted copies
+`current.by_*.parquet`, `current.bloom` / `current.mmdb` and the kept versions of `.snapshots/`. The metadata,
+the run history and the downloaded sources stay on the server. A **confidential** referential goes up as it is
+stored, that is to say encrypted: the bucket never sees its rows, and the key never leaves the instance.
+
+### The cache and when it is freed
+
+**Cache limit (GB)** is the disk the copies of the remote referentials may use together. Zero means nothing is
+ever freed: the bucket is then a second copy, not a way of saving space. Past the limit, the coldest
+referentials are freed until the cache fits, oldest read first, and **never one the bucket does not hold in
+full** — freeing a file nobody else has is not freeing disk space, it is losing data. **Never free what was read
+within (hours)** protects what is in use today from being downloaded again tomorrow morning.
+
+The **Remote storage** task does both: it sends what the bucket is missing (an update that could not reach it, a
+referential just switched to remote), then applies the limit. Its schedule says how often.
+
+A freed referential shows **Stored in the bucket** with a *Bring it back* button, and any request for its data
+brings it back by itself — the first one waits for the download. Until then it is left out of the SQL console and of the global search, which read what is exposed. An
+administrator can also free or send one by hand from its page. The **Integrity check** task leaves a freed
+referential alone rather than downloading it to look at it.
+
+If the bucket cannot be reached: an update still publishes on the disk and says in its log that the copy
+failed (the task sends it later), and a request for a freed referential answers **503** saying so rather than
+pretending the data is gone.
+
 ## Downloads and retries
 
 A remote site that fails does not end the update at once. As `curl --retry` does, the download is tried again on a connection error, a timeout, a connection cut, or an HTTP `408`, `425`, `429`, `500`, `502`, `503` or `504` answer. It waits 1, 2, 4… seconds (up to 60 s), or the time asked by the server (`Retry-After`, up to 5 min). Other errors (`401`, `403`, `404`…) are not tried again. A transfer whose response carries a strong validator (`ETag` or date) **is resumed where it stopped** (HTTP `Range`), otherwise it starts again from zero. **Only the failures in a row count**: an attempt that brought data (a cut after 14 GB, as HuggingFace does on long transfers) starts the count again, so a large file always ends up downloaded. Each attempt is in the run log (*Download of … failed (HTTP 503): started again in 2s, attempt 3/6*).

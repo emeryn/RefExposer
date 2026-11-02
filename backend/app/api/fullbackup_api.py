@@ -6,6 +6,11 @@ carries data/: see fullbackup.py for what goes in it and what is deliberately le
 A restore replaces the database, the definitions and the published data. It is irreversible, so it asks for the
 same `confirm` word as a configuration restore, and the archive is read and checked in full before anything of
 the instance is touched.
+
+`secret_key` carries the encryption key of the instance the archive comes from, which is what restoring onto a
+*second* instance needs: the archive is opened with it and everything it holds is re-encrypted with the local
+key (see rekey.py). The key is never stored, never logged and never written to the audit trail — only the
+one-way fingerprint of a key appears anywhere.
 """
 
 from __future__ import annotations
@@ -34,6 +39,10 @@ CONFIRM = "RESTORE EVERYTHING"
 class RestoreIn(BaseModel):
     confirm: str = Field(..., description=f"'{CONFIRM}'")
     remove_extra: bool = Field(False, description="Also delete the data of referentials the backup does not carry")
+    secret_key: str = Field("", max_length=4096, description="REFEX_SECRET_KEY (or the content of data/.secret_key) "
+                                                             "of the instance the backup comes from, when it is not "
+                                                             "this one. What it carries is then re-encrypted with "
+                                                             "this instance's key.")
 
 
 def _settings(db: Session) -> Any:
@@ -58,10 +67,14 @@ def _check(confirm: str) -> None:
 @router.get("", summary="Full backups held on the server")
 def list_local(service: Service = Depends(get_service), db: Session = Depends(get_db)):
     cfg = _settings(db)
+    from ..crypto import key_fingerprint
+
     return {"backups": fullbackup.list_files(service.settings.data_dir),
             "s3_enabled": cfg.s3_enabled,
             "bucket": cfg.bucket if cfg.s3_enabled else None,
-            "confirm_word": CONFIRM}
+            "confirm_word": CONFIRM,
+            # One-way name of this instance's key: what tells an archive apart from one made elsewhere
+            "key_fingerprint": key_fingerprint()}
 
 
 @router.post("/run", summary="Write a full backup now")
@@ -125,16 +138,19 @@ def _restore(path: Path, label: str, body: RestoreIn, request: Request, service:
         raise HTTPException(409, f"an update is running ({', '.join(sorted(service.active))}): wait for it to end, "
                                  "it would write over the restored data")
     try:
-        done = fullbackup.restore(db, service.settings, path, remove_extra=body.remove_extra)
-    except fullbackup.BackupError as e:
+        done = fullbackup.restore(db, service.settings, path, remove_extra=body.remove_extra,
+                                  source_key=body.secret_key or None)
+    except (fullbackup.BackupError, ValueError) as e:
         raise HTTPException(400, str(e)) from e
     _apply(service, db)
     audit(db, "fullbackup.restore", username=admin.username, target=f"full-backup:{label}", request=request,
           detail={"created_at": done.created_at, "app_version": done.app_version, "rows": sum(done.counts.values()),
-                  "referentials": len(done.referentials), "removed": done.removed, "remove_extra": body.remove_extra})
+                  "referentials": len(done.referentials), "removed": done.removed, "remove_extra": body.remove_extra,
+                  # The key itself never appears: only how many values it re-encrypted
+                  "rekeyed": (done.rekeyed or {}).get("total")})
     return {"restored": done.counts, "created_at": done.created_at, "app_version": done.app_version,
             "referentials": done.referentials, "config_files": done.config_files, "data_files": done.data_files,
-            "data_bytes": done.data_bytes, "removed": done.removed, "signed_out": True}
+            "data_bytes": done.data_bytes, "removed": done.removed, "signed_out": True, "rekeyed": done.rekeyed}
 
 
 @router.post("/{name}/restore", summary="Restore a full backup (replaces the configuration and the data)")
@@ -149,7 +165,8 @@ def restore(name: str, body: RestoreIn, request: Request, service: Service = Dep
 
 @router.post("/restore-upload", summary="Restore an uploaded full backup")
 def restore_upload(request: Request, file: UploadFile = File(...), confirm: str = Form(...),
-                   remove_extra: bool = Form(False), service: Service = Depends(get_service),
+                   remove_extra: bool = Form(False), secret_key: str = Form(""),
+                   service: Service = Depends(get_service),
                    admin: CurrentUser = Depends(require_admin), db: Session = Depends(get_db)):
     """The archive is written to the temporary folder first: it is read from a file, never held in memory."""
     _check(confirm)
@@ -162,7 +179,8 @@ def restore_upload(request: Request, file: UploadFile = File(...), confirm: str 
     try:
         with path.open("wb") as f:
             shutil.copyfileobj(file.file, f, 1 << 20)
-        return _restore(path, name, RestoreIn(confirm=confirm, remove_extra=remove_extra), request, service, admin, db)
+        return _restore(path, name, RestoreIn(confirm=confirm, remove_extra=remove_extra, secret_key=secret_key),
+                        request, service, admin, db)
     finally:
         path.unlink(missing_ok=True)
 

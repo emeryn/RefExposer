@@ -23,7 +23,7 @@ from .deps import get_service, public_base
 router = APIRouter(prefix="/admin/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
 Section = Literal["proxy", "ldap", "oidc", "branding", "syslog", "mfa", "mcp", "smtp", "assistant", "alerts",
-                  "experimental", "backup"]
+                  "experimental", "backup", "storage"]
 
 
 
@@ -59,6 +59,8 @@ def get_settings_all(request: Request, db: Session = Depends(get_db), service: S
         "experimental": appsettings.public("experimental", appsettings.load(db, "experimental")),
         # Where full backups go, and how many are kept (fullbackup.py)
         "backup": appsettings.public("backup", appsettings.load(db, "backup")),
+        # The bucket a referential can be stored in instead of the local disk (remotestore.py)
+        "storage": appsettings.public("storage", appsettings.load(db, "storage")),
         "assistant_default_prompt": assistant_default_prompt(),
         # What the chosen API would receive, so the effective parameters are visible without a call
         "assistant_parameters": parameters_for(appsettings.load(db, "assistant")),

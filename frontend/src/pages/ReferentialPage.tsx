@@ -17,6 +17,7 @@ import {
 } from '@mantine/core';
 import {
   IconClockHour4,
+  IconCloudDownload,
   IconShieldCheck,
   IconAlertTriangle,
   IconDatabaseEdit,
@@ -76,6 +77,39 @@ function Info({ label, children, hint }: { label: string; children: ReactNode; h
         </Text>
       </Tooltip>
     </div>
+  );
+}
+
+/**
+ * The data of this referential is in its S3 bucket and no longer on this disk (remote storage): reading it
+ * downloads it back. The request would do that by itself; saying so first is kinder than a long wait.
+ */
+function FreedState({ r }: { r: ReferentialDetail }) {
+  const qc = useQueryClient();
+  const bring = useMutation({
+    mutationFn: () => api.bringBackFromBucket(r.id),
+    onSuccess: (done) => {
+      notifications.show({
+        message: done.already ? 'Already on this server' : `${done.files} file(s) downloaded (${fmtBytes(done.downloaded)})`,
+        color: 'teal',
+      });
+      qc.invalidateQueries({ queryKey: ['referential', r.id] });
+    },
+    onError: (e: Error) =>
+      notifications.show({ title: 'The bucket could not be reached', message: e.message, color: 'red', autoClose: 15000 }),
+  });
+  return (
+    <EmptyState icon={<IconCloudDownload size={28} />} title="Stored in the bucket">
+      <Stack align="center" gap="xs">
+        <Text size="sm" c="dimmed" ta="center">
+          Its data lives in <Code>{r.remote_storage?.bucket ?? 'the bucket'}</Code> ({fmtBytes(r.remote_storage?.bytes)}) and
+          was freed from this disk to make room. Bringing it back takes as long as the download.
+        </Text>
+        <Button leftSection={<IconCloudDownload size={16} />} loading={bring.isPending} onClick={() => bring.mutate()}>
+          Bring it back
+        </Button>
+      </Stack>
+    </EmptyState>
   );
 }
 
@@ -259,8 +293,24 @@ function Header({ r }: { r: ReferentialDetail }) {
               </Text>
             )}
           </Info>
-          <Info label="Storage" hint={`Parquet ${fmtBytes(r.parquet_size)} · sources ${fmtBytes(r.raw_size)}`}>
-            {fmtBytes(r.storage_size)}
+          <Info
+            label="Storage"
+            hint={
+              r.storage_location === 'remote'
+                ? `Stored in ${r.remote_storage?.bucket ?? 'the bucket'} · ${r.storage_freed ? 'freed from this disk' : 'cached on this disk'}`
+                : `Parquet ${fmtBytes(r.parquet_size)} · sources ${fmtBytes(r.raw_size)}`
+            }
+          >
+            <Group gap={6} wrap="nowrap">
+              <Text size="sm" fw={600}>
+                {fmtBytes(r.storage_size)}
+              </Text>
+              {r.storage_location === 'remote' && (
+                <Badge size="xs" variant="light" color={r.storage_freed ? 'violet' : 'blue'}>
+                  {r.storage_freed ? 'in the bucket' : 'bucket + cache'}
+                </Badge>
+              )}
+            </Group>
           </Info>
           <Info label="Key">
             {r.key ? (
@@ -472,7 +522,9 @@ export default function ReferentialPage() {
             <EditTab r={r} />
           </Tabs.Panel>
         )}
-        {needsData && !r.has_data ? (
+        {needsData && !r.has_data && r.storage_freed ? (
+          <FreedState r={r} />
+        ) : needsData && !r.has_data ? (
           <EmptyState icon={<IconTable size={28} />} title="No data yet">
             {r.current_run
               ? 'The first import is running, the data will appear automatically.'

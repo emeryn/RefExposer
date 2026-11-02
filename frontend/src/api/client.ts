@@ -8,6 +8,8 @@ import type {
   BatchLookup,
   FullBackupList,
   FullBackupManifest,
+  FullBackupRestored,
+  StorageUsage,
   RemoteFullBackup,
   S3TestResult,
   Branding,
@@ -372,17 +374,19 @@ export const api = {
   runFullBackup: () => request<SystemTask>('/api/admin/full-backups/run', json('POST')),
   fullBackupManifest: (name: string) => request<FullBackupManifest>(`/api/admin/full-backups/${enc(name)}/manifest`),
   deleteFullBackup: (name: string) => request<{ ok: boolean }>(`/api/admin/full-backups/${enc(name)}`, json('DELETE')),
-  restoreFullBackup: (name: string, confirm: string, removeExtra: boolean) =>
-    request<{ restored: Record<string, number>; referentials: string[]; removed: string[] }>(
+  /** `secretKey`: key of the instance the archive comes from — what it carries is then re-encrypted with ours. */
+  restoreFullBackup: (name: string, confirm: string, removeExtra: boolean, secretKey = '') =>
+    request<FullBackupRestored>(
       `/api/admin/full-backups/${enc(name)}/restore`,
-      json('POST', { confirm, remove_extra: removeExtra }),
+      json('POST', { confirm, remove_extra: removeExtra, secret_key: secretKey }),
     ),
-  restoreFullBackupUpload: (file: File, confirm: string, removeExtra: boolean) => {
+  restoreFullBackupUpload: (file: File, confirm: string, removeExtra: boolean, secretKey = '') => {
     const form = new FormData();
     form.append('file', file);
     form.append('confirm', confirm);
     form.append('remove_extra', String(removeExtra));
-    return request<{ restored: Record<string, number> }>('/api/admin/full-backups/restore-upload', {
+    form.append('secret_key', secretKey);
+    return request<FullBackupRestored>('/api/admin/full-backups/restore-upload', {
       method: 'POST',
       body: form,
       headers: {},
@@ -393,6 +397,26 @@ export const api = {
     request<{ name: string; size: number }>(`/api/admin/full-backups/remote/${enc(name)}/fetch`, json('POST')),
   deleteRemoteFullBackup: (name: string) =>
     request<{ ok: boolean }>(`/api/admin/full-backups/remote/${enc(name)}`, json('DELETE')),
+  storageUsage: () => request<StorageUsage>('/api/admin/referentials/storage/usage'),
+  testStorageBucket: (write = true) =>
+    request<{ ok: boolean; bucket: string; anonymous: boolean; objects: string[]; writable: boolean | null }>(
+      '/api/admin/referentials/storage-test',
+      json('POST', { write }),
+    ),
+  /** Send the published data of a referential to the bucket (what an update does by itself). */
+  pushToBucket: (refId: string) =>
+    request<{ objects: number; bytes: number; bucket: string; sent: number }>(
+      `/api/admin/referentials/${enc(refId)}/storage/push`,
+      json('POST'),
+    ),
+  /** Drop the local copy the bucket holds; the next request for the data brings it back. */
+  freeLocalCopy: (refId: string) =>
+    request<{ released: number }>(`/api/admin/referentials/${enc(refId)}/storage/free`, json('POST')),
+  bringBackFromBucket: (refId: string) =>
+    request<{ already: boolean; downloaded: number; files: number }>(
+      `/api/admin/referentials/${enc(refId)}/storage/bring-back`,
+      json('POST'),
+    ),
   testBackupBucket: (write = true) =>
     request<{ ok: boolean; bucket: string; anonymous: boolean; objects: string[]; writable: boolean | null }>(
       '/api/admin/full-backups/remote/test',

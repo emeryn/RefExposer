@@ -383,7 +383,10 @@ def sync_peer(service: "Service", name: str, user: str | None = None, start_upda
         seen.add(ds["id"])
         before = known.get(ds["id"]) or {}
         remote = {"version": ds.get("version"), "fingerprint": ds.get("fingerprint")}
-        due = (remote != {k: before.get(k) for k in remote} or not service.has_data(lid)
+        # A replica whose data was freed to a bucket (remotestore.py) still holds that version: downloading it
+        # from the peer again would be paying twice for the same rows
+        due = (remote != {k: before.get(k) for k in remote}
+               or not (service.has_data(lid) or service.is_freed(lid))
                or (service.metas.get(lid) or {}).get("status") in ("error", "corrupted", "rejected"))
         entry = {**before, "local_id": lid, "name": ds.get("name"), "remote_version": ds.get("version"),
                  "remote_rows": ds.get("row_count"), "remote_updated_at": ds.get("data_updated_at"), "seen_at": now, "missing": False}

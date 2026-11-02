@@ -119,10 +119,11 @@ def env(tmp_path, monkeypatch, http_dir):
     monkeypatch.setenv("REFEX_ARGON2_TIME_COST", "1")
     monkeypatch.setenv("REFEX_ARGON2_MEMORY_KIB", "1024")
     monkeypatch.setenv("REFEX_ARGON2_PARALLELISM", "1")
-    from app import security
+    from app import crypto, security
     from app.settings import get_settings
 
     get_settings.cache_clear()
+    crypto.reset_cache()  # the master secret of the previous test is not the one of this data folder
     security.hasher.cache_clear()
     security._dummy_hash.cache_clear()
     from app.main import app
@@ -135,6 +136,7 @@ def env(tmp_path, monkeypatch, http_dir):
         client.app_ = app  # type: ignore[attr-defined]
         yield client
     get_settings.cache_clear()
+    crypto.reset_cache()
     security.hasher.cache_clear()
     security._dummy_hash.cache_clear()
 

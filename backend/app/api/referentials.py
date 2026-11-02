@@ -24,7 +24,7 @@ from ..engine import SqlError, SqlTimeout, rows_to_records
 from ..service import Service
 from ..sqlbuild import OPERATORS, QueryError, TableQuery, is_sql_text, lit, parquet_reader, parse_filters, qi, text_expr, type_kind
 from ..storage import RefPaths, iso, utcnow
-from .deps import get_ref, get_ref_with_data, get_service, require_table
+from .deps import get_ref, get_ref_with_data, get_service, materialise, require_table
 from ..bloom import normalize as bloom_normalize
 from ..geoip import MmdbError, looks_like_ip
 from ..geoip import flatten as geoip_flatten
@@ -879,6 +879,7 @@ def diff_snapshots(
     from .. import snapshots
 
     ref = require_table(get_ref(service, ref_id, user))
+    materialise(service, ref_id)  # its kept versions may be in the bucket
     meta = service.metas.get(ref_id, {})
     shown = _reveal(db, request, ref, user, reveal)
     try:
@@ -908,6 +909,7 @@ def save_snapshot(ref_id: str, body: SnapshotIn, request: Request, service: Serv
     from .. import snapshots
 
     ref = require_table(get_ref(service, ref_id, user, "manage"))
+    materialise(service, ref_id)  # its kept versions may be in the bucket
     meta = service.metas.get(ref_id, {})
     if not RefPaths(service.settings.data_dir, ref_id).current.exists():
         raise HTTPException(400, "this referential has no published version to save")
@@ -935,6 +937,7 @@ def restore_snapshot(ref_id: str, snapshot_id: int, request: Request, service: S
     from ..service import BusyError
 
     ref = require_table(get_ref(service, ref_id, user, "manage"))
+    materialise(service, ref_id)  # its kept versions may be in the bucket
     if ref.is_internal:
         # The rows of an internal referential live in the database and the Parquet file is built from them: a
         # restored file would be undone by the next edit. Loading that version back is the Edit tab's job.

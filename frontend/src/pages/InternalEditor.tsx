@@ -23,7 +23,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconDatabasePlus, IconPlus, IconTrash } from '@tabler/icons-react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
@@ -63,6 +63,8 @@ export default function InternalEditor() {
   const editing = !!id;
   const navigate = useNavigate();
   const qc = useQueryClient();
+  // Offered only when a bucket is configured (Settings > Storage): otherwise there is nowhere to put it
+  const { data: storage } = useQuery({ queryKey: ['storage-usage'], queryFn: api.storageUsage, retry: false });
   const { me } = useAuth();
   const { data: existing, isLoading } = useReferential(id ?? '', { enabled: editing });
 
@@ -77,6 +79,7 @@ export default function InternalEditor() {
   const [key, setKey] = useState('id');
   const [searchColumns, setSearchColumns] = useState<string[]>([]);
   const [confidential, setConfidential] = useState(false);
+  const [remote, setRemote] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const loaded = useRef(false);
@@ -95,6 +98,7 @@ export default function InternalEditor() {
     setKey(cfg.key);
     setSearchColumns(cfg.search_columns ?? []);
     setConfidential(!!cfg.confidential);
+    setRemote(cfg.storage?.location === 'remote');
   }, [existing]);
 
   const names = columns.map((c) => c.name.trim()).filter(Boolean);
@@ -132,6 +136,7 @@ export default function InternalEditor() {
     columns: columns.map(({ name, type, required, description, auto }) => ({ name: name.trim(), type, required, description, auto })),
     search_columns: searchColumns.filter((s) => names.includes(s)),
     confidential,
+    storage_location: remote ? 'remote' : 'local',
     renames: Object.fromEntries(columns.filter((c) => c.original && c.original !== c.name.trim()).map((c) => [c.original!, c.name.trim()])),
   });
 
@@ -289,6 +294,16 @@ export default function InternalEditor() {
           onChange={(e) => setConfidential(e.currentTarget.checked)}
           maw={700}
         />
+        {storage?.enabled && (
+          <Switch
+            mt="md"
+            label={`Keep its published file in the bucket (${storage.bucket})`}
+            description="Its rows stay in the database and answer from there. The published file, which the queries, the exports and the SQL console read, lives in the bucket; this disk keeps a cache of it, freed when it grows past its limit and downloaded again when needed."
+            checked={remote}
+            onChange={(e) => setRemote(e.currentTarget.checked)}
+            maw={700}
+          />
+        )}
         {editing && (
           <Alert color="gray" mt="md" p="xs">
             Existing rows are migrated: renamed columns keep their values, removed columns are dropped, and the change is refused if a

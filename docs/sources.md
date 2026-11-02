@@ -125,6 +125,10 @@ wrong key from a wrong prefix.
 - **Network**: the proxy, the company certificate authorities and `REFEX_HTTP_VERIFY` of the network settings
   apply, as for downloads. The endpoint is checked before any call: an address pointing at a cloud metadata
   service, which would answer with the credentials of the instance, is refused.
+- **A store with an internal certificate authority** (`https://s3.company.lan`): paste its **root certificate**
+  in *Settings › Network & proxy › TLS certificates*, or point `REFEX_HTTP_VERIFY` at a bundle file. It is then
+  trusted for every S3 store — sources, full backups and remote storage — and for the other HTTPS sources.
+  Turning certificate verification off is not the way to do it: the key travels on that connection.
 
 ```yaml
 - id: partner-exports

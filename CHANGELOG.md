@@ -40,6 +40,27 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   the bucket, and can be brought back onto the server and restored from there. A bucket that cannot be reached
   ends the run as a *warning*, never a failure: the archive is on the server, only the off-site copy failed.
   **Delete the local file once the bucket has it** leaves nothing on the server.
+- **Restoring a full backup onto a second instance** (another `REFEX_SECRET_KEY`): tick *This backup comes from
+  another instance* and give that instance's key. The archive is opened with it and everything it carries is
+  then re-encrypted with the local key — the secret fields of the settings, the TOTP secrets, the secret
+  manager, the LLM connectors, the rows of the confidential internal referentials (including the keyed
+  fingerprint of their key, so lookups keep working) and the Parquet files of the confidential referentials.
+  The key is used for that restore only: never stored, never logged, and the audit trail records how many
+  values were re-encrypted, never with what. Each archive carries a one-way fingerprint of the key that wrote
+  it, so a backup made elsewhere is marked as such in the list, and a wrong key is refused before anything is
+  touched. Re-keying can be run again safely: what already reads with the new key is left alone.
+- **An S3 bucket as the home of a referential's data** (*Settings › Storage*, then *Storage › Where the data
+  lives* on each referential): the published files are sent to the bucket after each update, and the local disk
+  is a cache of them. Past the **cache limit**, the coldest referentials are freed from the disk — never one
+  the bucket does not hold in full — and the first request for a freed referential brings it back and exposes
+  it again. A referential read within the last *n* hours is never freed. A confidential referential goes up
+  encrypted, so the bucket never sees its rows. A bucket that cannot be reached never fails an update: the
+  version is published on the disk and the **Remote storage** task sends it later. An internal referential can
+  live there too: its rows stay in the database and answer from there, and what goes to the bucket is the
+  published file the queries, the exports and the SQL console read.
+- A store whose TLS certificate comes from an **internal certificate authority** is trusted by every S3 path
+  (sources, full backups, remote storage) once its root certificate is in *Settings › Network & proxy › TLS
+  certificates*, or `REFEX_HTTP_VERIFY` points at a bundle — there is no need to turn verification off.
 
 ## [1.0.0] - 2026-10-29
 

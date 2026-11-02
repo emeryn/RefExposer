@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
@@ -21,6 +22,8 @@ from ..secretstore import SecretError, check_references, mask_config, mask_sourc
 from ..service import Service
 from ..storage import RefPaths
 from .deps import get_service
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/referentials", tags=["referential administration"], dependencies=[Depends(require_admin)])
 
@@ -179,6 +182,80 @@ def test_s3(body: PreviewSource, service: Service = Depends(get_service), db: Se
                     "objects": [{"key": o.key, "size": o.size, "last_modified": o.last_modified} for o in matching[:20]]}
     except S3Error as e:
         raise HTTPException(502, str(e)) from e
+
+
+@router.post("/storage-test", summary="Test the remote storage bucket (list, then write and delete a probe)")
+def test_storage(body: dict[str, Any] = Body(default_factory=dict), service: Service = Depends(get_service),
+                 db: Session = Depends(get_db)):
+    """Tests the saved settings of Settings › Storage: a secret access key left empty keeps the stored one, so
+    what is tested is what an update will actually use."""
+    from .. import appsettings
+    from ..s3 import S3Client, S3Error
+
+    section: Any = appsettings.load(db, "storage")
+    if not (section.endpoint and section.bucket):
+        raise HTTPException(422, "configure the endpoint and the bucket first (Settings › Storage)")
+    try:
+        with S3Client(section.s3, service.settings, timeout=30) as client:
+            return client.check_access(section.prefix, write=bool(body.get("write", True)))
+    except S3Error as e:
+        raise HTTPException(502, str(e)) from e
+
+
+@router.get("/storage/usage", summary="Referentials stored remotely, and the disk their cache uses")
+def storage_usage(service: Service = Depends(get_service), db: Session = Depends(get_db)):
+    from .. import appsettings, remotestore
+
+    section: Any = appsettings.load(db, "storage")
+    return {"enabled": section.enabled, "bucket": section.bucket or None, "cache_gb": section.cache_gb,
+            "keep_hours": section.keep_hours, **remotestore.usage(service.settings, service.refs)}
+
+
+@router.post("/{ref_id}/storage/push", summary="Send the published data of a referential to the bucket")
+def storage_push(ref_id: str, request: Request, db: Session = Depends(get_db), service: Service = Depends(get_service),
+                 admin: CurrentUser = Depends(require_admin)):
+    from ..remotestore import RemoteStorageError
+    from ..s3 import S3Error
+
+    try:
+        done = service.send_to_bucket(ref_id)
+    except RemoteStorageError as e:
+        raise HTTPException(409, str(e)) from e
+    except S3Error as e:
+        raise HTTPException(502, str(e)) from e
+    audit(db, "storage.push", user=admin, target=f"ref:{ref_id}", request=request, detail=done)
+    return done
+
+
+@router.post("/{ref_id}/storage/free", summary="Free the local copy of a referential the bucket holds")
+def storage_free(ref_id: str, request: Request, db: Session = Depends(get_db), service: Service = Depends(get_service),
+                 admin: CurrentUser = Depends(require_admin)):
+    """The data stays in the bucket and the table stops being exposed; the next request for it brings it back."""
+    from ..remotestore import RemoteStorageError
+
+    try:
+        released = service.free_local(ref_id)
+    except RemoteStorageError as e:
+        raise HTTPException(409, str(e)) from e
+    audit(db, "storage.free", user=admin, target=f"ref:{ref_id}", request=request, detail={"released": released})
+    return {"released": released}
+
+
+@router.post("/{ref_id}/storage/bring-back", summary="Download a referential back from the bucket")
+def storage_bring_back(ref_id: str, request: Request, db: Session = Depends(get_db),
+                       service: Service = Depends(get_service), admin: CurrentUser = Depends(require_admin)):
+    from ..remotestore import RemoteStorageError
+    from ..s3 import S3Error
+
+    try:
+        done = service.bring_back(ref_id, admin.username)
+    except RemoteStorageError as e:
+        raise HTTPException(409, str(e)) from e
+    except S3Error as e:
+        raise HTTPException(502, str(e)) from e
+    audit(db, "storage.bring_back", user=admin, target=f"ref:{ref_id}", request=request,
+          detail={"files": done["files"], "downloaded": done["downloaded"]})
+    return done
 
 
 @router.post("/preview", summary="Analyse a source: download, format detection, preview")
@@ -354,7 +431,26 @@ def _remove_definition(db: Session, service: Service, ref_id: str, purge: bool, 
           request=request, detail={"purge": purge or internal})
     service.reload()
     if purge or internal:
+        _forget_remote(service, db, ref_id)
         shutil.rmtree(RefPaths(service.settings.data_dir, ref_id).root, ignore_errors=True)
+
+
+def _forget_remote(service: Service, db: Session, ref_id: str) -> None:
+    """Objects of a referential stored in a bucket, deleted with it. A bucket that cannot be reached never
+    stops a deletion: the local data goes, and the objects are reported so they can be removed by hand."""
+    from .. import appsettings, remotestore
+
+    section = appsettings.load(db, "storage")
+    if not getattr(section, "enabled", False) or not getattr(section, "delete_with_referential", False):
+        return
+    try:
+        tgt = remotestore.target(db)
+        if tgt is not None:
+            count = remotestore.forget(service.settings, tgt, ref_id)
+            if count:
+                log.info("[%s] %d object(s) deleted from %s", ref_id, count, tgt.describe())
+    except Exception as e:  # noqa: BLE001
+        log.error("[%s] objects left in the bucket (delete them by hand): %s", ref_id, e)
 
 
 @router.post("/delete", summary="Delete several referentials created from the interface")

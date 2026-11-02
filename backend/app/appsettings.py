@@ -309,6 +309,87 @@ class BackupSettings(BaseModel):
                         path_style=self.path_style, verify_tls=self.verify_tls)
 
 
+class RemoteStorageSettings(BaseModel):
+    """Remote storage of the published data: an S3 bucket a referential can live in instead of the local disk.
+
+    What is published stays a Parquet file (or a Bloom filter, or a MaxMind DB) read from the disk — the query
+    engine, the indexes and the lookups all work on local files, and the SQL console is not allowed out to the
+    network at all. So "stored remotely" means: the bucket holds the data, and the disk holds a **cache** of it.
+    After each update the files of such a referential are sent to the bucket; once the cache is over `cache_bytes`
+    the coldest of them are dropped from the disk, and opening one brings it back (see remotestore.py).
+
+    Where a referential's data lives is set on the referential (`storage.location`), one at a time: local by
+    default, remote for those worth it. This section says *which* bucket, and how much disk the cache may use.
+    """
+
+    enabled: bool = False
+    endpoint: str = ""
+    bucket: str = ""
+    prefix: str = Field("referentials/", description="Folder inside the bucket")
+    region: str = "us-east-1"
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    path_style: bool = Field(False, description="<endpoint>/<bucket> instead of <bucket>.<endpoint> (MinIO, Ceph...)")
+    verify_tls: bool = True
+    # Disk the cached copies of the remote referentials may use, in GB. 0: nothing is ever dropped from the
+    # disk (the bucket is then a second copy, not a way of saving space).
+    cache_gb: float = Field(0, ge=0, le=100_000, description="Local cache of the remote referentials, in GB (0: keep everything)")
+    # A referential read less long ago than this is never dropped, however full the cache is: whoever is
+    # working with it today does not pay for a download tomorrow morning.
+    keep_hours: int = Field(48, ge=0, le=8760, description="Never free a referential read within these hours")
+    # Delete the objects of a referential when the referential itself is deleted
+    delete_with_referential: bool = True
+
+    @field_validator("endpoint")
+    @classmethod
+    def _endpoint(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if v and not re.match(r"^https?://[^\s]+$", v):
+            raise ValueError("endpoint URL expected (https://s3.eu-west-3.amazonaws.com, https://minio.example.com:9000)")
+        if re.match(r"^https?://[^/]*@", v):
+            raise ValueError("no credentials in the endpoint: use the access key fields")
+        return v
+
+    @field_validator("bucket")
+    @classmethod
+    def _bucket(cls, v: str) -> str:
+        from .s3 import BUCKET_RE
+
+        v = v.strip()
+        if v and not BUCKET_RE.match(v):
+            raise ValueError("invalid bucket name (lowercase letters, digits, '-' and '.', 3 to 63 characters)")
+        return v
+
+    @field_validator("prefix")
+    @classmethod
+    def _prefix(cls, v: str) -> str:
+        v = v.strip().lstrip("/")
+        if ".." in v.split("/"):
+            raise ValueError("the prefix must stay inside the bucket")
+        return v
+
+    @model_validator(mode="after")
+    def _check(self) -> "RemoteStorageSettings":
+        if self.enabled and not (self.endpoint and self.bucket):
+            raise ValueError("remote storage needs an endpoint and a bucket name")
+        if bool(self.access_key_id) != bool(self.secret_access_key):
+            raise ValueError("give both an access key id and a secret access key, or neither (anonymous bucket)")
+        return self
+
+    @property
+    def cache_bytes(self) -> int:
+        return int(self.cache_gb * (1 << 30))
+
+    @property
+    def s3(self) -> Any:
+        """S3Config of the bucket (s3.py)."""
+        from .s3 import S3Config
+
+        return S3Config(endpoint=self.endpoint, bucket=self.bucket, region=self.region or "us-east-1",
+                        access_key_id=self.access_key_id, secret_access_key=self.secret_access_key,
+                        path_style=self.path_style, verify_tls=self.verify_tls)
+
+
 class McpSettings(BaseModel):
     """Administration MCP server (/api/mcp): an AI agent drives RefExposer with the API token of a service account."""
 
@@ -667,12 +748,14 @@ SECTIONS: dict[str, type[BaseModel]] = {"proxy": ProxySettings, "ldap": LdapSett
                                          "mfa": MfaSettings, "mcp": McpSettings, "smtp": SmtpSettings,
                                          "notifications": NotificationsSettings, "federation": FederationSettings,
                                          "assistant": AssistantSettings, "alerts": AlertsSettings,
-                                         "experimental": ExperimentalSettings, "backup": BackupSettings}
+                                         "experimental": ExperimentalSettings, "backup": BackupSettings,
+                                         "storage": RemoteStorageSettings}
 # *Names* of the fields kept encrypted in each section — never their values, so these are safe to log
 SECRET_FIELDS: dict[str, tuple[str, ...]] = {"proxy": ("password",), "ldap": ("bind_password",), "oidc": ("client_secret",), "branding": (),
                                              "syslog": ("client_key",), "tasks": (), "mfa": (), "mcp": (), "smtp": ("password",),
                                              "notifications": (), "federation": (), "assistant": ("api_key",),
-                                             "alerts": (), "experimental": (), "backup": ("secret_access_key",)}
+                                             "alerts": (), "experimental": (), "backup": ("secret_access_key",),
+                                             "storage": ("secret_access_key",)}
 
 _cache: dict[str, BaseModel] = {}
 _lock = threading.Lock()

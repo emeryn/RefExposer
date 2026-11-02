@@ -31,8 +31,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api/client';
+import { fmtBytes } from '../../lib/format';
 import { useBranding } from '../../api/hooks';
-import type { BackupSettings, BrandingSettings, ExperimentalSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
+import type { BackupSettings, BrandingSettings, RemoteStorageSettings, ExperimentalSettings, LdapSettings, LogLevel, McpSettings, SmtpSettings, MfaSettings, OidcSettings, ProxySettings, SyslogSettings, SyslogStatus, TestStep } from '../../api/types';
 import { BrandHeader } from '../../components/Brand';
 import { CodeSnippet, CopyIcon } from '../../components/Common';
 import { SavedSecret } from '../../components/SavedSecret';
@@ -46,6 +47,21 @@ const SecretsPage = lazy(() => import('./SecretsPage'));
 const MONO = { input: { fontFamily: 'var(--mantine-font-family-monospace)' } };
 
 // Defaults of appsettings.BackupSettings, for an instance that has never saved the section
+const EMPTY_STORAGE: RemoteStorageSettings = {
+  enabled: false,
+  endpoint: '',
+  bucket: '',
+  prefix: 'referentials/',
+  region: 'us-east-1',
+  access_key_id: '',
+  secret_access_key: '',
+  path_style: false,
+  verify_tls: true,
+  cache_gb: 0,
+  keep_hours: 48,
+  delete_with_referential: true,
+};
+
 const EMPTY_BACKUP: BackupSettings = {
   keep_local: 4,
   encrypt: true,
@@ -290,6 +306,8 @@ function BackupTab({ initial }: { initial: BackupSettings }) {
             <Text size="xs" c="dimmed">
               Permissions needed on the prefix: <Code>s3:ListBucket</Code>, <Code>s3:PutObject</Code> and{' '}
               <Code>s3:DeleteObject</Code> (to apply the retention), plus <Code>s3:GetObject</Code> to restore from the bucket.
+              A certificate signed by an internal authority is trusted once its root certificate is in{' '}
+              <b>Settings › Network &amp; proxy › TLS certificates</b>.
             </Text>
           </Section>
           <Group>
@@ -316,7 +334,185 @@ function BackupTab({ initial }: { initial: BackupSettings }) {
   );
 }
 
+// ------------------------------------------------------------------ remote storage
+
+/**
+ * Where the data of a referential lives: this disk, or an S3 bucket with the disk as a cache of it.
+ *
+ * Which referentials go there is set on each referential (Storage › Where the data lives); this tab says
+ * which bucket, and how much disk the cache may use before the coldest copies are freed.
+ */
+function StorageTab({ initial }: { initial: RemoteStorageSettings }) {
+  const [cfg, setCfg] = useState(initial);
+  useEffect(() => setCfg(initial), [initial]);
+  const save = useSave('storage');
+  const set = <K extends keyof RemoteStorageSettings>(k: K, v: RemoteStorageSettings[K]) =>
+    setCfg((c) => ({ ...c, [k]: v }));
+  const dirty = JSON.stringify(cfg) !== JSON.stringify(initial);
+  const { data: usage } = useQuery({ queryKey: ['storage-usage'], queryFn: api.storageUsage, enabled: initial.enabled });
+  const test = useMutation({
+    mutationFn: () => api.testStorageBucket(true),
+    onSuccess: (r) =>
+      notifications.show({
+        message: `${r.bucket} answers${r.anonymous ? ' (no credentials)' : ''}: ${r.writable ? 'writable' : 'read only'}`,
+        color: r.writable ? 'teal' : 'orange',
+      }),
+    onError: (e: Error) =>
+      notifications.show({ title: 'The bucket could not be reached', message: e.message, color: 'red', autoClose: 15000 }),
+  });
+  return (
+    <Grid gutter="md">
+      <Grid.Col span={{ base: 12, lg: 8 }}>
+        <Stack>
+          <Section title="Remote storage of the data" icon={<IconCloudUpload size={18} />}>
+            <Text size="sm" c="dimmed">
+              A referential can keep its published data in an S3 bucket instead of this disk. Everything that serves it reads a
+              local file — the query engine, the indexes, the lookups — so the bucket is the <b>home</b> of the data and the
+              disk is a <b>cache</b> of it: after each update the files go up, and a referential nobody has read for a while is
+              freed from the disk. Opening it downloads it again, which the first request does by itself.
+            </Text>
+            <Switch
+              label="Allow referentials to be stored in this bucket"
+              description="Each referential then chooses: local (the default) or remote, in its Storage settings."
+              checked={cfg.enabled}
+              onChange={(e) => set('enabled', e.currentTarget.checked)}
+            />
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput
+                label="Endpoint"
+                placeholder="https://s3.eu-west-3.amazonaws.com"
+                value={cfg.endpoint}
+                onChange={(e) => set('endpoint', e.currentTarget.value)}
+              />
+              <TextInput
+                label="Bucket"
+                placeholder="company-referentials"
+                value={cfg.bucket}
+                onChange={(e) => set('bucket', e.currentTarget.value)}
+              />
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput
+                label="Prefix (folder in the bucket)"
+                placeholder="referentials/"
+                value={cfg.prefix}
+                onChange={(e) => set('prefix', e.currentTarget.value)}
+              />
+              <TextInput
+                label="Region"
+                description="Used to sign the request; us-east-1 when empty"
+                placeholder="eu-west-3"
+                value={cfg.region}
+                onChange={(e) => set('region', e.currentTarget.value)}
+              />
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <TextInput
+                label="Access key id"
+                placeholder="AKIA…"
+                value={cfg.access_key_id}
+                onChange={(e) => set('access_key_id', e.currentTarget.value)}
+                autoComplete="off"
+              />
+              <SavedSecret
+                label="Secret access key"
+                value={cfg.secret_access_key}
+                isSet={cfg.secret_access_key_set}
+                onChange={(v) => set('secret_access_key', v)}
+              />
+            </SimpleGrid>
+            <Switch
+              label="Address the bucket as <endpoint>/<bucket>"
+              description="Needed by MinIO, Ceph and most self-hosted stores; Amazon uses <bucket>.<endpoint>."
+              checked={cfg.path_style}
+              onChange={(e) => set('path_style', e.currentTarget.checked)}
+            />
+            <Switch
+              label="Verify the TLS certificate of the store (recommended)"
+              checked={cfg.verify_tls}
+              onChange={(e) => set('verify_tls', e.currentTarget.checked)}
+            />
+            <Text size="xs" c="dimmed">
+              Permissions needed on the prefix: <Code>s3:ListBucket</Code>, <Code>s3:PutObject</Code>,{' '}
+              <Code>s3:GetObject</Code> and <Code>s3:DeleteObject</Code>. A confidential referential goes up as it is stored,
+              that is to say encrypted: the bucket never sees its rows.
+            </Text>
+            <Text size="xs" c="dimmed">
+              Certificate signed by an internal authority? Paste that root certificate in{' '}
+              <b>Settings › Network &amp; proxy › TLS certificates</b>: it is trusted for every S3 store, here and for the
+              sources.
+            </Text>
+          </Section>
+          <Section title="Local cache" icon={<IconDatabaseExport size={18} />}>
+            <Text size="sm" c="dimmed">
+              How much disk the copies of the remotely stored referentials may use. Past that, the coldest are freed, one whole
+              referential at a time — never a referential the bucket does not hold in full.
+            </Text>
+            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+              <NumberInput
+                label="Cache limit (GB)"
+                description="0: nothing is ever freed — the bucket is then a second copy, not a way of saving disk."
+                min={0}
+                step={1}
+                decimalScale={3}
+                value={cfg.cache_gb}
+                onChange={(v) => set('cache_gb', Number(v) || 0)}
+              />
+              <NumberInput
+                label="Never free what was read within (hours)"
+                description="Protects what is being used today from being downloaded again tomorrow morning."
+                min={0}
+                max={8760}
+                value={cfg.keep_hours}
+                onChange={(v) => set('keep_hours', Number(v) || 0)}
+              />
+            </SimpleGrid>
+            <Switch
+              label="Delete the objects of a referential when the referential is deleted"
+              description="Off: the data stays in the bucket after the referential goes away."
+              checked={cfg.delete_with_referential}
+              onChange={(e) => set('delete_with_referential', e.currentTarget.checked)}
+            />
+            <Text size="sm" c="dimmed">
+              Sending and freeing are the work of the “Remote storage” task, on the Tasks page: its schedule says how often the
+              cache is looked at.
+            </Text>
+            {usage && (
+              <Alert variant="light" color="blue" p="xs">
+                <Text size="xs">
+                  {usage.referentials.length} referential(s) stored in <Code>{usage.bucket}</Code>: {usage.cached.length} cached
+                  here ({fmtBytes(usage.cached_bytes)}), {usage.freed.length} freed.
+                  {usage.freed.length > 0 && ` Freed: ${usage.freed.slice(0, 10).join(', ')}.`}
+                </Text>
+              </Alert>
+            )}
+          </Section>
+          <Group>
+            <Button onClick={() => save.mutate(cfg)} loading={save.isPending} disabled={!dirty}>
+              Save
+            </Button>
+            <Button
+              variant="default"
+              onClick={() => test.mutate()}
+              loading={test.isPending}
+              disabled={dirty || !initial.endpoint || !initial.bucket}
+            >
+              Test the bucket
+            </Button>
+            {dirty && (
+              <Text size="xs" c="dimmed">
+                Unsaved changes — save before testing: the test uses the stored settings
+              </Text>
+            )}
+          </Group>
+        </Stack>
+      </Grid.Col>
+    </Grid>
+  );
+}
+
 function Section({ title, children, icon }: { title: string; children: ReactNode; icon?: ReactNode }) {
+
   return (
     <Card padding="lg">
       <Group gap="xs" mb="sm">
@@ -383,7 +579,7 @@ function ProxyTab({ initial, envProxy }: { initial: ProxySettings; envProxy: Rec
             <Switch label="Verify server certificates (recommended)" checked={cfg.verify_tls} onChange={(e) => set('verify_tls', e.currentTarget.checked)} />
             <Textarea
               label="Additional certificate authorities (PEM)"
-              description="E.g. the root certificate of your company or of a TLS-inspecting proxy. Also used for LDAPS."
+              description="E.g. the root certificate of your company or of a TLS-inspecting proxy. Also used for LDAPS, for the sources, and for the S3 stores (sources, backups, remote storage)."
               placeholder="-----BEGIN CERTIFICATE-----"
               autosize
               minRows={3}
@@ -1309,6 +1505,13 @@ export default function SettingsPage() {
             Secrets
           </Tabs.Tab>
           <Tabs.Tab
+            value="storage"
+            leftSection={<IconCloudUpload size={16} />}
+            rightSection={data.storage?.enabled ? <Badge size="xs" color="teal">S3</Badge> : null}
+          >
+            Storage
+          </Tabs.Tab>
+          <Tabs.Tab
             value="backup"
             leftSection={<IconDatabaseExport size={16} />}
             rightSection={data.backup?.s3_enabled ? <Badge size="xs" color="teal">S3</Badge> : null}
@@ -1371,6 +1574,9 @@ export default function SettingsPage() {
         </Tabs.Panel>
         <Tabs.Panel value="secrets">
           <SecretsPage />
+        </Tabs.Panel>
+        <Tabs.Panel value="storage">
+          <StorageTab initial={data.storage ?? EMPTY_STORAGE} />
         </Tabs.Panel>
         <Tabs.Panel value="backup">
           <BackupTab initial={data.backup ?? EMPTY_BACKUP} />

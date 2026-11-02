@@ -852,6 +852,21 @@ const ADMIN: Section[] = [
           bucket, so a copy lives off the disk it protects. Neither archive carries the encryption key: keep{' '}
           <code>REFEX_SECRET_KEY</code> elsewhere, or an encrypted backup cannot be restored.
         </P>
+        <P>
+          Restoring a full backup on a <b>second instance</b>, whose encryption key is not the one the archive was made with:
+          tick <i>This backup comes from another instance</i> and give that key. The archive is opened with it, and everything
+          it carries — the secrets of the settings, the TOTP secrets, the secret manager, the connectors, the rows and files of
+          the confidential referentials — is re-encrypted with the key of the instance doing the restore. The key is used for
+          that restore only; a wrong one is refused before anything is touched.
+        </P>
+        <H>Where the data of a referential lives</H>
+        <P>
+          By default the published data sits on this server. A referential can be given an <b>S3 bucket</b> as its home
+          instead, in its Storage settings, once a bucket is configured in Settings › Storage. Its files are sent up after
+          each update and the local disk keeps a cache of them: past the cache limit the coldest referentials are freed from
+          the disk — never one the bucket does not hold in full — and the first request for a freed referential brings it back.
+          A confidential referential goes up encrypted, so the bucket never sees its rows.
+        </P>
         <H>Two-factor authentication</H>
         <P>
           Local and LDAP accounts add an authenticator app or a security key / passkey from My account. Require it for everybody or

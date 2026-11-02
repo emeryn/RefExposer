@@ -94,6 +94,7 @@ const EMPTY: DefinitionConfig = {
     check_key: true,
     time_travel: false,
     max_snapshots: 10,
+    location: 'local',
   },
 };
 
@@ -384,6 +385,10 @@ function S3Fields({
           onChange={(e) => setSource({ path_style: e.currentTarget.checked })}
         />
       </SimpleGrid>
+      <Text size="xs" c="dimmed">
+        A store whose certificate comes from an internal authority (<Code>https://s3.company.lan</Code>): paste that root
+        certificate in Settings › Network &amp; proxy › TLS certificates, and it is trusted here too.
+      </Text>
       <Group>
         <Button variant="default" size="xs" onClick={() => test.mutate()} loading={test.isPending} disabled={!ready}>
           Test the bucket
@@ -1387,6 +1392,18 @@ export default function ReferentialEditor() {
                               ]}
                               value={draft.storage.profile}
                               onChange={(v) => set('storage', { ...draft.storage, profile: (v ?? 'full') as DefinitionConfig['storage']['profile'] })}
+                              allowDeselect={false}
+                            />
+                            <Select
+                              size="xs"
+                              label="Where the data lives"
+                              description="Remote: the published files are kept in the S3 bucket of Settings › Storage, and this disk holds a cache of them — freed when it grows past its limit, downloaded again when the referential is opened."
+                              data={[
+                                { value: 'local', label: 'On this server (default)' },
+                                { value: 'remote', label: 'In the S3 bucket (this disk is a cache)' },
+                              ]}
+                              value={draft.storage.location ?? 'local'}
+                              onChange={(v) => set('storage', { ...draft.storage, location: (v ?? 'local') as 'local' | 'remote' })}
                               allowDeselect={false}
                             />
                             <Switch size="xs" label="Keep the source files after import" checked={draft.storage.keep_raw} onChange={(e) => set('storage', { ...draft.storage, keep_raw: e.currentTarget.checked })} />

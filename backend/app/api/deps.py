@@ -39,8 +39,27 @@ def get_ref(service: Service, ref_id: str, user: CurrentUser, level: Literal["re
     return ref
 
 
+def materialise(service: Service, ref_id: str) -> None:
+    """Make sure the data of a referential is on this disk before reading it.
+
+    A referential stored in a bucket and freed from the disk is brought back here, which is what makes remote
+    storage invisible to everything downstream (remotestore.py). Only the first request after it was freed
+    waits for the download; everything else is a no-op.
+    """
+    try:
+        service.ensure_data(ref_id)
+    except Exception as e:  # noqa: BLE001 - the bucket is unreachable, or full, or the disk is
+        from ..remotestore import RemoteStorageError
+        from ..s3 import S3Error
+
+        if not isinstance(e, (RemoteStorageError, S3Error, OSError)):
+            raise
+        raise HTTPException(503, f"the data of '{ref_id}' is stored remotely and could not be brought back: {e}") from e
+
+
 def get_ref_with_data(service: Service, ref_id: str, user: CurrentUser) -> ReferentialConfig:
     ref = get_ref(service, ref_id, user)
+    materialise(service, ref_id)
     if not service.has_data(ref_id):
         raise HTTPException(409, f"the referential '{ref_id}' has no data yet (start an update)")
     return ref

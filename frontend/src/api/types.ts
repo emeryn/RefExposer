@@ -162,6 +162,11 @@ export interface ReferentialSummary {
   parquet_size: number | null;
   raw_size: number | null;
   storage_size: number | null;
+  /** Where the published data lives: this disk, or the S3 bucket of Settings > Storage. */
+  storage_location?: 'local' | 'remote';
+  /** Remote storage: the data is in the bucket and not on the disk (brought back when first asked for). */
+  storage_freed?: boolean;
+  remote_storage?: { bucket: string; endpoint: string; prefix: string; at: string; bytes: number; freed: boolean } | null;
   last_success_at: string | null;
   last_attempt_at: string | null;
   last_checked_at: string | null;
@@ -1223,6 +1228,11 @@ export interface FullBackup {
   size: number;
   encrypted: boolean;
   created_at: string;
+  /** Whether the archive opens with this instance's key. */
+  readable?: boolean;
+  /** True: made by an instance with another key (restoring it needs that key). null: it does not say. */
+  foreign?: boolean | null;
+  app_version?: string;
 }
 
 /** A full backup held in the S3 bucket. */
@@ -1239,6 +1249,31 @@ export interface FullBackupList {
   s3_enabled: boolean;
   bucket: string | null;
   confirm_word: string;
+  /** One-way name of this instance's encryption key: shown so two instances can be told apart. */
+  key_fingerprint: string;
+}
+
+/** What a restore re-encrypted with this instance's key, when the archive came from another one. */
+export interface Rekeyed {
+  settings: number;
+  totp: number;
+  source_secrets: number;
+  llm_profiles: number;
+  records: number;
+  profiles: number;
+  parquet_files: number;
+  skipped: number;
+  total: number;
+  failed: string[];
+  failed_count: number;
+  notes: string[];
+}
+
+export interface FullBackupRestored {
+  restored: Record<string, number>;
+  referentials: string[];
+  removed: string[];
+  rekeyed: Rekeyed | null;
 }
 
 /** What a full backup carries (manifest.json of the archive). */
@@ -1254,6 +1289,8 @@ export interface FullBackupManifest {
   data_files: number;
   data_bytes: number;
   referentials: string[];
+  /** One-way name of the key the instance that wrote it used (absent in archives of older versions). */
+  key_fingerprint?: string;
 }
 
 /** Settings › Backup: where full backups go. */
@@ -1273,6 +1310,37 @@ export interface BackupSettings {
   verify_tls: boolean;
   keep_s3: number;
   delete_local_after_upload: boolean;
+}
+
+/** Settings > Storage: the S3 bucket a referential's data can live in, and the local cache of it. */
+export interface RemoteStorageSettings {
+  enabled: boolean;
+  endpoint: string;
+  bucket: string;
+  prefix: string;
+  region: string;
+  access_key_id: string;
+  secret_access_key: string;
+  secret_access_key_set?: boolean;
+  path_style: boolean;
+  verify_tls: boolean;
+  /** Disk the cached copies may use, in GB. 0: nothing is ever freed. */
+  cache_gb: number;
+  /** A referential read within these hours is never freed. */
+  keep_hours: number;
+  delete_with_referential: boolean;
+}
+
+/** What is stored remotely, and what the cache uses (GET /admin/referentials/storage/usage). */
+export interface StorageUsage {
+  enabled: boolean;
+  bucket: string | null;
+  cache_gb: number;
+  keep_hours: number;
+  referentials: string[];
+  cached: string[];
+  freed: string[];
+  cached_bytes: number;
 }
 
 /** Referential definition as edited in the administration UI. */
@@ -1316,6 +1384,8 @@ export interface DefinitionConfig {
     /** Keep each published version so two of them can be compared (Time travel) */
     time_travel?: boolean;
     max_snapshots?: number;
+    /** local (default) or remote: the data lives in the S3 bucket of Settings > Storage */
+    location?: 'local' | 'remote';
   };
   /** Bloom filter or SQLite database updated by deltas */
   incremental?: { urls: string[]; format?: 'values' | 'bloom' | 'sql' | null; full_every?: string | null; max_fp_rate?: number | null } | null;
@@ -1504,6 +1574,7 @@ export interface AllSettings {
   alert_kinds: AlertKind[];
   experimental: ExperimentalSettings;
   backup: BackupSettings;
+  storage: RemoteStorageSettings;
   local_login: boolean;
   log_level: LogLevel;
   public_url: string | null;
@@ -1763,6 +1834,10 @@ export interface InternalDefinition {
   columns: ColumnDef[];
   search_columns: string[];
   confidential?: boolean;
+  /** Where the published file lives; null on an update keeps what is stored. */
+  storage_location?: 'local' | 'remote' | null;
+  /** Read back from the stored definition (the form sends storage_location instead). */
+  storage?: { location?: 'local' | 'remote' };
   renames?: Record<string, string>;
 }
 

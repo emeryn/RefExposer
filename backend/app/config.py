@@ -222,6 +222,11 @@ class StorageConfig(BaseModel):
     # nothing until the version it shares its blocks with is replaced), and two snapshots can be compared.
     time_travel: bool = False
     max_snapshots: int = Field(10, ge=1, le=365)
+    # Where the published data lives: the local disk, or the S3 bucket of Settings > Storage. Remote keeps the
+    # bucket as the home of the data and the disk as a cache of it, freed when it grows past its limit
+    # (remotestore.py). It changes nothing about the data itself, so it is not part of config_hash: switching
+    # it does not rebuild anything.
+    location: Literal["local", "remote"] = "local"
 
 
 class PiiConfig(BaseModel):

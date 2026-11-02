@@ -578,6 +578,57 @@ def _backup(m: TaskManager, p: dict[str, Any]) -> Result:
                   details={"file": path.name, "size": path.stat().st_size})
 
 
+def _remote_storage(m: TaskManager, p: dict[str, Any]) -> Result:
+    """Keep the bucket and the local cache of the remotely stored referentials in step (remotestore.py).
+
+    Two things, in this order: send what the bucket is missing (an update that could not reach it, a
+    referential whose storage has just been switched to remote), then free the coldest caches until the disk
+    they use fits in the limit of Settings › Storage. Nothing is ever freed before the bucket holds it.
+    """
+    from . import appsettings, remotestore
+    from .s3 import S3Error
+
+    svc = m.service
+    lines: list[str] = []
+    with m.db() as db:
+        section: Any = appsettings.load(db, "storage")
+        if not section.enabled:
+            return Result("success", "Remote storage is not enabled", changed=False)
+        tgt = remotestore.target(db)
+    remote = sorted(r.id for r in svc.refs.values() if remotestore.is_remote(r))
+    if not remote:
+        return Result("success", "No referential is stored remotely", changed=False)
+
+    status: Status = "success"
+    sent: list[str] = []
+    if p["send"]:
+        for ref_id in remote:
+            if ref_id in svc.active or svc.is_freed(ref_id):
+                continue
+            if not remotestore.local_files(m.settings, ref_id):  # nothing published yet
+                continue
+            try:
+                # The bucket itself says what it holds (one listing per referential): a file that failed to go
+                # up during an update is still recorded in meta.json, so trusting that would send nothing.
+                done = svc.send_to_bucket(ref_id)
+                if done["sent"]:
+                    sent.append(ref_id)
+                    lines.append(f"{ref_id}: {done['sent']} file(s) sent, {done['objects']} object(s) in the "
+                                 f"bucket ({done['bytes']:,} bytes)")
+            except (remotestore.RemoteStorageError, S3Error, OSError) as e:
+                lines.append(f"{ref_id}: not sent to the bucket ({e})")
+                status = "warning"
+
+    quota = remotestore.apply_quota(m.settings, tgt, svc.refs, svc.last_read, svc.free_local,
+                                    exclude=set(svc.active), log_line=lines.append) if p["free"] else {
+        "freed": [], "released": 0, "cached": remotestore.cached_bytes(m.settings, svc.refs)}
+    details = {"referentials": len(remote), "sent": sent, "freed": quota["freed"], "released": quota["released"],
+               "cached": quota["cached"], "bucket": tgt.cfg.bucket, "log": lines}
+    message = (f"{len(remote)} referential(s) stored in {tgt.cfg.bucket}: {len(sent)} sent, "
+               f"{len(quota['freed'])} freed ({_human(quota['released'])}), cache {_human(quota['cached'])}")
+    return Result(status, message, details, changed=bool(sent or quota["freed"]))
+
+
 def _full_backup(m: TaskManager, p: dict[str, Any]) -> Result:
     """Full backup (configuration **and** data), on the server and / or in an S3 bucket.
 
@@ -626,6 +677,13 @@ def _human(n: float) -> str:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
+
+def _remote_storage_enabled(m: TaskManager) -> bool:
+    from . import appsettings
+
+    with m.db() as db:
+        return bool(getattr(appsettings.load(db, "storage"), "enabled", False))
 
 
 def _ldap_enabled(m: TaskManager) -> bool:
@@ -710,4 +768,12 @@ def _definitions() -> list[TaskDef]:
                         Param("include_raw", "Carry the downloaded sources (raw/)", "choice", "settings",
                               choices=["settings", "yes", "no"],
                               help="They come from their source again: leaving them out keeps the archive much smaller")]),
+        TaskDef("remote_storage", "Remote storage", "backup",
+                "Referentials stored in an S3 bucket (Settings › Storage): sends what the bucket is missing, then "
+                "frees the coldest local copies so the cache stays inside its limit. Does nothing when no "
+                "referential is stored remotely.",
+                _remote_storage, schedule="20 * * * *", quiet=True,
+                params=[Param("send", "Send what the bucket is missing", "bool", True),
+                        Param("free", "Free the coldest copies over the cache limit", "bool", True)],
+                available=_remote_storage_enabled),
     ]

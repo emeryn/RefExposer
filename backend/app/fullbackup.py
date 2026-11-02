@@ -24,6 +24,11 @@ half-restored.
 
 Destinations: a file on the server (`data/.backups/full/`) and / or an S3 bucket (see s3.py). The schedule of
 the `full_backup` task sets how often it runs.
+
+Restoring onto a **second instance**, whose key is not the one the archive was made with, is what `source_key`
+is for: given the other instance's `REFEX_SECRET_KEY` (or the content of its `data/.secret_key`), the archive
+is opened with it and everything it carries is then re-encrypted with the local key (rekey.py), so the second
+instance ends up holding the data under its own secret and the old key is needed nowhere else.
 """
 
 from __future__ import annotations
@@ -48,7 +53,7 @@ from sqlalchemy import DateTime, Integer, delete, insert, select, text
 from sqlalchemy.orm import Session
 
 from . import __version__
-from .crypto import derive
+from .crypto import derive, derive_with, key_fingerprint
 from .models import Base
 from .settings import Settings
 from .storage import iso, utcnow
@@ -80,8 +85,9 @@ def full_dir(data_dir: Path) -> Path:
     return data_dir / ".backups" / "full"
 
 
-def _key() -> bytes:
-    return derive("full-backup")
+def _key(material: bytes | None = None) -> bytes:
+    """Key sealing the archive. `material`: the master secret of another instance (restoring its backup here)."""
+    return derive_with(material, "full-backup") if material is not None else derive("full-backup")
 
 
 # --------------------------------------------------------------------------- chunked encryption
@@ -127,11 +133,11 @@ class _SealedWriter(io.RawIOBase):
         super().close()
 
 
-def _unseal(source: BinaryIO) -> Iterator[bytes]:
+def _unseal(source: BinaryIO, material: bytes | None = None) -> Iterator[bytes]:
     """Plaintext chunks of a sealed archive, or BackupError when it was made with another key or is damaged."""
     if source.read(len(MAGIC)) != MAGIC:
         raise BackupError("not an encrypted RefExposer full backup")
-    aes = AESGCM(_key())
+    aes = AESGCM(_key(material))
     index = 0
     while True:
         header = source.read(LENGTH)
@@ -145,7 +151,16 @@ def _unseal(source: BinaryIO) -> Iterator[bytes]:
         try:
             plain = aes.decrypt(nonce, sealed, MAGIC + index.to_bytes(8, "big"))
         except InvalidTag as e:
-            raise BackupError("cannot decrypt the backup: it was made with another REFEX_SECRET_KEY, or is damaged") from e
+            # An encrypted archive is refused here, before its manifest can be read, so this message is what
+            # a wrong key looks like: it says which of the two cases it is
+            raise BackupError(
+                "the key given does not open this backup: it is not the one it was made with (or the archive "
+                "is damaged). Nothing was touched."
+                if material is not None else
+                "cannot decrypt the backup: it was made with another REFEX_SECRET_KEY, or is damaged. A backup "
+                "from another instance is restored by giving that instance's key with it, which also re-encrypts "
+                "what it carries with this instance's key."
+            ) from e
         index += 1
         if not plain:  # end marker
             return
@@ -155,8 +170,8 @@ def _unseal(source: BinaryIO) -> Iterator[bytes]:
 class _UnsealedReader(io.RawIOBase):
     """Read-only file-like over the plaintext of a sealed archive (what tarfile streams from)."""
 
-    def __init__(self, source: BinaryIO):
-        self._chunks = _unseal(source)
+    def __init__(self, source: BinaryIO, material: bytes | None = None):
+        self._chunks = _unseal(source, material)
         self._buffer = b""
         self._done = False
 
@@ -297,6 +312,9 @@ def write(db: Session, settings: Settings, encrypt: bool = True, include_raw: bo
         "app_version": __version__,
         "created_at": iso(utcnow()),
         "encrypted": encrypt,
+        # Public name of the master secret of this instance: a restore elsewhere knows, before touching
+        # anything, whether what it carries has to be re-encrypted and whether the key given is the right one
+        "key_fingerprint": key_fingerprint(),
         "include_raw": include_raw,
         "alembic_revision": database["alembic_revision"],
         "dialect": database["dialect"],
@@ -340,7 +358,7 @@ def write(db: Session, settings: Settings, encrypt: bool = True, include_raw: bo
         raise
     size = target.stat().st_size
     log_line(f"{name} written ({size:,} bytes, {'encrypted' if encrypt else 'NOT encrypted'})")
-    for old in list_files(settings.data_dir)[keep:]:  # newest first
+    for old in list_files(settings.data_dir, probe=False)[keep:]:  # newest first
         (folder / old["name"]).unlink(missing_ok=True)
         log_line(f"{old['name']} deleted (only the last {keep} are kept)")
     return Written(path=target, size=size, encrypted=encrypt, manifest=manifest)
@@ -348,13 +366,33 @@ def write(db: Session, settings: Settings, encrypt: bool = True, include_raw: bo
 
 # --------------------------------------------------------------------------- listing
 
-def list_files(data_dir: Path) -> list[dict[str, Any]]:
+def inspect(path: Path) -> dict[str, Any]:
+    """Whether an archive opens here, and whether it comes from an instance with another key.
+
+    Only its first member is read (the manifest), so listing a folder of backups stays cheap. `foreign` is
+    None when the archive does not say which key wrote it (written by an older version).
+    """
+    try:
+        manifest = read_manifest(path)
+    except BackupError:
+        # It does not open with our key: that is either another key, or a damaged file. Either way the UI has
+        # to ask for a key, and the restore says which of the two it is.
+        return {"readable": False, "foreign": True}
+    written_with = str(manifest.get("key_fingerprint") or "")
+    return {"readable": True, "foreign": (written_with != key_fingerprint()) if written_with else None,
+            "created_at_manifest": manifest.get("created_at"), "app_version": manifest.get("app_version")}
+
+
+def list_files(data_dir: Path, probe: bool = True) -> list[dict[str, Any]]:
+    """Backups held on the server, newest first. `probe`: also open each one to say whether it reads here
+    (what the interface needs); the retention of a backup being written only needs the names."""
     folder = full_dir(data_dir)
     if not folder.is_dir():
         return []
     files = [p for p in folder.iterdir() if p.is_file() and NAME_RE.match(p.name)]
     return [{"name": p.name, "size": p.stat().st_size, "encrypted": p.name.endswith(".enc"),
-             "created_at": iso(datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc))}
+             "created_at": iso(datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)),
+             **(inspect(p) if probe else {})}
             for p in sorted(files, key=lambda p: p.name, reverse=True)]
 
 
@@ -429,12 +467,12 @@ def delete_remote(cfg: Any, settings: Settings, prefix: str, name: str) -> None:
 
 # --------------------------------------------------------------------------- reading
 
-def _open(path: Path) -> tuple[Any, Any]:
-    """(tar stream, underlying file) of an archive, sealed or not."""
+def _open(path: Path, material: bytes | None = None) -> tuple[Any, Any]:
+    """(tar stream, underlying file) of an archive, sealed or not. `material`: the key of another instance."""
     raw = path.open("rb")
     try:
         if path.name.endswith(".enc"):
-            stream: Any = io.BufferedReader(_UnsealedReader(raw))
+            stream: Any = io.BufferedReader(_UnsealedReader(raw, material))
         else:
             stream = raw
         return tarfile.open(fileobj=stream, mode="r|gz"), raw
@@ -446,9 +484,9 @@ def _open(path: Path) -> tuple[Any, Any]:
         raise BackupError("not a RefExposer full backup (unreadable archive)") from e
 
 
-def read_manifest(path: Path) -> dict[str, Any]:
+def read_manifest(path: Path, material: bytes | None = None) -> dict[str, Any]:
     """The manifest alone, without extracting anything: what the UI lists and what a restore checks."""
-    tar, raw = _open(path)
+    tar, raw = _open(path, material)
     try:
         member = next((m for m in tar if m.name == "manifest.json"), None)
         if member is None:
@@ -484,9 +522,12 @@ class Restored:
     data_files: int
     data_bytes: int
     removed: list[str] = field(default_factory=list)
+    # Set when the archive came from an instance with another key and was re-encrypted with ours (rekey.py)
+    rekeyed: dict[str, Any] | None = None
 
 
-def extract(path: Path, staging: Path, log_line: Callable[[str], None] = lambda m: None) -> tuple[dict[str, Any], dict[str, Any]]:
+def extract(path: Path, staging: Path, log_line: Callable[[str], None] = lambda m: None,
+            material: bytes | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Unpack an archive into `staging`. Returns (manifest, database dump).
 
     Nothing of the instance is touched here: the archive is read and checked first, so a damaged or foreign
@@ -497,7 +538,12 @@ def extract(path: Path, staging: Path, log_line: Callable[[str], None] = lambda 
     manifest: dict[str, Any] = {}
     database: dict[str, Any] = {}
     files = 0
-    tar, raw = _open(path)
+    try:
+        tar, raw = _open(path, material)
+    except BaseException:
+        # An archive that does not even open (another key, not an archive at all) leaves no folder behind
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     try:
         for member in tar:
             if not _safe(member.name):
@@ -588,23 +634,66 @@ def restore_database(db: Session, database: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
+def _check_key(manifest: dict[str, Any], material: bytes | None, path: Path,
+               log_line: Callable[[str], None]) -> None:
+    """What the manifest says about the key that wrote the archive, checked before anything is replaced.
+
+    An unencrypted archive opens anywhere, so without this a restore of a foreign one would quietly land
+    secrets nobody can read. The fingerprint is a one-way name of the master secret, never the secret itself.
+    """
+    from . import crypto
+
+    written_with = str(manifest.get("key_fingerprint") or "")
+    if material is None:
+        if written_with and written_with != crypto.key_fingerprint():
+            raise BackupError(
+                "this backup was made by an instance with another encryption key: give that key "
+                "(REFEX_SECRET_KEY, or the content of its data/.secret_key) so that what it carries can be "
+                "re-encrypted with this instance's key. Restored without it, its secrets and its confidential "
+                "referentials would be unreadable here."
+            )
+        return
+    if written_with and written_with != crypto.fingerprint(material):
+        raise BackupError(
+            f"the key given is not the one this backup was made with (backup {written_with}, key given "
+            f"{crypto.fingerprint(material)}): nothing was touched"
+        )
+    if not written_with:
+        # Written by a version that did not record it: the re-key itself says whether the key reads anything
+        log_line(f"{path.name} does not say which key it was made with (older version): the key given is used "
+                 "as it is")
+
+
 def restore(db: Session, settings: Settings, path: Path, remove_extra: bool = False,
-            log_line: Callable[[str], None] = lambda m: None) -> Restored:
+            log_line: Callable[[str], None] = lambda m: None, source_key: str | None = None) -> Restored:
     """Put the instance back as the archive holds it: database, definitions and data/.
 
     `remove_extra`: also delete the folders of referentials the backup does not carry, so that the instance
     matches the archive exactly. Off by default, so a restore adds back what was lost without throwing away a
     referential created since.
 
+    `source_key`: the master secret of the instance the backup comes from (its `REFEX_SECRET_KEY`, or the
+    content of its `data/.secret_key`). It opens the archive, and everything it carries is then re-encrypted
+    with this instance's key, so a restore onto a second instance leaves nothing that only the first can read.
+
     Each referential folder is swapped in place: the new folder is moved in only once it is complete, and the
     one it replaces is kept aside. Should a move fail halfway, every folder already swapped is put back before
     the error is raised, so a failed restore leaves the data it found rather than a half-replaced `data/`.
     """
+    from . import crypto, rekey as rekey_module
+
+    material = crypto.read_material(source_key) if source_key else None
+    if material is not None and not rekey_module.differs(material):
+        # The same key, written out by hand: nothing to re-encrypt, and the archive opens as a local one
+        log_line("The key given is this instance's own: the backup is restored without re-encrypting anything")
+        material = None
     staging = settings.data_dir / f".restore-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     aside = staging.with_name(staging.name + "-replaced")
-    manifest, database = extract(path, staging, log_line)
+    manifest, database = extract(path, staging, log_line, material)
     swapped: list[tuple[Path, Path]] = []  # (folder put aside, where it came from)
     try:
+        # Inside the try: a refusal here has to take the unpacked copy of data/ with it
+        _check_key(manifest, material, path, log_line)
         counts = restore_database(db, database)
         log_line(f"Database restored: {sum(counts.values()):,} rows in {len(counts)} table(s)")
 
@@ -659,10 +748,15 @@ def restore(db: Session, settings: Settings, path: Path, remove_extra: bool = Fa
             swapped.clear()
             raise
         log_line(f"{len(restored_entries)} entry(ies) of data/ restored ({manifest.get('data_bytes', 0):,} bytes)")
+        rekeyed = None
+        if material is not None:
+            # Last, and outside the swap: the database and the files are in place, so what is re-encrypted is
+            # what the instance now holds
+            rekeyed = rekey_module.rekey(db, settings, material, log_line=log_line).as_dict()
         return Restored(created_at=manifest.get("created_at") or "", app_version=manifest.get("app_version") or "",
                         counts=counts, referentials=manifest.get("referentials") or [],
                         config_files=manifest.get("config_files") or [], data_files=manifest.get("data_files") or 0,
-                        data_bytes=manifest.get("data_bytes") or 0, removed=removed)
+                        data_bytes=manifest.get("data_bytes") or 0, removed=removed, rekeyed=rekeyed)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
         # The replaced folders are only dropped once the restore went through (a rollback emptied this list)

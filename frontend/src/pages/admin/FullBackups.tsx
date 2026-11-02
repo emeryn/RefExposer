@@ -19,6 +19,7 @@ import {
   List,
   Loader,
   Modal,
+  PasswordInput,
   Stack,
   Table,
   Tabs,
@@ -49,20 +50,31 @@ import { fmtBytes, fmtDate } from '../../lib/format';
 
 const CONFIRM = 'RESTORE EVERYTHING';
 
-type Target = { name?: string; file?: File };
+type Target = { name?: string; file?: File; foreign?: boolean | null; readable?: boolean };
 
 function RestoreModal({ target, onClose }: { target: Target; onClose: () => void }) {
   const [confirm, setConfirm] = useState('');
   const [removeExtra, setRemoveExtra] = useState(false);
+  // An archive the listing already knows comes from elsewhere opens the key field by itself
+  const [elsewhere, setElsewhere] = useState(target.foreign === true || target.readable === false);
+  const [secretKey, setSecretKey] = useState('');
   const label = target.file ? target.file.name : target.name!;
+  const key = elsewhere ? secretKey.trim() : '';
   const restore = useMutation({
     mutationFn: () =>
       target.file
-        ? api.restoreFullBackupUpload(target.file, confirm, removeExtra)
-        : api.restoreFullBackup(target.name!, confirm, removeExtra),
-    onSuccess: () => {
-      notifications.show({ message: 'Instance restored: sign in again', color: 'teal' });
-      setTimeout(() => (window.location.href = '/'), 1500);
+        ? api.restoreFullBackupUpload(target.file, confirm, removeExtra, key)
+        : api.restoreFullBackup(target.name!, confirm, removeExtra, key),
+    onSuccess: (done) => {
+      const n = done.rekeyed?.total ?? 0;
+      notifications.show({
+        message: n
+          ? `Instance restored and ${n} encrypted item(s) re-encrypted with this instance's key: sign in again`
+          : 'Instance restored: sign in again',
+        color: 'teal',
+        autoClose: 8000,
+      });
+      setTimeout(() => (window.location.href = '/'), 2000);
     },
     onError: (e: Error) =>
       notifications.show({ title: 'Restore failed', message: e.message, color: 'red', autoClose: 15000 }),
@@ -86,10 +98,38 @@ function RestoreModal({ target, onClose }: { target: Target; onClose: () => void
           checked={removeExtra}
           onChange={(e) => setRemoveExtra(e.currentTarget.checked)}
         />
-        <Text size="sm" c="dimmed">
-          An archive made with another <Code>REFEX_SECRET_KEY</Code> cannot be read: keep that key with the backup, never inside
-          it.
-        </Text>
+        <Checkbox
+          label="This backup comes from another instance (another encryption key)"
+          description="Give that instance's key: the archive is opened with it, and everything it carries is re-encrypted with this instance's key."
+          checked={elsewhere}
+          onChange={(e) => setElsewhere(e.currentTarget.checked)}
+        />
+        {elsewhere ? (
+          <Stack gap={6}>
+            <PasswordInput
+              label="Encryption key of the instance the backup comes from"
+              description={
+                <>
+                  Its <Code>REFEX_SECRET_KEY</Code>, or the content of its <Code>data/.secret_key</Code> file, copied as it is.
+                  It is used for this restore only: never stored, never logged.
+                </>
+              }
+              value={secretKey}
+              onChange={(e) => setSecretKey(e.currentTarget.value)}
+              placeholder="REFEX_SECRET_KEY of the other instance"
+            />
+            <Text size="xs" c="dimmed">
+              Re-encrypted with this instance's key: the settings secrets, the TOTP secrets, the secret manager, the LLM
+              connectors, the rows of the confidential internal referentials and the Parquet files of the confidential
+              referentials. Archives already on this server keep the key they were written with.
+            </Text>
+          </Stack>
+        ) : (
+          <Text size="sm" c="dimmed">
+            An archive made with another <Code>REFEX_SECRET_KEY</Code> cannot be read without it: keep that key with the backup,
+            never inside it.
+          </Text>
+        )}
         <TextInput
           label={`Type ${CONFIRM} to confirm`}
           value={confirm}
@@ -100,7 +140,12 @@ function RestoreModal({ target, onClose }: { target: Target; onClose: () => void
           <Button variant="default" onClick={onClose}>
             Cancel
           </Button>
-          <Button color="red" disabled={confirm !== CONFIRM} loading={restore.isPending} onClick={() => restore.mutate()}>
+          <Button
+            color="red"
+            disabled={confirm !== CONFIRM || (elsewhere && !key)}
+            loading={restore.isPending}
+            onClick={() => restore.mutate()}
+          >
             Restore everything
           </Button>
         </Group>
@@ -195,14 +240,27 @@ function LocalTable({ backups, onRestore }: { backups: FullBackup[]; onRestore: 
                   <Badge size="xs" color="orange" variant="light">
                     not encrypted
                   </Badge>
+                )}{' '}
+                {b.foreign && (
+                  <Tooltip label="Made by an instance with another encryption key: restoring it asks for that key, and re-encrypts what it carries with this instance's key.">
+                    <Badge size="xs" color="violet" variant="light">
+                      another key
+                    </Badge>
+                  </Tooltip>
                 )}
               </Table.Td>
               <Table.Td>{fmtDate(b.created_at)}</Table.Td>
               <Table.Td>{fmtBytes(b.size)}</Table.Td>
               <Table.Td w={160}>
                 <Group gap={4} wrap="nowrap">
-                  <Tooltip label="What it holds">
-                    <ActionIcon variant="subtle" color="gray" onClick={() => setManifest(b.name)} aria-label="Contents">
+                  <Tooltip label={b.readable === false ? 'Unreadable here: it was made with another key' : 'What it holds'}>
+                    <ActionIcon
+                      variant="subtle"
+                      color="gray"
+                      disabled={b.readable === false}
+                      onClick={() => setManifest(b.name)}
+                      aria-label="Contents"
+                    >
                       <IconInfoCircle size={16} />
                     </ActionIcon>
                   </Tooltip>
@@ -217,7 +275,7 @@ function LocalTable({ backups, onRestore }: { backups: FullBackup[]; onRestore: 
                     </ActionIcon>
                   </Tooltip>
                   <Tooltip label="Restore everything">
-                    <ActionIcon variant="subtle" color="orange" onClick={() => onRestore({ name: b.name })} aria-label="Restore">
+                    <ActionIcon variant="subtle" color="orange" onClick={() => onRestore({ name: b.name, foreign: b.foreign, readable: b.readable })} aria-label="Restore">
                       <IconRestore size={16} />
                     </ActionIcon>
                   </Tooltip>
