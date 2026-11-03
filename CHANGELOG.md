@@ -85,6 +85,19 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   one no antivirus sees, the file being a perfectly valid CSV. A plain number is left alone; Parquet, JSON and
   JSON Lines are untouched; a generated download is rebuilt when the setting changes.
 
+### Fixed
+
+- **A unified referential in *enrichment* mode no longer loads a big source whole to enrich a small one.** A
+  `LEFT JOIN` hashes its right side, so enriching a thousand rows from a source of sixty million hashed the
+  sixty million — several GB held to produce a thousand rows, and an update that ended in
+  `OutOfMemoryException` on a result that would fit in a mail. Such a side is now read through a semi-join on
+  the keys of the base, which is exactly equivalent (a row matching no key of the base cannot contribute to a
+  left join) and lets DuckDB stream it through a small hash table instead. Applied only when the enriching
+  side holds at least a million rows **and** is at least ten times the base, from the row counts the sources
+  already record; the opposite shape is left alone, where reading the base's keys would be the expensive part.
+  The run log says when a side was narrowed. Sorting that source on its join column (`storage.sort_by`) then
+  lets the Parquet zone maps skip nearly all of it.
+
 ## [1.0.0] - 2026-10-29
 
 First version: referentials declared from the interface or in YAML, downloaded from HTTP, Git, files, an

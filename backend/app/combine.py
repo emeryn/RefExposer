@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import CombineConfig, ReferentialConfig
 from .crypto import parquet_key
@@ -136,7 +136,37 @@ def _union_sql(cfg: CombineConfig, items: list[Part]) -> str:
     return "(" + " UNION ALL BY NAME ".join(selects) + ")"
 
 
-def _enrich_sql(cfg: CombineConfig, key: str | None, items: list[Part]) -> str:
+# An enriching side is read through a semi-join on the keys of the base when it is this much bigger than the
+# base, and holds at least this many rows. Below that, hashing the whole side costs nothing worth avoiding;
+# above it, it is the difference between hashing a few thousand keys and hashing tens of millions of rows.
+NARROW_MIN_ROWS = 1_000_000
+NARROW_RATIO = 10
+
+
+def _narrowed(part: Part, their: str, base: Part, on: str) -> tuple[str, str]:
+    """How an enriching side is read, and why — ("", "") when it is read whole.
+
+    A `LEFT JOIN` hashes its **right** side, so enriching a thousand rows from a source of sixty million
+    hashes the sixty million: several GB held to produce a thousand rows, which is how a build runs out of
+    memory on a result that would fit in a mail. Keeping only the rows whose key appears in the base is
+    **exactly equivalent** here — a row of the enriching side that matches no key of the base cannot
+    contribute to a left join — and turns the big side into something DuckDB streams through a small hash
+    table instead of loading into a big one. Sorting that source on its join column (`storage.sort_by`) then
+    lets the Parquet zone maps skip nearly all of it.
+
+    Not done the other way round: when the base is the big one, reading its keys would be the expensive part.
+    """
+    theirs, mine = part.row_count, base.row_count
+    if theirs is None or mine is None or theirs < NARROW_MIN_ROWS or theirs < mine * NARROW_RATIO:
+        return "", ""
+    reader = (f"(SELECT * FROM {part.reader} WHERE {qi(their)} IN "
+              f"(SELECT {qi(on)} FROM {base.reader}))")
+    why = (f"{part.id}: {theirs:,} rows read through the {mine:,} key(s) of {base.id} instead of being "
+           f"loaded whole (join on '{their}')")
+    return reader, why
+
+def _enrich_sql(cfg: CombineConfig, key: str | None, items: list[Part],
+                log_line: Callable[[str], None] = lambda m: None) -> str:
     base, others = items[0], items[1:]
     on = cfg.on or key
     if not on:
@@ -158,15 +188,26 @@ def _enrich_sql(cfg: CombineConfig, key: str | None, items: list[Part]) -> str:
                                    "or choose the columns to add")
             names.add(name)
             added.append(f"{qi(table)}.{qi(column)} AS {qi(name)}")
-        joins.append(f"LEFT JOIN {part.reader} AS {qi(table)} ON {qi(table)}.{qi(their)} = {qi('base')}.{qi(on)}")
+        reader, why = _narrowed(part, their, base, on)
+        if why:
+            log_line(why)
+        joins.append(f"LEFT JOIN {reader or part.reader} AS {qi(table)} "
+                     f"ON {qi(table)}.{qi(their)} = {qi('base')}.{qi(on)}")
     projection = ", ".join([f'{qi("base")}.*', *added])
     return f"(SELECT {projection} FROM {base.reader} AS {qi('base')} " + " ".join(joins) + ")"
 
 
-def build_sql(ref: ReferentialConfig, items: list[Part]) -> str:
-    """The SELECT producing the rows of a unified referential, transformation applied."""
+def build_sql(ref: ReferentialConfig, items: list[Part],
+              log_line: Callable[[str], None] = lambda m: None) -> str:
+    """The SELECT producing the rows of a unified referential, transformation applied.
+
+    `log_line`: where a choice the query makes on its own is written down — a reader that was narrowed is
+    the difference between a build of a few seconds and one that runs out of memory, so it belongs in the
+    run log rather than in nobody's notes.
+    """
     cfg = ref.combine or CombineConfig()
-    combined = _enrich_sql(cfg, ref.key, items) if cfg.mode == "enrich" else _union_sql(cfg, items)
+    combined = (_enrich_sql(cfg, ref.key, items, log_line) if cfg.mode == "enrich"
+                else _union_sql(cfg, items))
     if not ref.transform:
         return f"SELECT * FROM {combined}"
     groups = [[str(p.path)] for p in items]

@@ -1493,7 +1493,7 @@ def execute_run(
         if ref.is_combined:
             from .combine import build_sql
 
-            sql = build_sql(ref, combined)
+            sql = build_sql(ref, combined, run.log)
         elif ref.is_internal:
             sql = internal_sql(ref, all_files[0], sources[0]["records"])
         else:

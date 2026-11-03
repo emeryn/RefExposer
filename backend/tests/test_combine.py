@@ -1,4 +1,6 @@
 """Unified referentials: several referentials put together (union) or joined (enrichment)."""
+from dataclasses import replace
+
 from conftest import refresh
 from test_admin_referentials import wait_idle
 
@@ -87,6 +89,56 @@ def test_enrichment_adds_columns(env):
     r = env.post("/api/admin/referentials/preview", json={
         "source": {"type": "referential", "referentials": ["countries", "countries"]}})
     assert r.status_code == 422 and "twice" in r.json()["detail"]
+
+
+def test_a_big_enriching_side_is_read_through_the_keys_of_the_base(env):
+    """Enriching a small base from a big source must not hash the big source.
+
+    A LEFT JOIN hashes its right side, so enriching a thousand rows from sixty million hashes the sixty
+    million — several GB to produce a thousand rows, which is how a build runs out of memory. The reader of
+    such a side is narrowed to the keys of the base, which is exactly equivalent and streams instead of
+    loading. The decision reads the row count recorded for each source, so this test can state a big one
+    while keeping the data small enough to compare the two results line by line.
+    """
+    import duckdb
+
+    from app.combine import build_sql, parts
+
+    refresh(env, "countries")
+    _source(env, "owners", "Owners", OWNERS, key="code")
+    _create(env, {
+        "id": "countries-owned", "name": "Countries with their owner", "key": "code",
+        "source": {"type": "referential", "referentials": ["countries", "owners"]},
+        "combine": {"mode": "enrich", "on": "code", "columns": {"owners": ["owner"]}},
+    })
+    assert wait_idle(env, "countries-owned")["status"] == "success"
+
+    service = env.app_.state.service
+    ref = service.refs["countries-owned"]
+    items = parts(service.settings, service.refs, service.metas, ref)
+    base, other = items
+
+    # As published: both sides are small, so nothing is narrowed
+    lines: list[str] = []
+    plain = build_sql(ref, items, lines.append)
+    assert lines == [] and "IN (SELECT" not in plain
+
+    # Same data, but `owners` now says it holds sixty million rows
+    big = [base, replace(other, row_count=60_000_000)]
+    lines = []
+    narrowed = build_sql(ref, big, lines.append)
+    assert "IN (SELECT" in narrowed
+    assert len(lines) == 1 and "60,000,000 rows read through the 5 key(s) of countries" in lines[0]
+
+    # The point of the whole thing: the two queries answer the same, row for row
+    con = duckdb.connect()
+    assert con.execute(plain).fetchall() == con.execute(narrowed).fetchall()
+    assert len(con.execute(narrowed).fetchall()) == 5
+
+    # The other way round (a big base, a small side) is left alone: reading the base's keys would be the cost
+    lines = []
+    build_sql(ref, [replace(base, row_count=60_000_000), other], lines.append)
+    assert lines == []
 
 
 def test_combine_refusals(env):
