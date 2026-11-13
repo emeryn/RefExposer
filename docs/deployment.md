@@ -108,7 +108,7 @@ openssl s_client -connect refexposer.example.com:443 -groups X25519MLKEM768 </de
 
 ## Run with Podman (Quadlet, rootless)
 
-On a Linux server, RefExposer can run with **Podman without root**: the containers are started by your own account, as **systemd user services** written as [Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html) files. This replaces `docker compose`, and uses the published images (`docker.io/emeryn/refexposer-backend`, `docker.io/emeryn/refexposer-frontend`): there is nothing to build.
+On a Linux server, RefExposer can run with **Podman without root**: the containers are started by your own account, as **systemd user services** written as [Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html) files. This replaces `docker compose`, and uses the published images (`docker.io/skouedlabs/refexposer-backend`, `docker.io/skouedlabs/refexposer-frontend`): there is nothing to build.
 
 **Requirements**: Podman **5.0+** (`podman --version`: RHEL / Rocky / Alma 9.5+, Fedora 40+, Debian 13, Ubuntu 25.04+), and a dedicated account (here `refex`) with sub-UIDs (`grep refex /etc/subuid`; created by `useradd` on recent distributions).
 
@@ -222,7 +222,7 @@ Requires=refexposer-db.service
 After=refexposer-db.service
 
 [Container]
-Image=docker.io/emeryn/refexposer-backend:latest
+Image=docker.io/skouedlabs/refexposer-backend:latest
 ContainerName=refexposer-backend
 Network=refexposer.network
 NetworkAlias=backend
@@ -263,7 +263,7 @@ Requires=refexposer-backend.service
 After=refexposer-backend.service
 
 [Container]
-Image=docker.io/emeryn/refexposer-frontend:latest
+Image=docker.io/skouedlabs/refexposer-frontend:latest
 ContainerName=refexposer-frontend
 Network=refexposer.network
 # Loopback only: the nginx of the host is in front (see "Expose behind an nginx reverse proxy")

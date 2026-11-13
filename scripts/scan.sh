@@ -33,7 +33,7 @@ TRIVY_IMAGE=${TRIVY_IMAGE:-aquasec/trivy:0.76.0}
 NODE_IMAGE=${NODE_IMAGE:-node:22-alpine}
 PYTHON_IMAGE=${PYTHON_IMAGE:-python:3.12-slim}
 CACHE=${TRIVY_CACHE:-$REPO/dist/.trivy-cache}
-OURS="emeryn/refexposer-backend:latest emeryn/refexposer-frontend:latest"
+OURS="skouedlabs/refexposer-backend:latest skouedlabs/refexposer-frontend:latest"
 THIRD_PARTY=$(sed -n 's/^ *image: *\(postgres:[^ ]*\).*/\1/p' docker-compose.yml | head -1)
 FAILED=""
 

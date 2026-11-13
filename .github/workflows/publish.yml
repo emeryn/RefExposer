@@ -59,6 +59,8 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       # The username may be a variable or a secret depending on where it was put; the token is a secret
+      # The account signs in; the images live under the organisation (DOCKERHUB_NAMESPACE below), so the
+      # token needs write access to that organisation's repositories.
       - name: Sign in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -76,11 +78,13 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # The Docker Hub name is the one the compose file and the Quadlet units already expect. The
-          # ghcr.io one uses the repository owner as it is written: that works because `emeryn` is already
-          # lower case, and a registry refuses capitals — an owner with any would need lower-casing here.
+          # The Docker Hub name is the one the compose file and the Quadlet units already expect. It is
+          # the owning organisation, not the account that signed in above: set the DOCKERHUB_NAMESPACE
+          # variable to move the images elsewhere. The ghcr.io one uses the repository owner as it is
+          # written: that works because `skouedlabs` is already lower case, and a registry refuses
+          # capitals — an owner with any would need lower-casing here.
           images: |
-            ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}/refexposer-${{ matrix.name }}
+            ${{ vars.DOCKERHUB_NAMESPACE || 'skouedlabs' }}/refexposer-${{ matrix.name }}
             ghcr.io/${{ github.repository_owner }}/refexposer-${{ matrix.name }}
           tags: |
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
@@ -141,6 +145,7 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'skouedlabs' }}
         run: |
           sh scripts/dockerhub-description.sh backend
           sh scripts/dockerhub-description.sh frontend

@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for the report. If this is a **security** issue, please close this and use
-        [Report a vulnerability](https://github.com/emeryn/RefExposer/security/advisories/new) instead.
+        [Report a vulnerability](https://github.com/skouedlabs/refexposer/security/advisories/new) instead.
 
   - type: textarea
     id: what

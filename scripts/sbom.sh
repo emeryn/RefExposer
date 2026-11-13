@@ -16,7 +16,7 @@ REPO=$(pwd)
 OUT=${SBOM_OUT:-$REPO/dist/sbom}
 TRIVY_IMAGE=${TRIVY_IMAGE:-aquasec/trivy:0.76.0}
 CACHE=${TRIVY_CACHE:-$REPO/dist/.trivy-cache}
-IMAGES=${SBOM_IMAGES:-emeryn/refexposer-backend:latest emeryn/refexposer-frontend:latest}
+IMAGES=${SBOM_IMAGES:-skouedlabs/refexposer-backend:latest skouedlabs/refexposer-frontend:latest}
 
 mkdir -p "$OUT" "$CACHE"
 : > "$OUT/images.txt"

@@ -53,7 +53,7 @@ services:
         # Version a locally built image reports. Deliberately its own variable: REFEX_VERSION picks which
         # image tag to run and is read into the container environment, so it must not stamp a version too.
         REFEX_BUILD_VERSION: ${REFEX_BUILD_VERSION:-0.0.0+dev}
-    image: emeryn/refexposer-backend:${REFEX_VERSION:-latest}
+    image: skouedlabs/refexposer-backend:${REFEX_VERSION:-latest}
     user: "0:0"
     entrypoint:
       - sh
@@ -76,7 +76,7 @@ services:
 
   backend:
     build: *backend-build
-    image: emeryn/refexposer-backend:${REFEX_VERSION:-latest}
+    image: skouedlabs/refexposer-backend:${REFEX_VERSION:-latest}
     restart: unless-stopped
     <<: *hardening
     # Processors and memory of the backend (0: no limit). On a workstation, keep some for the host, e.g.
@@ -164,7 +164,7 @@ services:
         OS_UPDATE: ${OS_UPDATE:-1}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
         NPM_EXTRA_ARGS: ${NPM_EXTRA_ARGS:-}
-    image: emeryn/refexposer-frontend:${REFEX_VERSION:-latest}
+    image: skouedlabs/refexposer-frontend:${REFEX_VERSION:-latest}
     restart: unless-stopped
     <<: *hardening
     # nginx writes its temporary files (request bodies, proxy buffers) to /var/cache/nginx

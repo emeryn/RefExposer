@@ -297,7 +297,7 @@ Everything below is in this first published version.
   publish workflow calls the CI workflow as its gate, so the tests guarding a release are the same ones
   guarding a pull request (see [Development](docs/development.md)).
 - Each image is published to **Docker Hub and GitHub Packages from one build**, so both registries carry the
-  same digest: `emeryn/refexposer-*` and `ghcr.io/emeryn/refexposer-*`. The second needs no secret, only the
+  same digest: `skouedlabs/refexposer-*` and `ghcr.io/skouedlabs/refexposer-*`. The second needs no secret, only the
   `packages: write` permission of the run.
 
 ### Security
@@ -330,4 +330,4 @@ Everything below is in this first published version.
 - The scope of a watchdog travels HMAC-signed with every tool call, and `CurrentUser.level()` refuses anything
   outside it — a scheduled agent cannot drift onto another referential.
 
-[1.0.0]: https://github.com/emeryn/RefExposer/releases/tag/v1.0.0
+[1.0.0]: https://github.com/skouedlabs/refexposer/releases/tag/v1.0.0

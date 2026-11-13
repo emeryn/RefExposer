@@ -2,7 +2,7 @@
 
 # RefExposer
 
-[![CI](https://github.com/emeryn/RefExposer/actions/workflows/ci.yml/badge.svg)](https://github.com/emeryn/RefExposer/actions/workflows/ci.yml)
+[![CI](https://github.com/skouedlabs/refexposer/actions/workflows/ci.yml/badge.svg)](https://github.com/skouedlabs/refexposer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](backend/requirements.in)
 [![Node 22](https://img.shields.io/badge/node-22-blue.svg)](frontend/package.json)

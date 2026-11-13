@@ -11,8 +11,10 @@
 # know it is one half of a pair and where the other one is.
 #
 # Credentials, for the upload only (the same two the publish workflow uses):
-#   DOCKERHUB_USERNAME   the account that owns the images
-#   DOCKERHUB_TOKEN      a Docker Hub personal access token with write access
+#   DOCKERHUB_USERNAME    the account that signs in
+#   DOCKERHUB_TOKEN       a Docker Hub personal access token with write access
+#   DOCKERHUB_NAMESPACE   the organisation that owns the images (defaults to skouedlabs); only needed
+#                         when the signing-in account is not itself the owner
 #
 # Only curl is needed. The description is a property of the repository, not of a tag: uploading it replaces
 # whatever was there, so the workflow does it on a release and not on every dev build.
@@ -20,7 +22,10 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-REPO_URL=${REPO_URL:-https://github.com/emeryn/RefExposer}
+REPO_URL=${REPO_URL:-https://github.com/skouedlabs/refexposer}
+# The Docker Hub organisation that owns the images. It is not the account that signs in: a personal
+# account pushes to an organisation it belongs to, so the two are kept apart.
+DOCKERHUB_NAMESPACE=${DOCKERHUB_NAMESPACE:-skouedlabs}
 # The branch the links point at. `main` rather than the tag: this description is replaced by each release,
 # so it always describes the newest images, and its links should lead to the matching documentation.
 REF=${REF:-main}
@@ -59,14 +64,14 @@ trap 'rm -f "$OUT" "$OUT.short"' EXIT
 cat > "$OUT" <<EOF
 > This image is $ROLE.
 > It is one half of a pair and does not run on its own — it needs
-> \`${DOCKERHUB_USERNAME:-emeryn}/refexposer-$OTHER\` and a PostgreSQL database.
+> \`$DOCKERHUB_NAMESPACE/refexposer-$OTHER\` and a PostgreSQL database.
 > [**Source, documentation and issues on GitHub**]($REPO_URL)
 
 \`\`\`bash
 # Docker Hub
-docker pull ${DOCKERHUB_USERNAME:-emeryn}/refexposer-$IMAGE:latest
+docker pull $DOCKERHUB_NAMESPACE/refexposer-$IMAGE:latest
 # GitHub Packages — same build, same digest
-docker pull ghcr.io/emeryn/refexposer-$IMAGE:latest
+docker pull ghcr.io/skouedlabs/refexposer-$IMAGE:latest
 \`\`\`
 
 | | |
@@ -121,9 +126,9 @@ with open(sys.argv[1], encoding="utf-8") as f:
     print(json.dumps({"full_description": f.read(), "description": sys.argv[2]}))
 PY
 
-curl -fsS -X PATCH "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/refexposer-$IMAGE/" \
+curl -fsS -X PATCH "https://hub.docker.com/v2/repositories/$DOCKERHUB_NAMESPACE/refexposer-$IMAGE/" \
     -H "Authorization: JWT $TOKEN" \
     -H 'Content-Type: application/json' \
     --data-binary "@$OUT.short" > /dev/null
 
-echo "description of $DOCKERHUB_USERNAME/refexposer-$IMAGE updated ($(wc -c < "$OUT" | tr -d ' ') bytes)"
+echo "description of $DOCKERHUB_NAMESPACE/refexposer-$IMAGE updated ($(wc -c < "$OUT" | tr -d ' ') bytes)"

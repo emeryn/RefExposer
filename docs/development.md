@@ -44,9 +44,9 @@ Two branches, and the images follow them:
 
 Each image goes to **two registries from one build**, so both carry the same digest:
 
-- **Docker Hub** — `emeryn/refexposer-backend`, `emeryn/refexposer-frontend`, the names
+- **Docker Hub** — `skouedlabs/refexposer-backend`, `skouedlabs/refexposer-frontend`, the names
   [the deployment](deployment.md) already expects;
-- **GitHub Packages** — `ghcr.io/emeryn/refexposer-backend`, `ghcr.io/emeryn/refexposer-frontend`, next to
+- **GitHub Packages** — `ghcr.io/skouedlabs/refexposer-backend`, `ghcr.io/skouedlabs/refexposer-frontend`, next to
   the code. Nothing to configure: the run's own token pushes there, with `packages: write`.
 
 Either one can be pulled; they are the same images. A GitHub package is **private when Actions first creates
@@ -77,8 +77,11 @@ triggers on purpose: `publish.yml` owns that branch, and triggering in both woul
 concurrency group and cancel each other.
 
 Docker Hub needs `DOCKERHUB_USERNAME` (an Actions **variable**) and `DOCKERHUB_TOKEN` (an Actions **secret**,
-a Docker Hub token with *Read & Write*). The username is better as a variable than a secret: as a secret it is
-masked in the logs and every image name reads `***/refexposer-backend`. GitHub Packages needs nothing.
+a Docker Hub token with *Read & Write* on the `skouedlabs` organisation). The username is better as a variable
+than a secret: as a secret it is masked in the logs and every image name reads `***/refexposer-backend`.
+That account only **signs in** — the images are owned by the organisation, which is a separate name: it
+defaults to `skouedlabs` and is overridden by the `DOCKERHUB_NAMESPACE` Actions variable, so nothing has to
+change here to publish the same build somewhere else. GitHub Packages needs nothing.
 
 ### The Docker Hub page of each image
 
